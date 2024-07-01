@@ -1,0 +1,33 @@
+virt-customize -a ~/Downloads/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2 --root-password password:hello
+qemu-system-x86_64 -smp 2 -enable-kvm -m 2048 -drive file=~/Downloads/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
+
+taskset -c 0 hyperfine --shell=none --warmup=500 --runs=1000 'gcc --version'
+
+kata not supported with podman 
+
+
+# had to get the full to get runc. using containerd not from dnf because outside toolbox.
+wget https://github.com/containerd/nerdctl/releases/download/v1.7.6/nerdctl-full-1.7.6-linux-amd64.tar.gz
+wget https://github.com/containerd/containerd/releases/download/v1.7.18/containerd-1.7.18-linux-amd64.tar.gz
+# tar -xf ...
+
+from inside toolbox wasn't working, was getting
+FATA[0009] failed to extract layer sha256:d3e8d42f967c9c00049f90237e1bf4a460d18c28895292d2bb4a0702f661a745: failed to mount /var/lib/containerd/tmpmounts/containerd-mount2679852185: invalid argument: unknown 
+
+outside toolbox
+sudo bin/containerd
+→ sudo ln -s $(readlink -f bin/runc) /usr/local/bin/runc
+sudo ./nerdctl run --rm --network=none gcc:14.1.0 gcc --version
+
+→ sudo ./nerdctl run --runtime io.containerd.kata.v2 --rm --network=none gcc:14.1.0 gcc --version
+
+/usr/share/kata-containers/defaults/configuration.toml: file /var/cache/kata-containers/vmlinuz.container does not exist
+
+this is saying the kernel isn't there
+
+wget https://github.com/kata-containers/kata-containers/releases/download/3.6.0/kata-static-3.6.0-amd64.tar.xz
+tar -xf -C kata-static-3.6.0-amd64
+→ sudo ln -s $(readlink -f kata-static-3.6.0-amd64/kata/share/kata-containers/kata-containers-initrd.img) /var/cache/kata-containers/kata-containers-initrd.img
+→ sudo ln -s $(readlink -f kata-static-3.6.0-amd64/kata/share/kata-containers/vmlinuz.container) /var/cache/kata-containers/vmlinuz.container
+
+
