@@ -30,4 +30,48 @@ tar -xf -C kata-static-3.6.0-amd64
 → sudo ln -s $(readlink -f kata-static-3.6.0-amd64/kata/share/kata-containers/kata-containers-initrd.img) /var/cache/kata-containers/kata-containers-initrd.img
 → sudo ln -s $(readlink -f kata-static-3.6.0-amd64/kata/share/kata-containers/vmlinuz.container) /var/cache/kata-containers/vmlinuz.container
 
+get vmlinuz and initramfs from image 
+→ virt-get-kernel -a ~/Downloads/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2 
+vmlinuz is a compressed version of the whole linux kernel
+initramfs 
 
+https://mergeboard.com/blog/2-qemu-microvm-docker/
+https://gist.github.com/mikaelhg/7a67901affe56bdf22eb398606945a23
+https://github.com/qemu/qemu/blob/master/docs/system/i386/microvm.rst
+https://documentation.suse.com/sles/12-SP5/html/SLES-all/cha-qemu-running.html
+
+/dev/sd* is scsi
+/dev/hd* is hard drive
+/dev/vd* is virtualized
+
+blkid in the rescue shell works
+cat /proc/mounts
+shows that:
+/dev/vda1 label=p.legacy
+/dev/vda2 label=dfi
+/dev/vda3 label=boot type=ext4
+/dev/vda4 label=fedora type=btrfs
+trying with -append "root=/dev/vda{1,2,3,4}" didn't work, 3 and 4 didn't blow up with file type errors but not /sysroot or something
+
+→ virt-cat -a ~/Downloads/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2 /etc/default/grub
+GRUB_CMDLINE_LINUX_DEFAULT="no_timer_check net.ifnames=0 console=tty1 console=ttyS0,115200n8 rootflags=subvol=root"
+
+with /dev/vda4
+/sysroot has /root /home and /var
+btrfs sub list /sysroot shows these are subvolumes
+
+look in bootbasic2.sh for working examples
+
+EDITOR=vi virt-edit fedora-cloud-base.raw /usr/local/bin/boot.sh
+
+→ virt-cat fedora-cloud-base.raw /etc/systemd/system/myboot.service
+[Unit]
+Description=My boot service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/boot.sh
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
