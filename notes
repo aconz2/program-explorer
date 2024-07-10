@@ -75,3 +75,17 @@ StandardOutput=journal+console
 
 [Install]
 WantedBy=multi-user.target
+
+zcat kata-alpine-3.18.initrd | cpio -t
+
+rdinit=/bin/bash
+
+https://github.com/jqueuniet/docker-to-initramfs/blob/master/context/init
+
+inside podman run --rm -it alpine:3.20.1
+apk add linux-lts
+mkinitfs --help
+cat /etc/mkinitfs/mkinitfs.conf
+cat /usr/share/mkinitfs/initramfs-init
+
+# https://wiki.gentoo.org/wiki/Custom_Initramfs
