@@ -6,9 +6,11 @@ qemu-system-x86_64 \
     -M microvm,pit=off,pic=off,isa-serial=off,rtc=off \
     -nodefaults -no-user-config -nographic \
     -enable-kvm \
-    -cpu host -smp 4 -m 1G \
-    -kernel alpine/vmlinuz-lts -append "console=hvc0" \
+    -cpu host -smp 1 -m 1G \
+    -kernel alpine/vmlinux-lts -append "earlyprintk=hvc0 console=hvc0 root=/dev/vda2 ext4" \
     -initrd alpine/initramfs-lts.nogz \
+    -device virtio-blk-device,drive=test \
+    -drive id=test,file=alpine/nocloud_alpine-3.20.1.raw,format=raw,if=none \
     -chardev stdio,id=virtiocon0 \
     -device virtio-serial-device \
     -device virtconsole,chardev=virtiocon0

@@ -88,4 +88,10 @@ mkinitfs --help
 cat /etc/mkinitfs/mkinitfs.conf
 cat /usr/share/mkinitfs/initramfs-init
 
+wget https://raw.githubusercontent.com/torvalds/linux/master/scripts/extract-ikconfig
+wget https://raw.githubusercontent.com/torvalds/linux/master/scripts/extract-vmlinux
+bash extract-ikconfig ~/Downloads/kata-static-3.6.0-amd64/kata/share/kata-containers/vmlinux-6.1.62-132
+bash extract-vmlinux alpine/vmlinuz-lts > alpine/vmlinux-lts
 # https://wiki.gentoo.org/wiki/Custom_Initramfs
+
+virt-df alpine/nocloud_alpine-3.20.1.raw
