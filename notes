@@ -95,3 +95,26 @@ bash extract-vmlinux alpine/vmlinuz-lts > alpine/vmlinux-lts
 # https://wiki.gentoo.org/wiki/Custom_Initramfs
 
 virt-df alpine/nocloud_alpine-3.20.1.raw
+
+mkdir iso
+sudo mount -t auto -o loop alpine-virt-3.20.1-x86_64.iso iso
+less iso/boot/config-6.6.34-1-virt
+
+→ git clone --single-branch --branch v6.6 --depth 1 https://github.com/torvalds/linux
+$ wget https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/main/resources/linux-config-x86_64
+cp linux-config-x86_64 .config
+make -j vmlinux
+
+wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
+qemu-img convert debian-12-nocloud-amd64.qcow2 debian-12-nocloud-amd64.raw  # 2 GB!
+wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v40.0/cloud-hypervisor-static
+chmod +x cloud-hypervisor-static
+
+wget https://github.com/wagoodman/dive/releases/download/v0.12.0/dive_0.12.0_linux_amd64.tar.gz
+dive --source podman distroless/static-debian12
+make -j vmlinux
+
+okay can use bash makecpioinit.sh to create an initramfs with busybox
+using #!/bin/busybox as the shebang line ran busybox as the init, not my shell script
+so use #!/bin/busybox sh
+

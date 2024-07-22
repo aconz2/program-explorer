@@ -1,0 +1,8 @@
+#!/bin/busybox sh
+
+export PATH=/bin
+
+busybox ls -l /
+
+echo 'hi'
+busybox poweroff -f
