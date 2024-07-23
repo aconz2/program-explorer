@@ -4,7 +4,7 @@ k=/home/andrew/Repos/linux/vmlinux
 ./cloud-hypervisor-static \
     --kernel $k \
     --initramfs init1.initramfs \
-    --cmdline "console=hvc0" \
+    --cmdline "console=hvc0 reboot=t" \
     --cpus boot=1 \
-    --memory size=1024M
-
+    --memory size=1024M \
+    --vsock cid=3,socket=/tmp/ch.sock

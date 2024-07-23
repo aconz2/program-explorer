@@ -4,9 +4,16 @@
 
 # A simple initramfs
 dir /dev 0755 0 0
-nod /dev/console 0600 0 0 c 5 1
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+dir /sys/fs 0755 0 0
+dir /sys/fs/cgroup 0755 0 0
 dir /root 0700 0 0
 dir /sbin 0755 0 0
 dir /bin 0755 0 0
+
+nod /dev/console 0600 0 0 c 5 1
+
 file /bin/busybox busybox 0755 0 0
 file /init myinit 0755 0 0
+file /bin/crun crun-1.15-linux-amd64 0755 0 0

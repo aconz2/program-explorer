@@ -2,7 +2,20 @@
 
 export PATH=/bin
 
+# otherwise we get a kernel panic and the vmm process hangs
+trap "busybox poweroff -f" EXIT
+
+# crun needs /proc/self/exe for stuff
+busybox mount -t proc proc /proc
+busybox mount -t tmpfs cgroup_root /sys/fs/cgroup
+
+busybox mount
 busybox ls -l /
+busybox ls -l /dev
 
 echo 'hi'
-busybox poweroff -f
+
+crun spec
+
+busybox cat config.json
+

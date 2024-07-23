@@ -118,3 +118,10 @@ okay can use bash makecpioinit.sh to create an initramfs with busybox
 using #!/bin/busybox as the shebang line ran busybox as the init, not my shell script
 so use #!/bin/busybox sh
 
+wget https://www.busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
+
+vsock uses a context identifier cid and a port. cid is assigned at vm start time and is unique per vm.
+from inside the guest, connecting to the host is always with cid=2.
+we can have many connections, one per port, and per cid / sock
+
+todo could get cloud hypervisor to catch kernel panics with --pvpanic and --event-monitor but not sure this actually exits, I think the process still needs to exit/kill
