@@ -145,3 +145,4 @@ was because needed to use mount -t cgroup2
 
 was getting pivot_root: invalid argument
 # https://github.com/containers/crun/issues/56 pivot_root appears to not work with tmpfs apparently is unsafe?
+maybe workaround https://github.com/containers/bubblewrap/issues/592

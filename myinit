@@ -7,7 +7,6 @@ trap "busybox poweroff -f" EXIT
 
 # crun needs /proc/self/exe for stuff, cgroup_root for containers, and devtmpfs for mounting our sqfs
 busybox mount -t proc none /proc
-# busybox mount -t sysfs none /sys
 busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
 
@@ -32,5 +31,7 @@ busybox ls -l /mnt/bundle/
 # busybox cat /proc/self/cgroup
 
 # busybox cat /proc/cgroups
-crun run --no-pivot --bundle /mnt/bundle containerid-1234
+# crun run --no-pivot --bundle /mnt/bundle containerid-1234
+
+busybox cat /proc/self/mounts
 
