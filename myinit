@@ -5,17 +5,32 @@ export PATH=/bin
 # otherwise we get a kernel panic and the vmm process hangs
 trap "busybox poweroff -f" EXIT
 
-# crun needs /proc/self/exe for stuff
-busybox mount -t proc proc /proc
-busybox mount -t tmpfs cgroup_root /sys/fs/cgroup
-
-busybox mount
-busybox ls -l /
-busybox ls -l /dev
+# crun needs /proc/self/exe for stuff, cgroup_root for containers, and devtmpfs for mounting our sqfs
+busybox mount -t proc none /proc
+# busybox mount -t sysfs none /sys
+busybox mount -t cgroup2 none /sys/fs/cgroup
+busybox mount -t devtmpfs none /dev
 
 echo 'hi'
 
-crun spec
+busybox mount
+# busybox ls -l /
+# busybox ls -l /dev
+# busybox ls -l /proc
 
-busybox cat config.json
+
+# busybox modprobe squashfs  # expects /lib/modules to have things
+busybox blkid
+busybox mkdir -p /mnt/bundle/rootfs
+busybox mount -t squashfs -o loop /dev/vda /mnt/bundle/rootfs
+
+crun spec --file /mnt/bundle/config.json
+busybox ls -l /mnt/bundle/
+# busybox cat /mnt/bundle/config.json
+# busybox ls -l /proc/self/
+# echo 'my cgroup is'
+# busybox cat /proc/self/cgroup
+
+# busybox cat /proc/cgroups
+crun run --no-pivot --bundle /mnt/bundle containerid-1234
 

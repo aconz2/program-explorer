@@ -2,7 +2,6 @@
 # make with ~/Repos/linux/usr/gen_init_cpio initattempt1 > init1.initramfs
 # cpio -t < init1.initramfs
 
-# A simple initramfs
 dir /dev 0755 0 0
 dir /proc 0755 0 0
 dir /sys 0755 0 0
@@ -11,6 +10,7 @@ dir /sys/fs/cgroup 0755 0 0
 dir /root 0700 0 0
 dir /sbin 0755 0 0
 dir /bin 0755 0 0
+dir /tmp 0755 0 0
 
 nod /dev/console 0600 0 0 c 5 1
 
