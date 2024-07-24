@@ -17,24 +17,23 @@ busybox mount
 # busybox ls -l /dev
 # busybox ls -l /proc
 
-# this doesn't exist without udev
-# busybox ls -l /dev/disk
 # passing in --disk...id=foo doesn't show up on blkid though
 
-# busybox modprobe squashfs  # expects /lib/modules to have things
 busybox blkid
-# busybox mkdir -p /mnt/bundle/rootfs
-# busybox mount -t squashfs -o loop /dev/disk/by-id/container-bundle-squashfs /mnt/bundle/rootfs
-# 
+busybox mkdir -p /mnt/bundle/rootfs
+busybox mount -t squashfs -o loop /dev/vda /mnt/bundle/rootfs
+
 # crun spec --file /mnt/bundle/config.json
-# busybox ls -l /mnt/bundle/
-# # busybox cat /mnt/bundle/config.json
-# # busybox ls -l /proc/self/
-# # echo 'my cgroup is'
-# # busybox cat /proc/self/cgroup
-# 
-# # busybox cat /proc/cgroups
-# # crun run --no-pivot --bundle /mnt/bundle containerid-1234
-# 
+busybox mv /config.json /mnt/bundle/config.json
+busybox ls -l /mnt/bundle/
+
+# busybox cat /mnt/bundle/config.json
+# busybox ls -l /proc/self/
+# echo 'my cgroup is'
+# busybox cat /proc/self/cgroup
+
+# busybox cat /proc/cgroups
+crun run --no-pivot --bundle /mnt/bundle containerid-1234
+
 # busybox cat /proc/self/mounts
-# 
+

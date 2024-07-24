@@ -17,3 +17,4 @@ nod /dev/console 0600 0 0 c 5 1
 file /bin/busybox busybox 0755 0 0
 file /init myinit 0755 0 0
 file /bin/crun crun-1.15-linux-amd64 0755 0 0
+file /config.json config.json 0444 0 0

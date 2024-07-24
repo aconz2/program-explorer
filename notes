@@ -127,13 +127,16 @@ we can have many connections, one per port, and per cid / sock
 todo could get cloud hypervisor to catch kernel panics with --pvpanic and --event-monitor but not sure this actually exits, I think the process still needs to exit/kill
 
 mkdir /tmp/gcc
-id=$(podman create docker.io/library/gcc/:14.1.0)
+id=$(podman create docker.io/library/gcc:14.1.0)
 podman export "$id" | tar -xC /tmp/gcc
+mksquashfs /tmp/gcc gcc-squashfs.sqfs
 podman rm "$id"
-# can also use sqfstar
-→ mksquashfs /tmp/gcc gcc-squashfs.sqfs
-→ sudo mount -t squashfs -o loop gcc-squashfs.sqfs /tmp/gcc-mnt
-# can also use mkfs
+
+id=$(podman create docker.io/library/gcc:14.1.0)
+podman export "$id" | sqfstar gcc-14.sqfs
+podman rm "$id"
+
+sudo mount -t squashfs -o loop gcc-squashfs.sqfs /tmp/gcc-mnt
 mkfs.ext4 -d /tmp/gcc gcc-ext4.img 2g
 
 was getting mount: mounting /dev/vda on /mnt/bundle/rootfs failed: No such device
