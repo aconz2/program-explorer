@@ -33,7 +33,7 @@ busybox ls -l /mnt/bundle/
 # busybox cat /proc/self/cgroup
 
 # busybox cat /proc/cgroups
-crun run --no-pivot --bundle /mnt/bundle containerid-1234
 
-# busybox cat /proc/self/mounts
-
+# https://github.com/containers/bubblewrap/issues/592#issuecomment-2243087731
+echo 'running init2'
+busybox unshare --mount /bin/init2
