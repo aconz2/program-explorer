@@ -4,5 +4,4 @@ busybox mkdir /abc
 busybox mount --rbind / /abc
 cd /abc
 busybox mount --move . /
-busybox chroot . /bin/init3
-echo 'done with init2'
+exec busybox chroot . /bin/init3
