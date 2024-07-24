@@ -133,6 +133,8 @@ podman rm "$id"
 # can also use sqfstar
 → mksquashfs /tmp/gcc gcc-squashfs.sqfs
 → sudo mount -t squashfs -o loop gcc-squashfs.sqfs /tmp/gcc-mnt
+# can also use mkfs
+mkfs.ext4 -d /tmp/gcc gcc-ext4.img 2g
 
 was getting mount: mounting /dev/vda on /mnt/bundle/rootfs failed: No such device
 updated linux config with CONFIG_MISC_FILESYSTEMS=y
