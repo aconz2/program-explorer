@@ -148,3 +148,5 @@ was because needed to use mount -t cgroup2
 was getting pivot_root: invalid argument
 # https://github.com/containers/crun/issues/56 pivot_root appears to not work with tmpfs apparently is unsafe?
 maybe workaround https://github.com/containers/bubblewrap/issues/592
+
+okay I could make an ext4 image from the cpio, but cloud hypervisor doesn't support --disk multiple times, so we couldn't mount an ext4 rootfs and a container bundle squashfs anyways!
