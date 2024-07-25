@@ -156,3 +156,10 @@ https://news.ycombinator.com/item?id=23167383
 
 okay I could make an ext4 image from the cpio, but cloud hypervisor doesn't support --disk multiple times, so we couldn't mount an ext4 rootfs and a container bundle squashfs anyways!
 
+okay so it looks like kata switches off pivot_root when using the agent as init, as seen in sandbox, it sends that config off to crio or runc so we don't actually see that codepath.
+https://kernel.org/doc/Documentation/filesystems/ramfs-rootfs-initramfs.txt says
+both initrd and initramfs are cpio so we can't quite tell just from file
+busybox mount shows we have rootfs on / both before and after the magic switcheroo configuration
+crun does pivot_root . .
+lets verify that with strace
+building strace static needed LDFLAGS='-static' and dnf install glibc-static

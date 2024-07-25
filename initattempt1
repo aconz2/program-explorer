@@ -15,6 +15,7 @@ dir /tmp 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 
 file /bin/busybox busybox 0755 0 0
+file /bin/strace strace 0755 0 0
 file /init myinit 0755 0 0
 file /bin/init2 init2 0755 0 0
 file /bin/init3 init3 0755 0 0

@@ -13,6 +13,7 @@ busybox mount -t devtmpfs none /dev
 echo 'hi'
 
 busybox mount
+# busybox cat /proc/self/mountstats
 # busybox ls -l /
 # busybox ls -l /dev
 # busybox ls -l /proc
