@@ -35,6 +35,11 @@ busybox ls -l /mnt/bundle/
 
 # busybox cat /proc/cgroups
 
-# https://github.com/containers/bubblewrap/issues/592#issuecomment-2243087731
-echo 'running init2'
-busybox unshare --mount /bin/init2
+busybox pwd
+busybox pivot_root . .
+
+# echo 'running init2'
+# busybox unshare --mount /bin/init2
+
+# strace -o strace.out -f /bin/init3
+# busybox cat strace.out

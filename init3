@@ -3,7 +3,10 @@
 echo 'AFTER MOUNT STUFF'
 busybox mount
 
-# okay this doesn't work EBUSY says we're on the current root mount
+# okay busybox pivot_root . . from / doesn't work EBUSY says we're on the current root mount
+# busybox pivot_root . .
+
+# but this works
 cd /mnt/bundle/rootfs
 busybox pivot_root . .
 echo $?
