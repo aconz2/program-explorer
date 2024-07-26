@@ -2,6 +2,16 @@
 
 busybox mkdir /abc
 busybox mount --rbind / /abc
+
+echo '---------------------mount --rbind / /abc --------------------------'
+busybox cat /proc/self/mountinfo
+echo '----------------------------------------------------------'
+
 cd /abc
 busybox mount --move . /
+
+echo '---------------------mount --move . / --------------------------'
+busybox cat /proc/self/mountinfo
+echo '----------------------------------------------------------'
+
 exec busybox chroot . /bin/init3

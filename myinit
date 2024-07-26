@@ -35,11 +35,18 @@ busybox ls -l /mnt/bundle/
 
 # busybox cat /proc/cgroups
 
-busybox pwd
-busybox pivot_root . .
+# errors b/c new_mnt is MNT_LOCKED whether we are in / or /abc
+# busybox mkdir /abc
+# cd /abc
+# busybox pwd
+# busybox pivot_root . .
 
-# echo 'running init2'
-# busybox unshare --mount /bin/init2
+echo 'running init2'
+#busybox unshare --mount /bin/init2
+echo '---------------------mountinfo before --------------------------'
+busybox cat /proc/self/mountinfo
+echo '-----------------------------------------------'
+init2
 
 # strace -o strace.out -f /bin/init3
 # busybox cat strace.out

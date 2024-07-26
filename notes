@@ -163,3 +163,23 @@ busybox mount shows we have rootfs on / both before and after the magic switcher
 crun does pivot_root . .
 lets verify that with strace
 building strace static needed LDFLAGS='-static' and dnf install glibc-static
+
+got gdb server running with qemu by using -gdb tcp::1234 (two fing colons was getting no error about it)
+add -device pvpanic-pci so that it exits on shutdown
+use -S so it pauses at startup
+can't use pvpanic with microvm, but thats okay
+
+connect with lldb -o 'gdb-remote localhost:1234' ~/Repos/linux/vmlinux
+search for symbols with
+image lookup -r -n '.*pivot_root.*'
+break set -r '.*pivot_root.*'
+then 'c' to continue
+but our breakpoint isn't being hit! b/c its not being set error: 34 sending the breakpoint request
+
+building kernel with debug info CONFIG_DEBUG_INFO=y CONFIG_DEBUG_INFO_SPLIT=y
+this produces .dwo files spread around the dir
+use hardware breakpoints and disable kaslr
+the symbol we're actually hitting is __x64_sys_pivot_root
+
+okay so I think a bare pivot_root at / of pivot_root . . fails because new_mnt->mnt_flags has MNT_LOCKED
+we don't seem to actually need an unshare

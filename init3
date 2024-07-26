@@ -1,10 +1,13 @@
 #!/bin/busybox sh
 
-echo 'AFTER MOUNT STUFF'
-busybox mount
+# busybox mount
 
 # okay busybox pivot_root . . from / doesn't work EBUSY says we're on the current root mount
 # busybox pivot_root . .
+
+echo '---------------------chroot . (/abc) --------------------------'
+busybox cat /proc/self/mountinfo
+echo '----------------------------------------------------------'
 
 # but this works
 cd /mnt/bundle/rootfs
@@ -13,3 +16,5 @@ echo $?
 
 # strace -f -o strace.out crun run --bundle /mnt/bundle containerid-1234
 # busybox cat strace.out
+
+# crun run --bundle /mnt/bundle containerid-1234
