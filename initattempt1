@@ -5,9 +5,6 @@
 dir /bin 0755 0 0
 dir /dev 0755 0 0
 dir /proc 0755 0 0
-dir /root 0700 0 0
-dir /sbin 0755 0 0
-dir /tmp 0755 0 0
 dir /abc 0755 0 0
 
 dir /sys 0755 0 0

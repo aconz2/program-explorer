@@ -3,14 +3,14 @@
 busybox mount --rbind / /abc
 
 echo '---------------------mount --rbind / /abc -------------------------------'
-busybox cat /proc/self/mountinfo
+busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
 echo '-------------------------------------------------------------------------'
 
 cd /abc
 busybox mount --move . /
 
 echo '----------------cd /abc && mount --move . / -----------------------------'
-busybox cat /proc/self/mountinfo
+busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
 echo '-------------------------------------------------------------------------'
 
 exec busybox chroot . /bin/init3

@@ -1,20 +1,7 @@
 #!/bin/busybox sh
 
-# busybox mount
-
-# okay busybox pivot_root . . from / doesn't work EBUSY says we're on the current root mount
-# busybox pivot_root . .
-
 echo '---------------------chroot . (/abc) ------------------------------------'
-busybox cat /proc/self/mountinfo
+busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
 echo '-------------------------------------------------------------------------'
-
-# but this works
-# cd /run/bundle/rootfs
-# busybox pivot_root . .
-# echo $?
-
-# strace -f -o strace.out crun run --bundle /run/bundle containerid-1234
-# busybox cat strace.out
 
 crun run --bundle /run/bundle containerid-1234
