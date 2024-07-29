@@ -5,16 +5,16 @@
 # okay busybox pivot_root . . from / doesn't work EBUSY says we're on the current root mount
 # busybox pivot_root . .
 
-echo '---------------------chroot . (/abc) --------------------------'
+echo '---------------------chroot . (/abc) ------------------------------------'
 busybox cat /proc/self/mountinfo
-echo '----------------------------------------------------------'
+echo '-------------------------------------------------------------------------'
 
 # but this works
-cd /mnt/bundle/rootfs
-busybox pivot_root . .
-echo $?
+# cd /run/bundle/rootfs
+# busybox pivot_root . .
+# echo $?
 
-# strace -f -o strace.out crun run --bundle /mnt/bundle containerid-1234
+# strace -f -o strace.out crun run --bundle /run/bundle containerid-1234
 # busybox cat strace.out
 
-# crun run --bundle /mnt/bundle containerid-1234
+crun run --bundle /run/bundle containerid-1234

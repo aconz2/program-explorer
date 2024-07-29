@@ -10,7 +10,7 @@ qemu-system-x86_64 \
     -gdb tcp::1234 \
     -enable-kvm \
     -cpu host -smp 1 -m 1G \
-    -kernel $k -append "console=hvc0 nokaslr" \
+    -kernel $k -append "console=hvc0" \
     -device virtio-blk-device,drive=test \
     -drive id=test,file=gcc-squashfs.sqfs,read-only=on,format=raw,if=none \
     -initrd init1.initramfs \

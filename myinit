@@ -13,7 +13,7 @@ busybox mount -t devtmpfs none /dev
 echo 'hi'
 
 busybox mount
-# busybox cat /proc/self/mountstats
+busybox cat /proc/self/mountinfo
 # busybox ls -l /
 # busybox ls -l /dev
 # busybox ls -l /proc
@@ -21,14 +21,13 @@ busybox mount
 # passing in --disk...id=foo doesn't show up on blkid though
 
 busybox blkid
-busybox mkdir -p /mnt/bundle/rootfs
-busybox mount -t squashfs -o loop /dev/vda /mnt/bundle/rootfs
+busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 
-# crun spec --file /mnt/bundle/config.json
-busybox mv /config.json /mnt/bundle/config.json
-busybox ls -l /mnt/bundle/
+# crun spec --file /run/bundle/config.json
+# busybox mv /config.json /run/bundle/config.json
+busybox ls -l /run/bundle/
 
-# busybox cat /mnt/bundle/config.json
+# busybox cat /run/bundle/config.json
 # busybox ls -l /proc/self/
 # echo 'my cgroup is'
 # busybox cat /proc/self/cgroup
@@ -42,11 +41,16 @@ busybox ls -l /mnt/bundle/
 # busybox pivot_root . .
 
 echo 'running init2'
-#busybox unshare --mount /bin/init2
-echo '---------------------mountinfo before --------------------------'
+echo '---------------------mountinfo before -----------------------------------'
 busybox cat /proc/self/mountinfo
-echo '-----------------------------------------------'
-init2
+echo '-------------------------------------------------------------------------'
+busybox unshare --mount /bin/init2
+
+# busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
+
+echo '---------------------mountinfo init1 after ---------------------------'
+busybox cat /proc/self/mountinfo
+echo '----------------------------------------------------------------------'
 
 # strace -o strace.out -f /bin/init3
 # busybox cat strace.out
