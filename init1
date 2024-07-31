@@ -41,11 +41,11 @@ busybox ls -l /run/bundle/
 # busybox pwd
 # busybox pivot_root . .
 
-echo 'running init2'
-echo '---------------------mountinfo before -----------------------------------'
-busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
-echo '-------------------------------------------------------------------------'
-busybox unshare --mount /bin/init2
+# echo 'running init2'
+# echo '---------------------mountinfo before -----------------------------------'
+# busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
+# echo '-------------------------------------------------------------------------'
+# busybox unshare --mount /bin/init2
 
 # busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
 
@@ -55,5 +55,5 @@ echo '----------------------------------------------------------------------'
 
 # busybox sh
 
-# strace -o strace.out -f /bin/init3
-# busybox cat strace.out
+strace -o strace.out -f /bin/init3
+busybox cat strace.out

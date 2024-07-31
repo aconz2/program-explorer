@@ -183,3 +183,7 @@ the symbol we're actually hitting is __x64_sys_pivot_root
 
 okay so I think a bare pivot_root at / of pivot_root . . fails because new_mnt->mnt_flags has MNT_LOCKED
 we don't seem to actually need an unshare
+
+/proc/<pid|self>/mountinfo
+https://www.kernel.org/doc/Documentation/filesystems/proc.txt
+
