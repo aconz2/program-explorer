@@ -1,7 +1,3 @@
 #!/bin/busybox sh
 
-echo '---------------------chroot . (/abc) ------------------------------------'
-busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
-echo '-------------------------------------------------------------------------'
-
 crun run --bundle /run/bundle containerid-1234

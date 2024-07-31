@@ -9,51 +9,8 @@ trap "busybox poweroff -f" EXIT
 busybox mount -t proc none /proc
 busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
-
-# read -t1 foo
-# echo $foo
-
-busybox mount
-busybox cat /proc/self/mountinfo
-# busybox ls -l /
-# busybox ls -l /dev
-# busybox ls -l /proc
-
-# passing in --disk...id=foo doesn't show up on blkid though
-
-busybox blkid
 busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 
-# crun spec --file /run/bundle/config.json
-# busybox mv /config.json /run/bundle/config.json
-busybox ls -l /run/bundle/
-
-# busybox cat /run/bundle/config.json
-# busybox ls -l /proc/self/
-# echo 'my cgroup is'
-# busybox cat /proc/self/cgroup
-
-# busybox cat /proc/cgroups
-
-# errors b/c new_mnt is MNT_LOCKED whether we are in / or /abc
-# busybox mkdir /abc
-# cd /abc
-# busybox pwd
-# busybox pivot_root . .
-
-# echo 'running init2'
-# echo '---------------------mountinfo before -----------------------------------'
-# busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
-# echo '-------------------------------------------------------------------------'
-# busybox unshare --mount /bin/init2
 
 # busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
-
-echo '---------------------mountinfo init1 after ---------------------------'
-busybox awk -e '{printf("%2d %2d %6s %3s %-25s %-10s\n", $1, $2, $3, $4, $5, $8);}' /proc/self/mountinfo
-echo '----------------------------------------------------------------------'
-
-# busybox sh
-
-strace -o strace.out -f /bin/init3
-busybox cat strace.out
+busybox unshare --mount /bin/init2

@@ -1,4 +1,4 @@
-~/Repos/linux/usr/gen_init_cpio initattempt1 > init1.initramfs
+~/Repos/linux/usr/gen_init_cpio initramfs.file > initramfs
 
 # size=$(stat --format='%s' init1.initramfs)
 # size=$(($size / 1024 / 1024 + 10))

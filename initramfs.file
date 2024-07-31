@@ -19,8 +19,10 @@ nod /dev/console 0600 0 0 c 5 1
 
 file /bin/busybox busybox 0555 0 0
 file /bin/strace strace 0555 0 0
-file /init myinit 0555 0 0
+
+file /init      init1 0555 0 0
 file /bin/init2 init2 0555 0 0
 file /bin/init3 init3 0555 0 0
+
 file /bin/crun crun-1.15-linux-amd64 0555 0 0
 file /run/bundle/config.json config.json 0444 0 0
