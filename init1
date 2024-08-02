@@ -11,7 +11,6 @@ busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
 busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 
-
 # busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
 # busybox unshare --mount /bin/init2
 
