@@ -191,3 +191,6 @@ for getting crun to build statically:
 dnf install libseccomp-static libcap-static glibc-static
 CFLAGS='-static -Wl,-static' ./configure --disable-systemd --enable-embedded-yajl && make --trace
 
+
+okay getting seccomp violation --seccomp log and syscall=72 by looking in journalctl
+this is fcntl and no idea why, shows for vmm,vcpu0,__console,__rng like all the things
