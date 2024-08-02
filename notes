@@ -187,3 +187,7 @@ we don't seem to actually need an unshare
 /proc/<pid|self>/mountinfo
 https://www.kernel.org/doc/Documentation/filesystems/proc.txt
 
+for getting crun to build statically:
+dnf install libseccomp-static libcap-static glibc-static
+CFLAGS='-static -Wl,-static' ./configure --disable-systemd --enable-embedded-yajl && make --trace
+

@@ -15,5 +15,6 @@ busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 # busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
 # busybox unshare --mount /bin/init2
 
-#pivot_rootfs /abc /bin/init3
-pivot_rootfs /abc crun run --bundle /run/bundle containerid-1234
+# pivot_rootfs /abc /bin/init3
+# pivot_rootfs /abc crun run --bundle /run/bundle containerid-1234
+crun run --parent-rootfs /abc --bundle /run/bundle containerid-1234
