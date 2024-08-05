@@ -3,6 +3,7 @@
 # cpio -t < init1.initramfs
 
 dir /bin 0755 0 0
+dir /input 0755 0 0
 dir /dev 0755 0 0
 dir /proc 0755 0 0
 dir /abc 0755 0 0
@@ -25,8 +26,9 @@ file /init      init1 0555 0 0
 # file /bin/init2 init2 0555 0 0
 # file /bin/init3 init3 0555 0 0
 
+file /bin/vsockhello vsockhello 0555 0 0
 file /bin/pivot_rootfs pivot_rootfs 0555 0 0
-#file /bin/strace strace 0555 0 0
-# file /bin/crun crun-1.15-linux-amd64 0555 0 0
-file /bin/crun /home/andrew/Repos/crun/crun 0555 0 0
+file /bin/strace strace 0555 0 0
+file /bin/crun crun-1.15-linux-amd64 0555 0 0
+#file /bin/crun /home/andrew/Repos/crun/crun 0555 0 0
 file /run/bundle/config.json config.json 0444 0 0
