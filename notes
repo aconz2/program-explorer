@@ -196,4 +196,10 @@ this is fcntl and no idea why, shows for vmm,vcpu0,__console,__rng like all the 
 
 tried putting the sqfs image in the initramfs and it wasn't working and was slower anyways to boot even without running
 
+for cloud-hypervisor
 cargo build --profile=profiling --target x86_64-unknown-linux-musl
+
+→ venv/bin/python -i analyzesqfs.py gcc-13.3.0.sqfs gcc-14.1.0.sqfs 
+gcc-13.3.0.sqfs     421.45 Mb (compressed)    1347.61 Mb (uncompressed)      22806 files       2850 dirs
+gcc-14.1.0.sqfs     432.04 Mb (compressed)    1381.28 Mb (uncompressed)      22894 files       2852 dirs
+20179     832.07 Mb shared 60.24%

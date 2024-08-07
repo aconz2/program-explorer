@@ -17,7 +17,7 @@ set -e
 #     --kernel $k \
 #     --initramfs initramfs \
 #     --cmdline "console=hvc0 tp_printk trace_event=initcall:*" \
-#     --disk path=gcc-14.sqfs,readonly=on,id=container-bundle-squashfs \
+#     --disk path=gcc-14.1.0.sqfs,readonly=on,id=container-bundle-squashfs \
 #     --cpus boot=1 \
 #     --memory size=1024M
 # 
@@ -33,7 +33,7 @@ strace -f --absolute-timestamps=format:unix,precision:us -o strace.out --trace=!
      --initramfs initramfs \
      --console off \
      --cmdline "console=hvc0" \
-     --disk path=gcc-14.sqfs,readonly=on,id=container-bundle-squashfs \
+     --disk path=gcc-14.1.0.sqfs,readonly=on,id=container-bundle-squashfs \
      --cpus boot=1 \
      --memory size=1024M
 

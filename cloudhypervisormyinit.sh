@@ -15,7 +15,7 @@ echo 'hi' > /tmp/_stdin
     --initramfs initramfs \
     --serial off \
     --cmdline "quiet console=hvc0" \
-    --disk path=gcc-14.sqfs,readonly=on \
+    --disk path=gcc-14.1.0.sqfs,readonly=on \
     --cpus boot=1 \
     --memory size=1024M \
     --vsock cid=3,socket=/tmp/ch.sock $@
