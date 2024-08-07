@@ -7,33 +7,12 @@
  * chroot .
  */
 
-
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <fcntl.h>
 #include <sched.h>
 #include <sys/mount.h>
-#include <linux/limits.h>
-
-//{ int ret = system("busybox cat /proc/self/mountinfo"); }
-void show_mountinfo() {
-    char buf[4096] = {0};
-    int fd = open("/proc/self/mountinfo", O_RDONLY);
-    if (fd < 0) {
-        perror("open mountinfo");
-        return;
-    }
-    ssize_t nread = read(fd, buf, 4096);
-    if (nread < 0) {
-        perror("read mountinfo");
-        close(fd);
-        return;
-    }
-    printf("%s\n", buf);
-    close(fd);
-}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -72,8 +51,6 @@ int main(int argc, char** argv) {
     //     perror("chdir /");
     //     exit(EXIT_FAILURE);
     // }
-
-    // show_mountinfo();
 
     if (execvp(argv[2], &argv[2]) < 0) {
         perror("execvp");
