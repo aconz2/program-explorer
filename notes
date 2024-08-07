@@ -209,3 +209,9 @@ under normal circumstances, the vmm unlinks /tmp/ch.sock BUT then what is that e
 trying to figure out why busybox doesn't have the uuid in blkid
 on my system doing
 sudo strace --trace=open,openat,read blkid --cache-file /dev/null |& less 
+
+was trying to do this from within the toolbox container and blkid wasn't getting enough permissions
+solution was to
+→ sudo podman run --privileged --rm -it fedora
+
+hmm I think its getting the label from somehwere deep
