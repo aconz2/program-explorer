@@ -205,3 +205,7 @@ gcc-14.1.0.sqfs     432.04 Mb (compressed)    1381.28 Mb (uncompressed)      228
 20179     832.07 Mb shared 60.24%
 
 under normal circumstances, the vmm unlinks /tmp/ch.sock BUT then what is that even for, it binds it and listens
+
+trying to figure out why busybox doesn't have the uuid in blkid
+on my system doing
+sudo strace --trace=open,openat,read blkid --cache-file /dev/null |& less 

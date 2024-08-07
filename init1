@@ -11,6 +11,10 @@ busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
 busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 
+busybox blkid
+busybox cat /proc/devices
+busybox ls /dev
+
 # busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
 # busybox unshare --mount /bin/init2
 
@@ -49,7 +53,7 @@ pivot_rootfs /abc \
   > _stdout \
   2> _stderr
 
-echo 'from guest'
+echo '---------from guest--------------'
 echo '-------- stdout -----------'
 busybox cat _stdout
 echo '---------------------------'

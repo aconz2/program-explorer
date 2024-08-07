@@ -1,5 +1,8 @@
 k=/home/andrew/Repos/linux/vmlinux
 
+# exit vsockhello procs when we ctrl-c
+trap "pkill -P $$" EXIT
+
     #--console off \
 
 #strace --decode-pids=comm --trace=!ioctl,close,mmap,munmap,io_uring_enter -f -o chstrace.out ./cloud-hypervisor-static \
@@ -21,7 +24,7 @@ echo 'hi' > /tmp/_stdin
     --initramfs initramfs \
     --serial off \
     --cmdline "quiet console=hvc0" \
-    --disk path=gcc-14.1.0.sqfs,readonly=on \
+    --disk path=gcc-14.1.0.sqfs,readonly=on,id=gcc14 path=gcc-13.3.0.sqfs,readonly=on,id=gcc13 \
     --cpus boot=1 \
     --memory size=1024M \
     --vsock cid=3,socket=/tmp/ch.sock $@
