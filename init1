@@ -10,10 +10,12 @@ busybox mount -t proc none /proc
 busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
 busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
+#busybox mount -t squashfs -o loop /dev/pmem0 /run/bundle/rootfs
 
-busybox blkid
-busybox cat /proc/devices
-busybox ls /dev
+
+echo 'about to echo to pmem'
+busybox date -Ins > /dev/pmem0
+echo 'done to echo to pmem'
 
 # busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
 # busybox unshare --mount /bin/init2
@@ -42,6 +44,8 @@ busybox ls /dev
 
 vsockhello v123 0 /bin/busybox cat > /input/_stdin
 
+echo '---------from guest--------------'
+echo '-------- stdin -----------'
 echo '--------------------------'
 busybox cat /input/_stdin
 echo '--------------------------'

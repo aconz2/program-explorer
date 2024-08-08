@@ -215,3 +215,16 @@ solution was to
 → sudo podman run --privileged --rm -it fedora
 
 hmm I think its getting the label from somehwere deep
+
+you can use multiple disks! with --disk path=gcc-14.1.0.sqfs,readonly=on,id=gcc14 path=gcc-13.3.0.sqfs,readonly=on,id=gcc13
+
+pmem file has to be aligned to 2MB (I think so it can be hugepaged even though we don't have to run with hugepages)
+okay getting a sigbus when using --memory size=1024M,hugepages=on
+is at /dev/pmem0
+find /run/bundle/rootfs > /dev/null
+  with pmem0 is 240ms
+  with vda   is 265ms
+
+how does the guest get notified of hotplug events?
+
+okay you can just write to /dev/pmem. opening in append mode doesnt actually append

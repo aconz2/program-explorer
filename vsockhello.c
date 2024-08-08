@@ -25,7 +25,6 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    int sock;
     int ret;
     int dupfd;
 
@@ -34,7 +33,7 @@ int main(int argc, char **argv)
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, &location[1], strlen(&location[1]));
-        sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock < 0) {perror("socket"); exit(EXIT_FAILURE);}
         ret = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
         if (ret < 0) {perror("bind"); exit(EXIT_FAILURE);}
@@ -53,7 +52,7 @@ int main(int argc, char **argv)
         addr.svm_reserved1 = 0;
         addr.svm_cid = VMADDR_CID_HOST;
         addr.svm_port = port;
-        sock = socket(AF_VSOCK, SOCK_STREAM, 0);
+        int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
         if (sock < 0) {perror("socket"); exit(EXIT_FAILURE);}
         ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
         if (ret < 0) {perror("connect"); exit(EXIT_FAILURE);}
