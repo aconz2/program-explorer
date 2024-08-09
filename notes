@@ -241,3 +241,7 @@ CONFIG_BACKLIGHT_CLASS_DEVICE=n
 CONFIG_LCD_CLASS_DEVICE
 CONFIG_VGA_CONSOLE
 okay lots more now
+
+using --memory size=1024M,thp=on works bug ,hugpages=on doesn't because the host has thp enabled
+→ cat /sys/kernel/mm/transparent_hugepage/enabled 
+always [madvise] never
