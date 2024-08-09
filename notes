@@ -228,3 +228,16 @@ find /run/bundle/rootfs > /dev/null
 how does the guest get notified of hotplug events?
 
 okay you can just write to /dev/pmem. opening in append mode doesnt actually append
+
+from looking at boot times, two things I'm disabling are
+CONFIG_BLK_DEV_NULL_BLK=n  # used for benchmarking or something
+CONFIG_TASKSTATS=n         # process stats over netlink socket
+CONFIG_BLK_DEV_RAM=n       # used for block ramdisks
+CONFIG_ZRAM=n              # we're never gonna swap out
+CONFIG_SWAP=n              # mainly to disable zswap
+CONFIG_HID=n
+CONFIG_FB_CMDLINE
+CONFIG_BACKLIGHT_CLASS_DEVICE=n
+CONFIG_LCD_CLASS_DEVICE
+CONFIG_VGA_CONSOLE
+okay lots more now

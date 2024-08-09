@@ -26,7 +26,7 @@ time ./cloud-hypervisor-static \
     --serial off \
     --pmem file=pmemtestfile \
     --disk path=gcc-14.1.0.sqfs,readonly=on,id=gcc14 \
-    --cmdline "quiet console=hvc0" \
+    --cmdline "initcall_debug console=hvc0" \
     --cpus boot=1 \
     --memory size=1024M \
     --vsock cid=3,socket=/tmp/ch.sock $@

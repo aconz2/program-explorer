@@ -12,6 +12,7 @@ busybox mount -t devtmpfs none /dev
 busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 #busybox mount -t squashfs -o loop /dev/pmem0 /run/bundle/rootfs
 
+exit
 
 echo 'about to echo to pmem'
 busybox date -Ins > /dev/pmem0
