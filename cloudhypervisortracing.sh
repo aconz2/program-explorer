@@ -25,9 +25,12 @@ set -e
 
 # needs sudo
 # perf stat -e 'kvm:*' $ch \
-#perf record --freq 5000 --call-graph dwarf $ch \
 #perf record --freq 5000 $ch \
-strace -f --absolute-timestamps=format:unix,precision:us -o strace.out --trace=!ioctl,close $ch \
+#strace -f --absolute-timestamps=format:unix,precision:us -o strace.out --trace=!ioctl,close $ch \
+#perf record --freq 5000 --call-graph dwarf $ch \
+#perf record --call-graph lbr --all-user --user-callchains -g \
+perf record --freq 10000 -g \
+    $ch \
      --seccomp log \
      --kernel $k \
      --initramfs initramfs \
@@ -37,5 +40,5 @@ strace -f --absolute-timestamps=format:unix,precision:us -o strace.out --trace=!
      --cpus boot=1 \
      --memory size=1024M
 
-python3 make_strace_relative_time.py strace.out
-cat strace.out
+#python3 make_strace_relative_time.py strace.out
+#cat strace.out
