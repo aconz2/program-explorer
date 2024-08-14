@@ -29,7 +29,7 @@ set -e
 #strace -f --absolute-timestamps=format:unix,precision:us -o strace.out --trace=!ioctl,close $ch \
 #perf record --freq 5000 --call-graph dwarf $ch \
 #perf record --call-graph lbr --all-user --user-callchains -g \
-perf record --freq 10000 -g \
+#perf record --freq 10000 -g \
     $ch \
      --seccomp log \
      --kernel $k \

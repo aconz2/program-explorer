@@ -200,6 +200,7 @@ for cloud-hypervisor
 cargo build --profile=profiling --target x86_64-unknown-linux-musl
 cargo clean && RUSTFLAGS='-C force-frame-pointers=y' cargo build --profile profiling
 cargo clean && RUSTFLAGS='-C force-frame-pointers=y' cargo build --profile profiling --target x86_64-unknown-linux-musl
+cargo clean && cargo build --profile profiling --target x86_64-unknown-linux-musl --features tracing
 
 → venv/bin/python -i analyzesqfs.py gcc-13.3.0.sqfs gcc-14.1.0.sqfs 
 gcc-13.3.0.sqfs     421.45 Mb (compressed)    1347.61 Mb (uncompressed)      22806 files       2850 dirs
@@ -256,3 +257,22 @@ CONFIG_NLS
 so with the http api, once the vm shuts down, the cloud hypervisor process itself exits, so we can't save time by keeping it around. if we have the init just sleep we could reboot I think
 when the guest is sleeping, doing a vm.shutdown or vm.delete does not cause the ch proc to exit
 overall getting very similar times for command line and api :(
+
+build cloud-hypervisor with --features tracing
+~/Repos/cloud-hypervisor/scripts/ch-trace-visualiser.py 
+not that informative
+okay can also build with --features dhat-heap to get heap tracing
+
+pre seccompiler changes dhat-heap-001.json
+dhat: Total:     537,569 bytes in 5,029 blocks
+dhat: At t-gmax: 146,902 bytes in 399 blocks
+dhat: At t-end:  1,996 bytes in 11 blocks
+
+to override the cargo deps we do
+[patch.crates-io]
+seccompiler = { path = "../seccompiler" }
+
+image lookup -r -n .*create_pkg_length.*
+break set -r .*create_pkg_length.*
+ldb -o 'break set -r .*create_pkg_length.*' ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor -- --api-socket /tmp/chapi.sock
+then bash startchapi.sh

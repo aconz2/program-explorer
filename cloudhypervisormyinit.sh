@@ -23,10 +23,11 @@ time ./cloud-hypervisor-static \
     --initramfs initramfs \
     --serial off \
     --pmem file=gcc-14.1.0.sqfs,discard_writes=on file=pmemtestfile \
-    --cmdline "console=hvc0" \
+    --cmdline "quiet console=hvc0" \
     --cpus boot=1 \
     --memory size=1024M,thp=on \
-    --vsock cid=3,socket=/tmp/ch.sock $@
+    --vsock cid=3,socket=/tmp/ch.sock \
+    $@
 
 #wait
 

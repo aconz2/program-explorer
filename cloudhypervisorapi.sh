@@ -10,7 +10,7 @@ socket_path=/tmp/chapi.sock
 
 rm -f ${socket_path}
 
-(./cloud-hypervisor-static --api-socket ${socket_path} | ts "%H:%M:%.S") > /tmp/chout 2> /tmp/cherr &
+(./cloud-hypervisor-static -v --event-monitor path=/tmp/chevent --api-socket ${socket_path} | ts "%H:%M:%.S") > /tmp/chout 2> /tmp/cherr &
 
 config='{
     "cpus": {"boot_vcpus": 1, "max_vcpus": 1},
