@@ -12,8 +12,9 @@ mkdir /tmp/_out
 
 echo 'hi' > /tmp/_stdin
 #strace -o stdinsender.straceout 
-./vsockhello u/tmp/ch.sock_123 1 cat < /tmp/_stdin &
-./vsockhello u/tmp/ch.sock_124 0 cpio -i -D /tmp/_out &
+#./vsockhello u/tmp/ch.sock_123 1 cat < /tmp/_stdin &
+#./vsockhello u/tmp/ch.sock_124 0 cpio -i -D /tmp/_out &
+#
 #./vsockhello u/tmp/ch.sock_124 0 cat > /tmp/_out.cpio &
 
     #--disk path=gcc-14.1.0.sqfs,readonly=on,id=gcc14 \
@@ -23,7 +24,7 @@ time ./cloud-hypervisor-static \
     --initramfs initramfs \
     --serial off \
     --pmem file=gcc-14.1.0.sqfs,discard_writes=on file=pmemtestfile \
-    --cmdline "quiet console=hvc0" \
+    --cmdline "console=hvc0" \
     --cpus boot=1 \
     --memory size=1024M,thp=on \
     --vsock cid=3,socket=/tmp/ch.sock \

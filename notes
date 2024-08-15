@@ -276,3 +276,22 @@ image lookup -r -n .*create_pkg_length.*
 break set -r .*create_pkg_length.*
 ldb -o 'break set -r .*create_pkg_length.*' ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor -- --api-socket /tmp/chapi.sock
 then bash startchapi.sh
+
+getting a permission denied to clone something about console. was passing --console off in the command line but the json api payload had console=tty so duh
+
+sudo perf probe -x ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor --funcs 
+sudo perf probe -x ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor --funcs --no-demangle --filter='*to_aml_bytes*'
+
+okay moved tracer::start() to start_vmm_thread and trace_scoped!("get_seccomp_filter"
+vmm get_seccomp_filter                   0.01ms
+vmm get_seccomp_filter                   0.05ms
+main get_seccomp_filter                  0.28ms
+
+so not much there
+and for acpi tables, I see: 
+
+vmm create_facp_table                    0.00ms
+vmm create_dsdt_table                    0.47ms
+vmm create_acpi_tables                   0.61ms
+
+added CONFIG_FTRACE and CONFIG_BOOTTIME_TRACING along with kernel commandline kernel.tp_printk

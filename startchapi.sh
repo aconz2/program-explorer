@@ -5,7 +5,7 @@ config='{
     "memory": {"size": 1073741824},
     "payload": {"kernel": "/home/andrew/Repos/linux/vmlinux", "cmdline": "console=hvc0", "initramfs": "initramfs"},
     "pmem": [{"file": "gcc-14.1.0.sqfs", "discard_writes": true}, {"file": "pmemtestfile"}],
-    "console": {"mode": "Tty"}
+    "console": {"mode": "Off"}
 }'
 
 curl --unix-socket ${socket_path} -i \
