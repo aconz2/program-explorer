@@ -1,4 +1,5 @@
 k=/home/andrew/Repos/linux/vmlinux
+ch=${ch:-/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor}
 
 # exit vsockhello procs when we ctrl-c
 trap "pkill -P $$" EXIT
@@ -19,7 +20,7 @@ echo 'hi' > /tmp/_stdin
 
     #--disk path=gcc-14.1.0.sqfs,readonly=on,id=gcc14 \
 #strace --decode-pids=comm -f ./cloud-hypervisor-static \
-time ./cloud-hypervisor-static \
+time $ch \
     --kernel $k \
     --initramfs initramfs \
     --serial off \
@@ -30,6 +31,7 @@ time ./cloud-hypervisor-static \
     --vsock cid=3,socket=/tmp/ch.sock \
     $@
 
+exit
 #wait
 
 echo '---------from host--------------'

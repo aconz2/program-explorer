@@ -295,3 +295,7 @@ vmm create_dsdt_table                    0.47ms
 vmm create_acpi_tables                   0.61ms
 
 added CONFIG_FTRACE and CONFIG_BOOTTIME_TRACING along with kernel commandline kernel.tp_printk
+
+patched a github dep with
+[patch."https://github.com/rust-vmm/acpi_tables"]
+acpi_tables = { path = "../acpi_tables" }
