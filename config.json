@@ -3,11 +3,11 @@
 	"process": {
 		"terminal": false,
 		"user": {
-			"uid": 0,
-			"gid": 0
+			"uid": 1000,
+			"gid": 1000
 		},
 		"args": [
-			"sh", "-c", "pwd; echo hi > foo; mv foo /output"
+			"sh", "-c", "ls -l /; pwd; echo hi > foo; mv foo /output"
 		],
 		"env": [
 			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -60,7 +60,7 @@
           "options": [
             "nosuid",
             "strictatime",
-            "mode=755",
+            "mode=777",
             "size=8M"
           ]
         },

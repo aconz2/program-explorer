@@ -18,7 +18,7 @@ dir /mnt/rootfs        0755 0 0
 dir /mnt/upper         0755 0 0
 dir /mnt/upper/scratch 0755 0 0
 dir /mnt/upper/input   0755 0 0
-dir /mnt/upper/output  0755 0 0
+dir /mnt/upper/output  0777 0 0
 
 dir /run               0755 0 0
 dir /run/bundle        0755 0 0

@@ -15,15 +15,16 @@ busybox mount -t squashfs -o loop /dev/pmem0 /mnt/rootfs
 
 busybox mount -t squashfs -o loop /dev/pmem1 /run/input
 
-busybox mount -t tmpfs -o size=2M none /run/output
-busybox mkdir /run/output/dir
+busybox mount -t tmpfs -o size=2M,mode=777 none /run/output
+busybox mkdir --mode 777 /run/output/dir
 
 busybox mount -t tmpfs -o size=2M none /mnt/upper/scratch
 
 # overlay writable /{scratch,input,output} dirs
 busybox mount -t overlay -o lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work none /run/bundle/rootfs
 
-# busybox ls -l /run/
+busybox ls -l /
+busybox ls -l /run/
 # busybox ls -l /run/io/input/dir
 # busybox ls -l /run/bundle
 # busybox ls -l /run/bundle/rootfs
@@ -50,4 +51,5 @@ echo '---------------------------'
 #   echo "$f"
 #   busybox cat "$f"
 # done
+# TODO this should probably run as a different user too
 (cd /run/output; busybox find . -print -depth | busybox cpio -H newc -ov > /dev/pmem2)

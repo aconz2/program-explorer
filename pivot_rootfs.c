@@ -52,6 +52,11 @@ int main(int argc, char** argv) {
     //     exit(EXIT_FAILURE);
     // }
 
+    if (setuid(1000) < 0) {
+        perror("setuid");
+        exit(EXIT_FAILURE);
+    }
+
     if (execvp(argv[2], &argv[2]) < 0) {
         perror("execvp");
         exit(EXIT_FAILURE);
