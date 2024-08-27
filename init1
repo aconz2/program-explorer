@@ -9,65 +9,45 @@ trap "busybox poweroff -f" EXIT
 busybox mount -t proc none /proc
 busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
+
 #busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
-busybox mount -t squashfs -o loop /dev/pmem0 /run/bundle/rootfs
+busybox mount -t squashfs -o loop /dev/pmem0 /mnt/rootfs
 
-exit
-busybox sleep 10
+busybox mount -t squashfs -o loop /dev/pmem1 /run/input
 
-echo 'about to echo to pmem'
-busybox date -Ins > /dev/pmem1
-echo 'done to echo to pmem'
+busybox mount -t tmpfs -o size=2M none /run/output
+busybox mkdir /run/output/dir
 
-# busybox unshare --mount /bin/busybox sh -c 'busybox mount --rbind / /abc && cd /abc && busybox mount --move . / && busybox chroot . /bin/init3'
-# busybox unshare --mount /bin/init2
+busybox mount -t tmpfs -o size=2M none /mnt/upper/scratch
 
-# --- INPUT ---
-# HOST takes files, creates cpio and sends them through socket
-# cpio -o < file-list | socat - UNIX-LISTEN:/tmp/ch.sock_123
-# OR
-# sstream u/tmp/ch.sock_123 1 cpio < file-list  # run cpio with stdout replaced by socket unix at that path
-#
-# GUEST reads from socket 123 and sends stdout to cpio
-# socat - VSOCK-LISTEN:123 | cpio -i -D /input
-# or
-# sstream v123 0 cpio -i -D /input  # run cpio with stdin replaced by socket
+# overlay writable /{scratch,input,output} dirs
+busybox mount -t overlay -o lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work none /run/bundle/rootfs
 
-# --- OUTPUT ---
-# HOST listens on vsock and captures output
-# socat - UNIX-LISTEN:/tmp/ch.sock_124 > output.cpio
-# or
-# sstream u/tmp/ch.sock_124 1 > output.cpio
-#
-# GUEST sends on vsock
-# echo -e 'file1\nfile2' | cpio -o | socat - VSOCK-CONNECT:124
-# or
-# echo -e 'file1\nfile2' | sstream v124 1 cpio -o
+# busybox ls -l /run/
+# busybox ls -l /run/io/input/dir
+# busybox ls -l /run/bundle
+# busybox ls -l /run/bundle/rootfs
 
-vsockhello v123 0 /bin/busybox cat > /input/_stdin
-
-echo '---------from guest--------------'
-echo '-------- stdin -----------'
-echo '--------------------------'
-busybox cat /input/_stdin
-echo '--------------------------'
-
-# pivot_rootfs /abc /bin/init3
 pivot_rootfs /abc \
   /bin/crun run --bundle /run/bundle containerid-1234 \
-  < /input/_stdin \
-  > _stdout \
-  2> _stderr
+  < /run/input/stdin \
+  > /run/output/stdout \
+  2> /run/output/stderr
+
+echo $? > /run/output/exit
 
 echo '---------from guest--------------'
 echo '-------- stdout -----------'
-busybox cat _stdout
+busybox cat /run/output/stdout
 echo '---------------------------'
 
 echo '-------- stderr -----------'
-busybox cat _stderr
+busybox cat /run/output/stderr
 echo '---------------------------'
 
-#crun run --parent-rootfs /abc --bundle /run/bundle containerid-1234
-
-echo -e '_stdout\n_stderr' | vsockhello v124 1 busybox cpio -H newc -o
+# busybox ls -l /run/io/output
+# for f in /run/io/output/*; do 
+#   echo "$f"
+#   busybox cat "$f"
+# done
+(cd /run/output; busybox find . -print -depth | busybox cpio -H newc -ov > /dev/pmem2)

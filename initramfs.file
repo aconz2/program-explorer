@@ -2,19 +2,30 @@
 # make with ~/Repos/linux/usr/gen_init_cpio initattempt1 > init1.initramfs
 # cpio -t < init1.initramfs
 
-dir /bin 0755 0 0
+dir /bin   0755 0 0
 dir /input 0755 0 0
-dir /dev 0755 0 0
-dir /proc 0755 0 0
-dir /abc 0755 0 0
+dir /dev   0755 0 0
+dir /proc  0755 0 0
+dir /abc   0755 0 0
 
-dir /sys 0755 0 0
-dir /sys/fs 0755 0 0
+dir /sys           0755 0 0
+dir /sys/fs        0755 0 0
 dir /sys/fs/cgroup 0755 0 0
 
-dir /run 0755 0 0
-dir /run/bundle 0755 0 0
+dir /mnt               0755 0 0
+dir /mnt/work          0755 0 0
+dir /mnt/rootfs        0755 0 0
+dir /mnt/upper         0755 0 0
+dir /mnt/upper/scratch 0755 0 0
+dir /mnt/upper/input   0755 0 0
+dir /mnt/upper/output  0755 0 0
+
+dir /run               0755 0 0
+dir /run/bundle        0755 0 0
 dir /run/bundle/rootfs 0755 0 0
+
+dir /run/input  0755 0 0
+dir /run/output 0755 0 0
 
 nod /dev/console 0600 0 0 c 5 1
 
@@ -26,7 +37,7 @@ file /init      init1 0555 0 0
 # file /bin/init2 init2 0555 0 0
 # file /bin/init3 init3 0555 0 0
 
-file /bin/vsockhello vsockhello 0555 0 0
+#file /bin/vsockhello vsockhello 0555 0 0
 file /bin/pivot_rootfs pivot_rootfs 0555 0 0
 file /bin/strace strace 0555 0 0
 file /bin/crun crun-1.15-linux-amd64 0555 0 0

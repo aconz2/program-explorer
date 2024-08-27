@@ -74,3 +74,16 @@ int main(int argc, char **argv)
     }
     return 0;
 }
+
+/*
+ * saved from how this was used
+# ON HOST
+./vsockhello u/tmp/ch.sock_123 1 cat < /tmp/_stdin &
+./vsockhello u/tmp/ch.sock_124 0 cpio -i -D /tmp/_out &
+./vsockhello u/tmp/ch.sock_124 0 cat > /tmp/_out.cpio &
+
+# ON GUEST
+vsockhello v123 0 /bin/busybox cat > /input/_stdin
+
+echo -e '_stdout\n_stderr' | vsockhello v124 1 busybox cpio -H newc -o
+*/

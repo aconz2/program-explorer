@@ -7,13 +7,13 @@
 			"gid": 0
 		},
 		"args": [
-			"gcc", "--version"
+			"sh", "-c", "pwd; echo hi > foo; mv foo /output"
 		],
 		"env": [
 			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"TERM=xterm"
 		],
-		"cwd": "/",
+		"cwd": "/scratch",
 		"capabilities": {
 			"bounding": [
 				"CAP_AUDIT_WRITE",
@@ -53,6 +53,37 @@
 	},
 	"hostname": "crun",
 	"mounts": [
+        {
+          "destination": "/scratch",
+          "type": "tmpfs",
+          "source": "tmpfs",
+          "options": [
+            "nosuid",
+            "strictatime",
+            "mode=755",
+            "size=8M"
+          ]
+        },
+        {
+          "destination": "/output",
+          "type": "bind",
+          "source": "/run/output/dir",
+          "options": [
+            "rw",
+            "rprivate",
+            "rbind"
+          ]
+        },
+        {
+          "destination": "/input",
+          "type": "bind",
+          "source": "/run/input/dir",
+          "options": [
+            "r",
+            "rprivate",
+            "rbind"
+          ]
+        },
 		{
 			"destination": "/proc",
 			"type": "proc",
