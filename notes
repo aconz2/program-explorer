@@ -303,3 +303,5 @@ acpi_tables = { path = "../acpi_tables" }
 → jq < $(podman inspect lucid_varahamihira --format '{{.OCIConfigPath}}')
 
 so I'm getting a mkdir /output Read-only file system error when specifying /output as a bind mount in config.json I think because the squashfs rootfs is read only. So I think we need to do the overlayfs thing
+
+installed squashfs-tools-ng-devel
