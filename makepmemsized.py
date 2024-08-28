@@ -1,12 +1,13 @@
 import sys
-from pathlib import Path
+import os
 
 alignment = 0x20_0000
 
 filename = sys.argv[1]
-file = Path(filename)
+fd = os.open(filename, os.O_RDWR)
+assert fd > 0
 
-size = file.stat().st_size
+size = os.fstat(fd).st_size
 
 if size % alignment == 0:
     print(f'Size {size} is already aligned')
@@ -14,14 +15,11 @@ if size % alignment == 0:
 
 remainder = size % alignment
 extra = alignment - remainder
-assert (size + extra) % alignment == 0
+new_size = size + extra
+assert new_size % alignment == 0
 
-with open(file, 'ab') as fh:
-    fh.write(b'\x00' * extra)
+os.ftruncate(fd, new_size)
 
-new_size = file.stat().st_size
+new_size = os.fstat(fd).st_size
 assert new_size % alignment == 0
 print(f'Size {new_size} now aligned')
-
-
-# TODO maybe look at using truncate to do this for sparse file, but prolly doesn't matter

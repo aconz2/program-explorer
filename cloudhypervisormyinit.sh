@@ -6,6 +6,8 @@ ch=${ch:-/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/pr
 
 #strace --decode-pids=comm --trace=!ioctl,close,mmap,munmap,io_uring_enter -f -o chstrace.out ./cloud-hypervisor-static \
 
+rm -f /tmp/ch.sock
+
 rm -rf /tmp/_out
 mkdir /tmp/_out
 truncate -s 2M /tmp/_out/output
@@ -29,7 +31,8 @@ time $ch \
            file=/tmp/_out/output \
     --cmdline "console=hvc0" \
     --cpus boot=1 \
-    --memory size=1024M,thp=on
+    --memory size=1024M,thp=on \
+    --api-socket /tmp/ch.sock \
     $@
 
 cpio --list < /tmp/_out/output

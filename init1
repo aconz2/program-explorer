@@ -18,7 +18,7 @@ busybox mount -t squashfs -o loop /dev/pmem1 /run/input
 busybox mount -t tmpfs -o size=2M,mode=777 none /run/output
 busybox mkdir --mode 777 /run/output/dir
 
-busybox mount -t tmpfs -o size=2M none /mnt/upper/scratch
+# busybox mount -t tmpfs -o size=2M none /mnt/upper/scratch
 
 # overlay writable /{scratch,input,output} dirs
 busybox mount -t overlay -o lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work none /run/bundle/rootfs
