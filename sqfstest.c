@@ -95,6 +95,9 @@ int main() {
     if (sqfs_block_processor_begin_file(bp, &inode, NULL, SQFS_BLK_DONT_COMPRESS) != 0) {
         errexit("sqfs_block_processor_begin_file fail");
     }
+    if (inode == NULL) {
+        errexit("inode * is nullptr");
+    }
     printf("got inode_number %d\n", inode->base.inode_number);
 
     const char s1[] = "aaaaaaa data for a.txt";
@@ -105,6 +108,11 @@ int main() {
     if (sqfs_block_processor_end_file(bp) != 0) {
         errexit("sqfs_block_processor_end_file fail");
     }
+
+    inode->base.type = SQFS_INODE_FILE;
+    inode->base.mode = SQFS_INODE_MODE_REG | 0644;
+    inode->base.inode_number = 0;
+    inode->data.file.file_size = sizeof(s1);
     //-----------------
 
     // ---------- WRITE DIR
