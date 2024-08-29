@@ -1,5 +1,7 @@
 #!/bin/busybox sh
 
+set -e
+
 export PATH=/bin
 
 # otherwise we get a kernel panic and the vmm process hangs
@@ -9,6 +11,10 @@ trap "busybox poweroff -f" EXIT
 busybox mount -t proc none /proc
 busybox mount -t cgroup2 none /sys/fs/cgroup
 busybox mount -t devtmpfs none /dev
+
+busybox inotifyd - /dev:n &
+
+busybox ls -l /dev/pmem*
 
 #busybox mount -t squashfs -o loop /dev/vda /run/bundle/rootfs
 busybox mount -t squashfs -o loop /dev/pmem0 /mnt/rootfs
