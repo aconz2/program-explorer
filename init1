@@ -1,6 +1,6 @@
 #!/bin/busybox sh
 
-set -e
+#set -e
 
 export PATH=/bin
 
@@ -23,7 +23,7 @@ busybox mount -t squashfs -o loop /dev/pmem0 /mnt/rootfs
 busybox mount -t squashfs -o loop /dev/pmem1 /run/input
 
 busybox mount -t tmpfs -o size=2M,mode=777 none /run/output
-strace busybox mkdir --mode 777 /run/output/dir
+busybox mkdir --mode 777 /run/output/dir
 
 # busybox mount -t tmpfs -o size=2M none /mnt/upper/scratch
 
@@ -36,7 +36,7 @@ busybox ls -l /run/
 # busybox ls -l /run/bundle
 # busybox ls -l /run/bundle/rootfs
 
-pivot_rootfs /abc \
+strace -f pivot_rootfs /abc \
   /bin/crun run --bundle /run/bundle containerid-1234 \
   < /run/input/stdin \
   > /run/output/stdout \

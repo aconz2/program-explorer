@@ -308,3 +308,8 @@ installed squashfs-tools-ng-devel
 
 → (cd peinit && bash build.sh) && bash makeinitramfs.sh && bash cloudhypervisormyinit.sh 
 
+if i do rootless with uid 0/0 and no user namespace, it works
+        rootless with uid 0/0 and a  user namespace, it doesn't work
+        rootless with uid 1000/1000 and no usernamespace, it works
+
+https://github.com/containers/crun/issues/1536

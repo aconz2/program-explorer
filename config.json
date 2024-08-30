@@ -109,8 +109,7 @@
 				"noexec",
 				"newinstance",
 				"ptmxmode=0666",
-				"mode=0620",
-				"gid=5"
+				"mode=0620"
 			]
 		},
 		{
@@ -180,6 +179,9 @@
 			},
 			{
 				"type": "uts"
+			},
+			{
+				"type": "user"
 			},
 			{
 				"type": "cgroup"
