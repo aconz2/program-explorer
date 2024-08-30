@@ -89,14 +89,16 @@ fn run_crun() {
     let outfile = File::create("/run/output/stdout").unwrap();
     let errfile = File::create("/run/output/stderr").unwrap();
     let infile =  File::open("/run/input/stdin").unwrap();
-    let mut child = Command::new("/bin/crun")
+    //let mut child = Command::new("/bin/crun")
+    //let mut child = Command::new("strace").arg("-f").arg("/bin/crun")
+    let mut child = Command::new("/bin/pivot_rootfs").arg("/abc").arg("/bin/crun")
         .arg("--debug")
         .arg("run")
         .arg("--bundle")
         .arg("/run/bundle")
         .arg("containerid-1234")
-        .uid(1000)
-        .gid(1000)
+        //.uid(1000)
+        //.gid(1000)
         //.stdout(Stdio::from(outfile))
         //.stderr(Stdio::from(errfile))
         //.stdin(Stdio::from(infile))
@@ -110,7 +112,7 @@ fn run_crun() {
 
 fn main() {
     unsafe {
-        parent_rootfs();
+        //parent_rootfs();
         init_mounts();
 
         //              rootfs    input     output
