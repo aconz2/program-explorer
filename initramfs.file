@@ -21,13 +21,14 @@ dir /mnt/upper/input   0755 0 0
 dir /mnt/upper/output  0777 0 0
 
 dir /run               0755 0 0
-# crun is supposed to use this when running as root, only getting complaints about this when trying with rust peinit with uid/guid 1000/1000
-#dir /run/crun          0777 0 0
+
 dir /run/bundle        0755 0 0
 dir /run/bundle/rootfs 0755 0 0
 
 dir /run/input  0755 0 0
 dir /run/output 0777 0 0
+
+dir /run/crun 0777 0 0
 
 #nod /dev/console 0600 0 0 c 5 1
 

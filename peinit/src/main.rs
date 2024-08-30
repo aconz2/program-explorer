@@ -37,7 +37,10 @@ unsafe fn init_mounts() {
     check_libc(libc::mount(c"none".as_ptr(), c"/sys/fs/cgroup".as_ptr(), c"cgroup2".as_ptr(),  libc::MS_SILENT, std::ptr::null()));
     check_libc(libc::mount(c"none".as_ptr(), c"/dev".as_ptr(),           c"devtmpfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
     check_libc(libc::mount(c"none".as_ptr(), c"/run/output".as_ptr(),    c"tmpfs".as_ptr(),    libc::MS_SILENT, c"size=2M,mode=777".as_ptr() as *const libc::c_void));
+    // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
+    // have set umask
     check_libc(libc::mkdir(c"/run/output/dir".as_ptr(), 0o777));
+    check_libc(libc::chmod(c"/run/output/dir".as_ptr(), 0o777));
 }
 
 unsafe fn mount_pmems() {
@@ -87,12 +90,13 @@ fn run_crun() {
     let errfile = File::create("/run/output/stderr").unwrap();
     let infile =  File::open("/run/input/stdin").unwrap();
     let mut child = Command::new("/bin/crun")
+        .arg("--debug")
         .arg("run")
         .arg("--bundle")
         .arg("/run/bundle")
         .arg("containerid-1234")
-        //.uid(1000)
-        //.gid(1000)
+        .uid(1000)
+        .gid(1000)
         //.stdout(Stdio::from(outfile))
         //.stderr(Stdio::from(errfile))
         //.stdin(Stdio::from(infile))
@@ -116,11 +120,16 @@ fn main() {
 
         setup_overlay();
 
-        Command::new("busybox").arg("mount").spawn().unwrap().wait();
-        Command::new("busybox").arg("ls").arg("-l").arg("/run/").spawn().unwrap().wait();
-        Command::new("busybox").arg("ls").arg("-l").arg("/run/output").spawn().unwrap().wait();
-        Command::new("busybox").arg("stat").arg("/run/output/dir").spawn().unwrap().wait();
+        // Command::new("busybox").arg("mount").spawn().unwrap().wait();
+        // Command::new("busybox").arg("ls").arg("-l").arg("/run/").spawn().unwrap().wait();
+        // Command::new("busybox").arg("ls").arg("-l").arg("/run/output").spawn().unwrap().wait();
+        // Command::new("busybox").arg("stat").arg("/run/output").spawn().unwrap().wait();
+        // Command::new("busybox").arg("stat").arg("/run/output/dir").spawn().unwrap().wait();
         // Command::new("busybox").arg("ls").arg("-l").arg("/run/bundle/rootfs").spawn().unwrap();
+        //
+        // let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        // println!("status={status}");
+
 
         run_crun();
     }

@@ -23,7 +23,7 @@ busybox mount -t squashfs -o loop /dev/pmem0 /mnt/rootfs
 busybox mount -t squashfs -o loop /dev/pmem1 /run/input
 
 busybox mount -t tmpfs -o size=2M,mode=777 none /run/output
-busybox mkdir --mode 777 /run/output/dir
+strace busybox mkdir --mode 777 /run/output/dir
 
 # busybox mount -t tmpfs -o size=2M none /mnt/upper/scratch
 
@@ -59,4 +59,4 @@ echo '---------------------------'
 #   busybox cat "$f"
 # done
 # TODO this should probably run as a different user too
-(cd /run/output; busybox find . -print -depth | busybox cpio -H newc -ov > /dev/pmem2)
+# (cd /run/output; busybox find . -print -depth | busybox cpio -H newc -ov > /dev/pmem2)
