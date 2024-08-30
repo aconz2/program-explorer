@@ -36,4 +36,7 @@ time $ch \
     $@
 
 cpio --list < /tmp/_out/output
+mkdir /tmp/_out/outout
+(cd /tmp/_out/outout; cpio --extract < /tmp/_out/output)
+ls -l /tmp/_out/outout
 # "sh", "-c", "echo 'into file' > /output/file1; echo 'to stdout'; echo 'to stderr' 1>&2"

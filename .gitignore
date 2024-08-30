@@ -1,3 +1,5 @@
 ignore
 _ignore
 venv
+peinit/target
+perunner/target
