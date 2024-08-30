@@ -4,7 +4,9 @@
 use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
-use std::os::unix::process::CommandExt;
+//use std::os::unix::process::CommandExt;
+use walkdir::{WalkDir};
+use cpio;
 
 fn size_of<T>(_t: T) -> usize { return std::mem::size_of::<T>(); }
 
@@ -99,9 +101,9 @@ fn run_crun() {
         .arg("containerid-1234")
         //.uid(1000)
         //.gid(1000)
-        //.stdout(Stdio::from(outfile))
-        //.stderr(Stdio::from(errfile))
-        //.stdin(Stdio::from(infile))
+        .stdout(Stdio::from(outfile))
+        .stderr(Stdio::from(errfile))
+        .stdin(Stdio::from(infile))
         .spawn()
         .unwrap();
     let ecode = child.wait().unwrap();
@@ -109,6 +111,27 @@ fn run_crun() {
     println!("exit code of crun {ecode}");
 }
 
+fn cpio_load_file(entry: &walkdir::DirEntry) -> std::io::Result<(cpio::NewcBuilder, File)> {
+    let outname = entry.path().strip_prefix("/run/output").unwrap().to_str().unwrap();
+    let builder = cpio::NewcBuilder::new(outname)
+        .uid(1000)
+        .gid(1000)
+        .mode(0o10444);
+
+   File::open(entry.path())
+        .map(|fh| (builder, fh))
+}
+
+fn save_output() {
+    let entries = WalkDir::new("/run/output")
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| cpio_load_file(&e).unwrap());
+
+    let outfile = File::options().write(true).open("/dev/pmem2").unwrap();
+    cpio::write_cpio(entries, outfile).unwrap();
+}
 
 fn main() {
     unsafe {
@@ -134,6 +157,8 @@ fn main() {
         parent_rootfs();
 
         run_crun();
+
+        save_output();
     }
     exit()
     //check_libc(libc::setuid(1000));

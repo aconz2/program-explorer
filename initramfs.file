@@ -32,8 +32,8 @@ dir /run/crun 0777 0 0
 
 #nod /dev/console 0600 0 0 c 5 1
 
-file /init      init1 0555 0 0
-#file /init peinit/target/x86_64-unknown-linux-musl/debug/peinit 0555 0 0
+#file /init      init1 0555 0 0
+file /init peinit/target/x86_64-unknown-linux-musl/debug/peinit 0555 0 0
 # file /bin/init2 init2 0555 0 0
 # file /bin/init3 init3 0555 0 0
 
