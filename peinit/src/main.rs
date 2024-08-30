@@ -89,8 +89,8 @@ fn run_crun() {
     let outfile = File::create("/run/output/stdout").unwrap();
     let errfile = File::create("/run/output/stderr").unwrap();
     let infile =  File::open("/run/input/stdin").unwrap();
-    //let mut child = Command::new("/bin/crun")
-    let mut child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
+    let mut child = Command::new("/bin/crun")
+    //let mut child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
     //let mut child = Command::new("/bin/pivot_rootfs").arg("/abc").arg("/bin/crun")
         .arg("--debug")
         .arg("run")

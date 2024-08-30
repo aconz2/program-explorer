@@ -36,7 +36,7 @@ busybox ls -l /run/
 # busybox ls -l /run/bundle
 # busybox ls -l /run/bundle/rootfs
 
-strace -f pivot_rootfs /abc \
+pivot_rootfs /abc \
   /bin/crun run --bundle /run/bundle containerid-1234 \
   < /run/input/stdin \
   > /run/output/stdout \
