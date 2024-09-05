@@ -7,7 +7,7 @@
 			"gid": 1000
 		},
 		"args": [
-			"sh", "-c", "ls -l /; pwd; echo hi > foo; mv foo /output"
+			"sh", "-c", "echo hiiiiiiiiiiiiiiiiiiiiiiii; cat /etc/passwd; id; cat /proc/self/uid_map; ls -nl /; pwd; echo hi > foo; mv foo /output"
 		],
 		"env": [
 			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -167,6 +167,8 @@
 				}
 			]
 		},
+        "uidMappings": [{"containerID": 1000, "hostID": 1000, "size": 1000}],
+        "gidMappings": [{"containerID": 1000, "hostID": 1000, "size": 1000}],
 		"namespaces": [
 			{
 				"type": "pid"
@@ -179,6 +181,9 @@
 			},
 			{
 				"type": "uts"
+			},
+			{
+				"type": "user"
 			},
 			{
 				"type": "cgroup"

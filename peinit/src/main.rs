@@ -4,7 +4,7 @@
 use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
-//use std::os::unix::process::CommandExt;
+use std::os::unix::process::CommandExt;
 use walkdir::{WalkDir};
 use cpio;
 
@@ -101,11 +101,15 @@ fn run_crun() {
         .arg("containerid-1234")
         //.uid(1000)
         //.gid(1000)
-        .stdout(Stdio::from(outfile))
-        .stderr(Stdio::from(errfile))
-        .stdin(Stdio::from(infile))
+        //.stdout(Stdio::from(outfile))
+        //.stderr(Stdio::from(errfile))
+        //.stdin(Stdio::from(infile))
         .spawn()
         .unwrap();
+    //Command::new("busybox").arg("ps").arg("-T").spawn().unwrap().wait();
+    //let pid = child.id();
+    //let uid_map = std::fs::read_to_string(format!("/proc/{pid}/uid_map")).unwrap();
+    //println!("{uid_map}");
     let ecode = child.wait().unwrap();
     // TODO this is an ExitStatus and will have none exitcode if it is terminated by a signal
     println!("exit code of crun {ecode}");

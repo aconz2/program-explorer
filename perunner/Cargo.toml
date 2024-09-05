@@ -6,4 +6,3 @@ edition = "2021"
 [dependencies]
 api_client = { version = "0.1.0", path = "../../../../../../home/andrew/Repos/cloud-hypervisor/api_client" }
 libc = "0.2.158"
-vmm = { version = "0.1.0", path = "../../../../../../home/andrew/Repos/cloud-hypervisor/vmm" }

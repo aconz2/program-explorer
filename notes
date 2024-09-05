@@ -313,3 +313,5 @@ if i do rootless with uid 0/0 and no user namespace, it works
         rootless with uid 1000/1000 and no usernamespace, it works
 
 https://github.com/containers/crun/issues/1536
+
+okay Command::spawn creates a new socketpair itself...
