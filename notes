@@ -315,3 +315,7 @@ if i do rootless with uid 0/0 and no user namespace, it works
 https://github.com/containers/crun/issues/1536
 
 okay Command::spawn creates a new socketpair itself...
+
+getting error from the ch http server that something is einval, traced to an accept (accept4) call that is einval.
+
+now trying with unixlistener and unixstream like fro the test, but maybe getting enotasock=88 b/c unixlistener uses cloexec
