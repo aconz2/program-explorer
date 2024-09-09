@@ -14,10 +14,10 @@ const CH_BINPATH:     &str = "/home/andrew/Repos/program-explorer/cloud-hypervis
 const KERNEL_PATH:    &str = "/home/andrew/Repos/linux/vmlinux";
 const INITRAMFS_PATH: &str = "/home/andrew/Repos/program-explorer/initramfs";
 
-fn check_libc(ret: i32) {
+fn check_libc(ret: i32, msg: &str) {
     if ret < 0 {
         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        println!("fail with error {errno}");
+        println!("fail with error {errno} {msg}");
         std::process::exit(1);
     }
 }
@@ -78,7 +78,7 @@ fn main() {
 
     // from https://github.com/firecracker-microvm/micro-http/blob/8182cd5523b63ceb52ad9d0e7eb6fb95683e6d1b/src/server.rs#L785
     let path_to_socket = "/tmp/123abc";
-    std::fs::remove_file(path_to_socket).unwrap();
+    std::fs::remove_file(path_to_socket).unwrap_or(());
     //let socket_listener = UnixListener::bind(path_to_socket).unwrap();
     let socket_fd = unsafe {
         let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
@@ -93,7 +93,7 @@ fn main() {
                     len as _,
                 ));
         let backlog = 2;
-        check_libc(libc::listen(fd, backlog));
+        check_libc(libc::listen(fd, backlog), "listen");
         fd
     };
     // let socket_fd = socket_listener.into_raw_fd();
@@ -117,7 +117,8 @@ fn main() {
         child
     };
 
-    let mut parent_stream = UnixStream::connect(path_to_socket).unwrap();
+    //let mut parent_stream = UnixStream::connect(path_to_socket).unwrap();
+    let mut parent_stream = unsafe { UnixStream::from_raw_fd(socket_fd) };
     let pmemconfig = r#"{"file": "../gcc-14.1.0.sqfs", "discard_writes": true}"#;
     
     std::thread::sleep(std::time::Duration::from_millis(500));
