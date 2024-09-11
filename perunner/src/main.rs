@@ -38,9 +38,10 @@ fn main() {
         // the addrlen
         SocketAddr::from_pathname("").unwrap()
     };
-    println!("sockaddr {sockaddr:?}");
     let socket_listener = UnixListener::bind_addr(&sockaddr).unwrap();
     let boundaddr = socket_listener.local_addr().unwrap();
+    println!("sockaddr {sockaddr:?}");
+    println!("boundaddr {boundaddr:?}");
     let mut parent_stream = UnixStream::connect_addr(&boundaddr).unwrap();
 
     // optional: since we are connected, we can unlink the file to make it inaccessible
