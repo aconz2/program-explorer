@@ -47,7 +47,7 @@ impl<O: Write> ArchiveWriter<O> {
     }
 }
 
-pub fn archive_path<P: Copy + AsRef<Path>, O: Write>(root: P, out: O) -> Result<(), Error> {
+pub fn archive_path<P: AsRef<Path>, O: Write>(root: &P, out: &mut O) -> Result<(), Error> {
     let mut writer = ArchiveWriter { out: out };
     let iter = WalkDir::new(root)
         .into_iter()
@@ -65,12 +65,54 @@ pub fn archive_path<P: Copy + AsRef<Path>, O: Write>(root: P, out: O) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::distributions::{Alphanumeric, DistString};
+    use std::ffi::OsString;
+
+    struct TempDir {
+        name: OsString
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let string = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+            let ret = Self { name: format!("/tmp/{string}").into() };
+            std::fs::create_dir(ret.as_ref()).unwrap();
+            ret
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            return Path::new(&self.name)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(self.as_ref()).unwrap()
+        }
+    }
+
+    fn write_file<P: AsRef<Path>>(p: &P, name: &str, data: &[u8]) {
+        let mut f = File::create(p.as_ref().join(name)).unwrap();
+        f.write_all(data).unwrap();
+    }
 
     #[test]
     fn test_basic_out() {
         let mut writer = ArchiveWriter { out: vec![] };
         writer.add_bytes("file1.txt", b"data").unwrap();
-        writer.add_bytes("file2.txt", b"data").unwrap();
-        assert_eq!(writer.out, b"9:file1.txt4:data9:file2.txt4:data");
+        writer.add_bytes("file2.txt", b"jjjj").unwrap();
+        assert_eq!(writer.out, b"9:file1.txt4:data9:file2.txt4:jjjj");
+    }
+
+    #[test]
+    fn test_basic_dir() {
+        let td = TempDir::new();
+        write_file(&td, "file1.txt", b"data");
+        write_file(&td, "file2.txt", b"jjjj");
+        let mut out = vec![];
+        archive_path(&td, &mut out).unwrap();
+        assert_eq!(out, b"9:file1.txt4:data9:file2.txt4:jjjj");
     }
 }
