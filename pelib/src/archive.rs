@@ -29,7 +29,6 @@ impl<O: Write> ArchiveWriter<O> {
 
     fn write_reader<R: Read>(&mut self, size: u64, data: &mut R) -> Result<(), Error> {
         write!(self.out, "{}:", size)?;
-        //self.out.write(data)?;
         io::copy(data, &mut self.out)?;
         Ok(())
     }
@@ -50,6 +49,7 @@ impl<O: Write> ArchiveWriter<O> {
 pub fn archive_path<P: AsRef<Path>, O: Write>(root: &P, out: &mut O) -> Result<(), Error> {
     let mut writer = ArchiveWriter { out: out };
     let iter = WalkDir::new(root)
+        .sort_by_file_name()
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file());
@@ -76,7 +76,7 @@ mod tests {
         fn new() -> Self {
             let string = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
             let ret = Self { name: format!("/tmp/{string}").into() };
-            std::fs::create_dir(ret.as_ref()).unwrap();
+            std::fs::create_dir(&ret).unwrap();
             ret
         }
     }
@@ -89,12 +89,16 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(self.as_ref()).unwrap()
+            std::fs::remove_dir_all(self).unwrap()
         }
     }
 
     fn write_file<P: AsRef<Path>>(p: &P, name: &str, data: &[u8]) {
-        let mut f = File::create(p.as_ref().join(name)).unwrap();
+        let path = p.as_ref().join(name);
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        let mut f = File::create(path).unwrap();
         f.write_all(data).unwrap();
     }
 
@@ -111,8 +115,11 @@ mod tests {
         let td = TempDir::new();
         write_file(&td, "file1.txt", b"data");
         write_file(&td, "file2.txt", b"jjjj");
+        write_file(&td, "b/file3.txt", b"ffff");
         let mut out = vec![];
         archive_path(&td, &mut out).unwrap();
-        assert_eq!(out, b"9:file1.txt4:data9:file2.txt4:jjjj");
+        // let sout = std::str::from_utf8(&out).unwrap();
+        // println!("{sout}");
+        assert_eq!(out, b"11:b/file3.txt4:ffff9:file1.txt4:data9:file2.txt4:jjjj");
     }
 }
