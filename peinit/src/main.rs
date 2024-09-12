@@ -76,16 +76,23 @@ unsafe fn wait_for_pmem(files: &[&std::ffi::CStr]) {
                     let wd = libc::inotify_add_watch(fd, c"/dev".as_ptr(), libc::IN_CREATE);
                     check_libc(wd);
                 }
-                // watch out this is a TOCTOU race and we should probably stat it again before
-                // reading
-                libc::read(inotify_fd.unwrap(), events.as_ptr() as *mut libc::c_void, size_of(events));
-                // we don't bother checking what the events are, just trying again
+                // check one more time before blocking on reading inotify in case it got added
+                // after we stat'd but before we created the watcher. idk this still isn't atomic
+                // though
+                let ret = libc::fstatat(devfd, file.as_ptr(), &mut buf, 0);
+                if ret == 0 {
+                    println!("pmem exists");
+                    break;
+                } else {
+                    let _ = libc::read(inotify_fd.unwrap(), events.as_ptr() as *mut libc::c_void, size_of(events));
+                    // we don't bother checking what the events are, just trying again
+                }
             }
         }
     }
-    libc::close(devfd);
+    let _ = libc::close(devfd);
     if let Some(fd) = inotify_fd {
-        libc::close(fd);
+        let _ = libc::close(fd);
     }
 }
 
