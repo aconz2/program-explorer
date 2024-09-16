@@ -1,12 +1,17 @@
-use std::io::Write;
-use std::io::Read;
+use std::io::{Write,Read,Take};
 use std::path::Path;
 use std::fs::File;
 use std::io;
 use walkdir::WalkDir;
+use std::os::fd::AsRawFd;
 
 pub struct ArchiveWriter<O: Write> {
     out: O
+}
+
+pub struct ArchiveReader<I: Read + AsRawFd<I>> {
+    inp: Take<I>,
+    path_buf: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -14,6 +19,15 @@ pub enum Error {
     IoError,
     StripPrefixError,
     WalkdirError,
+    SizeError,
+    ReadError,
+    Todo,
+    NonAsciiSize,
+    NoColon,
+    BadColon,
+    StrError,
+    ParseError,
+    DataSizeTooBig,
 }
 
 impl From<std::io::Error> for Error { fn from(_e: std::io::Error) -> Error { Error::IoError } }
@@ -46,6 +60,48 @@ impl<O: Write> ArchiveWriter<O> {
     }
 }
 
+impl<I: Read + AsRawFd<I>> ArchiveReader<I> {
+
+    pub fn new(mut inp: I) -> Option<Self> {
+        let size = {
+            let mut buf = [0; 4];
+            inp.read_exact(&mut buf).ok()?;
+            u32::from_le_bytes(buf)
+        };
+        Some(Self { inp: inp.take(size as u64), path_buf: vec![] })
+    }
+
+    pub fn next(&mut self) -> Result<(&[u8], usize), Error> {
+        let path_size = {
+            let mut buf = [0; 2];
+            self.inp.read_exact(&mut buf).map_err(|_|Error::ReadError)?;
+            u16::from_le_bytes(buf) as usize
+        };
+        // read 4 extra for the size of the data buffer
+        self.path_buf.resize(path_size + 4, 0);
+        self.inp.read_exact(&mut self.path_buf[..]).map_err(|_|Error::ReadError)?;
+
+        let data_size = {
+            let mut buf: [u8; 4] = [0; 4];
+            buf.copy_from_slice(&self.path_buf[path_size..]);
+            u32::from_le_bytes(buf) as usize
+        };
+        if data_size > self.inp.limit() as usize {
+            return Err(Error::DataSizeTooBig);
+        }
+
+        self.path_buf.resize(path_size, 0);
+        self.path_buf.push(b'\0');
+
+        Ok((&self.path_buf, data_size))
+    }
+
+    // this weird iterator like thing is because I want the itemtype to be a result
+    pub fn done(&self) -> bool {
+        return self.inp.limit() == 0;
+    }
+}
+
 pub fn archive_path<P: AsRef<Path>, O: Write>(root: &P, out: &mut O) -> Result<(), Error> {
     let mut writer = ArchiveWriter { out: out };
     let iter = WalkDir::new(root)
@@ -59,6 +115,24 @@ pub fn archive_path<P: AsRef<Path>, O: Write>(root: &P, out: &mut O) -> Result<(
         let mut file = File::open(e.path())?;
         writer.add_file(name, len, &mut file)?;
     }
+    Ok(())
+}
+
+pub fn unpack_archive<P: AsRef<Path>, I: Read + AsRawFd<I>>(root: &P, inp: &mut I) -> Result<(), Error> {
+    let mut reader = ArchiveReader::new(inp).ok_or(Error::ReadError)?;
+    loop {
+        let (path, size) = reader.next()?;
+        let full_path = 
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        // makedirs
+        if reader.done() { break; }
+        // std::fs::create_dir_all(p).ok_or(Error::
+        //let mut file = File::create(p)
+    }
+    // for (path, data) in reader.read_files() {
+    // }
     Ok(())
 }
 
@@ -103,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_basic_out() {
+    fn test_writer_basic_out() {
         let mut writer = ArchiveWriter { out: vec![] };
         writer.add_bytes("file1.txt", b"data").unwrap();
         writer.add_bytes("file2.txt", b"jjjj").unwrap();
@@ -111,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn test_basic_dir() {
+    fn test_archive_path_basic_dir() {
         let td = TempDir::new();
         write_file(&td, "file1.txt", b"data");
         write_file(&td, "file2.txt", b"jjjj");
@@ -122,4 +196,10 @@ mod tests {
         // println!("{sout}");
         assert_eq!(out, b"11:b/file3.txt4:ffff9:file1.txt4:data9:file2.txt4:jjjj");
     }
+
+    // #[test]
+    // fn test_unpack_basic() {
+    //     let td = TempDir::new();
+
+    // }
 }

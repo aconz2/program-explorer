@@ -50,11 +50,7 @@ impl TempDir {
     fn new<P: AsRef<Path>>(dir: P) -> Option<Self> {
         let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
         let ret = Self { name: dir.as_ref().join(format!("ch-{rng}")).into() };
-        let f = &ret.name;
-        println!("{f:?}");
-        if let Err(_) = std::fs::create_dir(&ret.name) {
-            return None
-        }
+        std::fs::create_dir(&ret.name).ok()?;
         Some(ret)
     }
 
@@ -75,14 +71,8 @@ impl Drop for TempDir {
 
 fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
     let _ = fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
-        Err(_) => return None,
-        Ok(x) => x,
-    };
-    let stream = match UnixStream::connect(&path) {
-        Err(_) => return None,
-        Ok(x) => x,
-    };
+    let listener = UnixListener::bind(&path).ok()?;
+    let stream = UnixStream::connect(&path).ok()?;
     // clear FD_CLOEXEC
     unsafe {
         let ret = libc::fcntl(listener.as_raw_fd(), libc::F_SETFD, 0);
@@ -127,7 +117,6 @@ impl CloudHypervisor {
                 let f = console_file.to_str().unwrap();
                 x.arg("--console").arg(format!("file={f}"));
             }
-            println!("{x:?}");
             match x.spawn() {
                 Err(_) => return Err(Error::Spawn),
                 Ok(child) => child
@@ -153,7 +142,6 @@ impl CloudHypervisor {
     }
     pub fn wait_timeout_or_kill(&mut self, duration: Duration) -> Option<ExitStatus> {
         match self.child.wait_timeout(duration) {
-            Ok(status) => status,
             Ok(None) => {
                 println!("none status");
                 // have elapsed without exiting
@@ -163,6 +151,7 @@ impl CloudHypervisor {
                 println!("result of waiting {e:?}");
                 None
             },
+            Ok(status) => status,
             Err(_) => {
                 println!("error waiting");
                 // TODO what do we do to cleanup the child?
