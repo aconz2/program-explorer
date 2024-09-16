@@ -1,18 +1,25 @@
-use std::io::{Write,Read,Take};
+use std::io::{Write,Read};
 use std::path::Path;
 use std::fs::File;
 use std::io;
 use walkdir::WalkDir;
-use std::os::fd::AsRawFd;
+use std::os::fd::{RawFd,AsRawFd,FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::ffi::CString;
+use std::ptr;
+
+use libc;
+
+use openat2::{openat2,openat2_cstr,OpenHow,ResolveFlags};
 
 pub struct ArchiveWriter<O: Write> {
     out: O
 }
 
-pub struct ArchiveReader<I: Read + AsRawFd<I>> {
-    inp: Take<I>,
-    path_buf: Vec<u8>,
-}
+// pub struct ArchiveReader<I: Read + AsRawFd<I>> {
+//     inp: Take<I>,
+//     path_buf: Vec<u8>,
+// }
 
 #[derive(Debug)]
 pub enum Error {
@@ -28,6 +35,11 @@ pub enum Error {
     StrError,
     ParseError,
     DataSizeTooBig,
+    NotADir,
+    Open,
+    Path,
+    CopyFileRange,
+    CopyFileRangeZero,
 }
 
 impl From<std::io::Error> for Error { fn from(_e: std::io::Error) -> Error { Error::IoError } }
@@ -60,48 +72,6 @@ impl<O: Write> ArchiveWriter<O> {
     }
 }
 
-impl<I: Read + AsRawFd<I>> ArchiveReader<I> {
-
-    pub fn new(mut inp: I) -> Option<Self> {
-        let size = {
-            let mut buf = [0; 4];
-            inp.read_exact(&mut buf).ok()?;
-            u32::from_le_bytes(buf)
-        };
-        Some(Self { inp: inp.take(size as u64), path_buf: vec![] })
-    }
-
-    pub fn next(&mut self) -> Result<(&[u8], usize), Error> {
-        let path_size = {
-            let mut buf = [0; 2];
-            self.inp.read_exact(&mut buf).map_err(|_|Error::ReadError)?;
-            u16::from_le_bytes(buf) as usize
-        };
-        // read 4 extra for the size of the data buffer
-        self.path_buf.resize(path_size + 4, 0);
-        self.inp.read_exact(&mut self.path_buf[..]).map_err(|_|Error::ReadError)?;
-
-        let data_size = {
-            let mut buf: [u8; 4] = [0; 4];
-            buf.copy_from_slice(&self.path_buf[path_size..]);
-            u32::from_le_bytes(buf) as usize
-        };
-        if data_size > self.inp.limit() as usize {
-            return Err(Error::DataSizeTooBig);
-        }
-
-        self.path_buf.resize(path_size, 0);
-        self.path_buf.push(b'\0');
-
-        Ok((&self.path_buf, data_size))
-    }
-
-    // this weird iterator like thing is because I want the itemtype to be a result
-    pub fn done(&self) -> bool {
-        return self.inp.limit() == 0;
-    }
-}
-
 pub fn archive_path<P: AsRef<Path>, O: Write>(root: &P, out: &mut O) -> Result<(), Error> {
     let mut writer = ArchiveWriter { out: out };
     let iter = WalkDir::new(root)
@@ -118,21 +88,116 @@ pub fn archive_path<P: AsRef<Path>, O: Write>(root: &P, out: &mut O) -> Result<(
     Ok(())
 }
 
-pub fn unpack_archive<P: AsRef<Path>, I: Read + AsRawFd<I>>(root: &P, inp: &mut I) -> Result<(), Error> {
-    let mut reader = ArchiveReader::new(inp).ok_or(Error::ReadError)?;
-    loop {
-        let (path, size) = reader.next()?;
-        let full_path = 
-        if let Some(p) = path.parent() {
-            let _ = std::fs::create_dir_all(p);
+struct DirFd {
+    fd: RawFd,
+}
+
+impl DirFd {
+    fn new<P: AsRef<Path>>(path: &P) -> Result<Self, Error> {
+        let path = path.as_ref();
+        if !path.is_dir() {
+            return Err(Error::NotADir);
         }
-        // makedirs
-        if reader.done() { break; }
-        // std::fs::create_dir_all(p).ok_or(Error::
-        //let mut file = File::create(p)
+        let fd = unsafe {
+            let pathz = CString::new(path.as_os_str().as_bytes()).map_err(|_|Error::Path)?;
+            let ret = libc::open(pathz.as_ptr(), libc::O_PATH);
+            if ret < 0 {
+                return Err(Error::Open);
+            }
+            ret
+        };
+        Ok(Self { fd: fd })
     }
-    // for (path, data) in reader.read_files() {
-    // }
+}
+
+impl Drop for DirFd {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
+
+impl AsRawFd for DirFd {
+    fn as_raw_fd(&self) -> i32 { return self.fd }
+}
+
+const SYS_OPENAT2: libc::c_long = 437;
+
+fn copy_file_range(fd_in: RawFd, len: usize, file_out: File) -> Result<(), Error> {
+    let fd_out = file_out.as_raw_fd();
+    let mut len = len;
+    while len > 0 {
+        let ret = unsafe {
+            libc::copy_file_range(fd_in, ptr::null_mut(), fd_out, ptr::null_mut(), len, 0)
+        };
+        if ret < 0 {
+            return Err(Error::CopyFileRange);
+        }
+        if ret == 0 {
+            return Err(Error::CopyFileRangeZero);
+        }
+        let ret = ret as usize;
+        assert!(ret <= len);
+        len -= ret;
+    }
+    Ok(())
+}
+
+pub fn unpack_archive<P: AsRef<Path>>(root: &P, file: &P) -> Result<(), Error> {
+    let mut infile = File::open(file).map_err(|_|Error::ReadError)?;
+    let dirfd = DirFd::new(root)?;
+    let fd_in = infile.as_raw_fd();
+
+    let content_length = {
+        let mut buf = [0; 4];
+        infile.read_exact(&mut buf).map_err(|_|Error::ReadError)?;
+        u32::from_le_bytes(buf) as usize
+    };
+
+    let mut inp = infile.take(content_length as u64);
+
+    let mut path_buf: Vec<u8> = vec![];
+
+    while inp.limit() > 0 {
+
+        let path_size = {
+            let mut buf = [0; 2];
+            inp.read_exact(&mut buf).map_err(|_|Error::ReadError)?;
+            u16::from_le_bytes(buf) as usize
+        };
+
+        // read 4 extra for the size of the data buffer
+        path_buf.resize(path_size + 4, 0);
+        inp.read_exact(&mut path_buf[..]).map_err(|_|Error::ReadError)?;
+
+        let data_size = {
+            let mut buf: [u8; 4] = [0; 4];
+            buf.copy_from_slice(&path_buf[path_size..]);
+            u32::from_le_bytes(buf) as usize
+        };
+        if data_size > inp.limit() as usize {
+            return Err(Error::DataSizeTooBig);
+        }
+
+        path_buf.resize(path_size, 0);
+        //path_buf.push(b'\0');
+
+        let file_out = unsafe {
+            let how =  {
+                let mut x = OpenHow::new(libc::O_CREAT, 0o777);
+                x.resolve |= ResolveFlags::IN_ROOT;
+                x
+            };
+
+            // TODO how can I just use the vec with a null byte appended?
+            let path_bufz = CString::new(path_buf.as_slice()).map_err(|_|Error::Path)?;
+            let fd = openat2_cstr(Some(dirfd.as_raw_fd()), path_bufz.as_c_str(), &how)?;
+            File::from_raw_fd(fd)
+        };
+        copy_file_range(fd_in, data_size, file_out)?;
+
+    }
     Ok(())
 }
 

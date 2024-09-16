@@ -6,6 +6,8 @@ edition = "2021"
 [lib]
 
 [dependencies]
+libc = "0.2.158"
+openat2 = "0.1.2"
 walkdir = "2.5.0"
 
 [dev-dependencies]
