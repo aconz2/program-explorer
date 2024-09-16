@@ -4,13 +4,14 @@ use std::fs::File;
 use std::io;
 use walkdir::WalkDir;
 use std::os::fd::{RawFd,AsRawFd,FromRawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::ffi::CString;
+use std::ffi::{OsString,CString};
+use std::os::unix::ffi::{OsStrExt,OsStringExt};
 use std::ptr;
+use std::fs;
 
 use libc;
 
-use openat2::{openat2,openat2_cstr,OpenHow,ResolveFlags};
+use openat2::{openat2_cstr,OpenHow,ResolveFlags};
 
 pub struct ArchiveWriter<O: Write> {
     out: O
@@ -40,6 +41,7 @@ pub enum Error {
     Path,
     CopyFileRange,
     CopyFileRangeZero,
+    MkdirP,
 }
 
 impl From<std::io::Error> for Error { fn from(_e: std::io::Error) -> Error { Error::IoError } }
@@ -122,8 +124,6 @@ impl AsRawFd for DirFd {
     fn as_raw_fd(&self) -> i32 { return self.fd }
 }
 
-const SYS_OPENAT2: libc::c_long = 437;
-
 fn copy_file_range(fd_in: RawFd, len: usize, file_out: File) -> Result<(), Error> {
     let fd_out = file_out.as_raw_fd();
     let mut len = len;
@@ -182,15 +182,23 @@ pub fn unpack_archive<P: AsRef<Path>>(root: &P, file: &P) -> Result<(), Error> {
 
         path_buf.resize(path_size, 0);
         //path_buf.push(b'\0');
-
+        
+        {
+            // TODO get rid of copy!
+            let osstring = OsString::from_vec(path_buf.clone());
+            let p = Path::new(&osstring);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).map_err(|_|Error::MkdirP)?;
+            }
+        }
         let file_out = unsafe {
             let how =  {
-                let mut x = OpenHow::new(libc::O_CREAT, 0o777);
+                let mut x = OpenHow::new(libc::O_WRONLY | libc::O_CREAT, 0o777);
                 x.resolve |= ResolveFlags::IN_ROOT;
                 x
             };
 
-            // TODO how can I just use the vec with a null byte appended?
+            // TODO get rid of copy!
             let path_bufz = CString::new(path_buf.as_slice()).map_err(|_|Error::Path)?;
             let fd = openat2_cstr(Some(dirfd.as_raw_fd()), path_bufz.as_c_str(), &how)?;
             File::from_raw_fd(fd)
@@ -215,7 +223,7 @@ mod tests {
         fn new() -> Self {
             let string = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
             let ret = Self { name: format!("/tmp/{string}").into() };
-            std::fs::create_dir(&ret).unwrap();
+            fs::create_dir(&ret).unwrap();
             ret
         }
     }
@@ -228,14 +236,14 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(self).unwrap()
+            fs::remove_dir_all(self).unwrap()
         }
     }
 
     fn write_file<P: AsRef<Path>>(p: &P, name: &str, data: &[u8]) {
         let path = p.as_ref().join(name);
         if let Some(p) = path.parent() {
-            let _ = std::fs::create_dir_all(p);
+            let _ = fs::create_dir_all(p);
         }
         let mut f = File::create(path).unwrap();
         f.write_all(data).unwrap();
