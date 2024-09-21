@@ -41,6 +41,7 @@ pub enum Error {
     Path,
     CopyFileRange,
     CopyFileRangeZero,
+    CopyFileRangeRetTooBig,
     MkdirP,
 }
 
@@ -131,14 +132,10 @@ fn copy_file_range(fd_in: RawFd, len: usize, file_out: File) -> Result<(), Error
         let ret = unsafe {
             libc::copy_file_range(fd_in, ptr::null_mut(), fd_out, ptr::null_mut(), len, 0)
         };
-        if ret < 0 {
-            return Err(Error::CopyFileRange);
-        }
-        if ret == 0 {
-            return Err(Error::CopyFileRangeZero);
-        }
+        if ret < 0 { return Err(Error::CopyFileRange); }
+        if ret == 0 { return Err(Error::CopyFileRangeZero); }
         let ret = ret as usize;
-        assert!(ret <= len);
+        if ret > len { return Err(Error::CopyFileRangeRetTooBig); }
         len -= ret;
     }
     Ok(())
@@ -181,10 +178,11 @@ pub fn unpack_archive<P: AsRef<Path>>(root: &P, file: &P) -> Result<(), Error> {
         }
 
         path_buf.resize(path_size, 0);
+        // TODO want to not copy path_buf and just 
         //path_buf.push(b'\0');
         
         {
-            // TODO get rid of copy!
+            // TODO get rid of copy / don't create dirs
             let osstring = OsString::from_vec(path_buf.clone());
             let p = Path::new(&osstring);
             if let Some(parent) = p.parent() {
@@ -192,7 +190,7 @@ pub fn unpack_archive<P: AsRef<Path>>(root: &P, file: &P) -> Result<(), Error> {
             }
         }
         let file_out = unsafe {
-            let how =  {
+            let how = {
                 let mut x = OpenHow::new(libc::O_WRONLY | libc::O_CREAT, 0o777);
                 x.resolve |= ResolveFlags::IN_ROOT;
                 x
