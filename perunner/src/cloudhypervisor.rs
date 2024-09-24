@@ -141,6 +141,7 @@ impl CloudHypervisor {
         }
     }
     pub fn wait_timeout_or_kill(&mut self, duration: Duration) -> Option<ExitStatus> {
+        // TODO I don't really like wait_timeout; I think we can do something nicer
         match self.child.wait_timeout(duration) {
             Ok(None) => {
                 println!("none status");

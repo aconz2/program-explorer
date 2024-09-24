@@ -5,8 +5,16 @@ use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
 use std::os::unix::process::CommandExt;
+use std::os::fd::{AsRawFd,FromRawFd};
 use walkdir::{WalkDir};
-use cpio;
+
+#[derive(Debug)]
+enum Error {
+    OpenDev,
+    InotifyInit,
+    InotifyAddWatch,
+    InotifyRead,
+}
 
 fn size_of<T>(_t: T) -> usize { return std::mem::size_of::<T>(); }
 
@@ -54,52 +62,73 @@ unsafe fn setup_overlay() {
     check_libc(libc::mount(c"none".as_ptr(), c"/run/bundle/rootfs".as_ptr(), c"overlay".as_ptr(), libc::MS_SILENT, c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work".as_ptr() as *const libc::c_void));
 }
 
-unsafe fn wait_for_pmem(files: &[&std::ffi::CStr]) {
-    let mut inotify_fd: Option<i32> = None;
-    let devfd = libc::open(c"/dev".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+unsafe fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
+    let mut buf: libc::stat = std::mem::zeroed(); 
+    let ret = libc::fstatat(file.as_raw_fd(), name.as_ptr(), &mut buf, 0);
+    ret == 0
+}
 
-    let events: [libc::inotify_event; 4] = std::mem::zeroed();
+fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
+    let dev_file = unsafe {
+        let ret = libc::open(c"/dev".as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
+        if ret < 0 {
+            return Err(Error::OpenDev);
+        }
+        File::from_raw_fd(ret)
+    };
+
+    if files.iter().all(|file| unsafe { fstatat_exists(&dev_file, file) }) {
+        return Ok(());
+    }
+
+    let inotify_file: File = unsafe {
+        println!("using inotify");
+        let fd = libc::inotify_init1(libc::IN_CLOEXEC);
+        if fd < 0 {
+            return Err(Error::InotifyInit);
+        }
+
+        File::from_raw_fd(fd)
+    };
+    let ret = unsafe { libc::inotify_add_watch(inotify_file.as_raw_fd(), c"/dev".as_ptr(), libc::IN_CREATE) };
+    if ret < 0 {
+        return Err(Error::InotifyAddWatch);
+    }
+    let events: [libc::inotify_event; 4] = unsafe { std::mem::zeroed() };
 
     for file in files.iter() {
         loop {
-            let mut buf: libc::stat = std::mem::zeroed(); 
-            let ret = libc::fstatat(devfd, file.as_ptr(), &mut buf, 0);
-            if ret == 0 {
+            if unsafe { fstatat_exists(&dev_file, file) } {
                 println!("pmem exists");
                 break;
             } else {
-                if inotify_fd.is_none() {
-                    println!("using inotify");
-                    let fd = libc::inotify_init1(libc::IN_CLOEXEC);
-                    check_libc(fd);
-                    inotify_fd = Some(fd);
-                    let wd = libc::inotify_add_watch(fd, c"/dev".as_ptr(), libc::IN_CREATE);
-                    check_libc(wd);
-                }
                 // check one more time before blocking on reading inotify in case it got added
                 // after we stat'd but before we created the watcher. idk this still isn't atomic
                 // though
-                let ret = libc::fstatat(devfd, file.as_ptr(), &mut buf, 0);
-                if ret == 0 {
+                if unsafe { fstatat_exists(&dev_file, file) } {
                     println!("pmem exists");
                     break;
                 } else {
-                    let _ = libc::read(inotify_fd.unwrap(), events.as_ptr() as *mut libc::c_void, size_of(events));
+                    let ret = unsafe { libc::read(inotify_file.as_raw_fd(), events.as_ptr() as *mut libc::c_void, size_of(events)) };
+                    if ret < 0 {
+                        return Err(Error::InotifyRead);
+                    }
                     // we don't bother checking what the events are, just trying again
                 }
             }
         }
     }
-    let _ = libc::close(devfd);
-    if let Some(fd) = inotify_fd {
-        let _ = libc::close(fd);
-    }
+    Ok(())
 }
 
 fn run_crun() {
-    let outfile = File::create("/run/output/stdout").unwrap();
-    let errfile = File::create("/run/output/stderr").unwrap();
-    let infile =  File::open("/run/input/stdin").unwrap();
+    let outfile = File::create_new("/run/output/stdout").unwrap();
+    let errfile = File::create_new("/run/output/stderr").unwrap();
+    let infile  = {
+        let p = "/run/input/stdin";
+        let _ = File::create_new(p);
+        File::open("/run/input/stdin").unwrap()
+    };
     let mut child = Command::new("/bin/crun")
     //let mut child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
     //let mut child = Command::new("/bin/pivot_rootfs").arg("/abc").arg("/bin/crun")
@@ -110,69 +139,53 @@ fn run_crun() {
         .arg("containerid-1234")
         //.uid(1000)
         //.gid(1000)
-        //.stdout(Stdio::from(outfile))
-        //.stderr(Stdio::from(errfile))
-        //.stdin(Stdio::from(infile))
+        .stdout(Stdio::from(outfile))
+        .stderr(Stdio::from(errfile))
+        .stdin(Stdio::from(infile))
         .spawn()
         .unwrap();
     //Command::new("busybox").arg("ps").arg("-T").spawn().unwrap().wait();
     //let pid = child.id();
     //let uid_map = std::fs::read_to_string(format!("/proc/{pid}/uid_map")).unwrap();
     //println!("{uid_map}");
+    // TODO we need to wait with timeout from here too
     let ecode = child.wait().unwrap();
     // TODO this is an ExitStatus and will have none exitcode if it is terminated by a signal
     println!("exit code of crun {ecode}");
 }
 
-fn cpio_load_file(entry: &walkdir::DirEntry) -> std::io::Result<(cpio::NewcBuilder, File)> {
-    let outname = entry.path().strip_prefix("/run/output").unwrap().to_str().unwrap();
-    let builder = cpio::NewcBuilder::new(outname)
-        .uid(1000)
-        .gid(1000)
-        .mode(0o10444);
-
-   File::open(entry.path())
-        .map(|fh| (builder, fh))
-}
-
-fn save_output() {
-    let entries = WalkDir::new("/run/output")
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| cpio_load_file(&e).unwrap());
-
-    let outfile = File::options().write(true).open("/dev/pmem2").unwrap();
-    cpio::write_cpio(entries, outfile).unwrap();
-}
-
 fn main() {
     unsafe {
         init_mounts();
-
-        //              rootfs    input     output
-        wait_for_pmem(&[c"pmem0", c"pmem1", c"pmem2"]);
-
-        mount_pmems();
-
-        setup_overlay();
-
-        // Command::new("busybox").arg("mount").spawn().unwrap().wait();
-        // Command::new("busybox").arg("ls").arg("-l").arg("/run/").spawn().unwrap().wait();
-        // Command::new("busybox").arg("ls").arg("-l").arg("/run/output").spawn().unwrap().wait();
-        // Command::new("busybox").arg("stat").arg("/run/output").spawn().unwrap().wait();
-        // Command::new("busybox").arg("stat").arg("/run/output/dir").spawn().unwrap().wait();
-        // Command::new("busybox").arg("ls").arg("-l").arg("/run/bundle/rootfs").spawn().unwrap();
-        //
-        // let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        // println!("status={status}");
-
-        parent_rootfs();
-
-        run_crun();
-
-        save_output();
     }
+
+    //              rootfs    input/output
+    wait_for_pmem(&[c"pmem0", c"pmem1"]).unwrap();
+
+    unsafe {
+        mount_pmems();
+        setup_overlay();
+        parent_rootfs();
+    }
+
+
+
+    // Command::new("busybox").arg("mount").spawn().unwrap().wait();
+    // Command::new("busybox").arg("ls").arg("-l").arg("/run/").spawn().unwrap().wait();
+    // Command::new("busybox").arg("ls").arg("-l").arg("/run/output").spawn().unwrap().wait();
+    // Command::new("busybox").arg("stat").arg("/run/output").spawn().unwrap().wait();
+    // Command::new("busybox").arg("stat").arg("/run/output/dir").spawn().unwrap().wait();
+    // Command::new("busybox").arg("ls").arg("-l").arg("/run/bundle/rootfs").spawn().unwrap();
+    //
+    // let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    // println!("status={status}");
+
+    // unpack_input();
+
+    run_crun();
+
+    // pack_output();
+
     exit()
     //check_libc(libc::setuid(1000));
 }
