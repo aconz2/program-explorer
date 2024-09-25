@@ -1,6 +1,6 @@
 use std::io::{stdin,BufRead,Write,BufWriter,Seek,SeekFrom};
 use std::fs::File;
-use pearchive::{pack_files,list_dir,pack_dir};
+use pearchive::{pack_files,list_dir,pack_dir,list_dir_c};
 use std::env;
 use std::path::Path;
 use std::ffi::OsString;
@@ -30,6 +30,18 @@ fn main() {
             let dirname = args.get(0).unwrap();
             let dir = Path::new(dirname);
             let (dirs, files) = list_dir(dir).unwrap();
+            for d in dirs {
+                println!("dir {:?}", d);
+            }
+            for f in files {
+                println!("file {:?}", f);
+            }
+        },
+        Some("list-dir-c") => {
+            let args = &args[2..];
+            let dirname = args.get(0).unwrap();
+            let dir = Path::new(dirname);
+            let (dirs, files) = list_dir_c(dir).unwrap();
             for d in dirs {
                 println!("dir {:?}", d);
             }
