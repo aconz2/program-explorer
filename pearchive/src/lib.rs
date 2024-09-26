@@ -173,9 +173,7 @@ fn list_dir2_rec(curpath: &mut PathBuf, parentdir: &OwnedFd, iter: &mut RawDir<&
                     continue;
                 }
                 let name = unsafe { OsStr::from_encoded_bytes_unchecked(entry.file_name().to_bytes()) };
-                println!("curpath={curpath:?} name={name:?}");
                 curpath.push(name);
-                println!("  curpath={curpath:?}");
                 dirs.push(curpath.clone().into());
 
                 let newdirfd = opendirat(parentdir, entry.file_name())?;
