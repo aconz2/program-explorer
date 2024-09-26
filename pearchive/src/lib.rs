@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::io;
-use std::io::{stdin,BufRead,Write,BufWriter,Seek,SeekFrom};
+use std::io::{Write,BufWriter,Seek,SeekFrom};
 use std::ffi::OsString;
 use std::os::unix::prelude::OsStrExt;
-use std::os::fd::{FromRawFd,AsRawFd,IntoRawFd,OwnedFd};
-use std::fs::File;
-use memmap::MmapOptions;
-use std::fs;
+use std::os::fd::{FromRawFd,AsRawFd,OwnedFd};
+use std::fs::{File,ReadDir};
+// use memmap::MmapOptions;
+//use std::fs;
 use std::path::PathBuf;
-use std::ffi::{CStr,OsStr};
+use std::ffi::{CStr,OsStr,CString};
 use rustix::fs::{RawDir,FileType};
 
 /// archive format
@@ -126,9 +126,9 @@ fn write_zero_separated<'a, I: Iterator<Item = &'a [u8]>, W: Write>(xs: I, out: 
 }
 
 fn opendir(dir: &Path) -> Result<OwnedFd, Error> {
+    let cstr = CString::new(dir.as_os_str().as_encoded_bytes()).unwrap();
     let fd = unsafe {
-        let cstr = dir.as_os_str().as_bytes(); // TODO idk if this is right
-        let ret = libc::open(cstr.as_ptr() as *const i8, libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC);
+        let ret = libc::open(cstr.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC);
         if ret < 0 { return Err(Error::Open); }
         ret
     };
@@ -144,6 +144,8 @@ fn opendirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+// TODO I don't know how to write the lifetime for this
+// ----------------
 // struct DIR<'a> {
 //     file: File,
 //     iter: RawDir<'a, &File>,
@@ -158,6 +160,7 @@ fn opendirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
 //         Ok(Self { file:file, iter:iter, buf:buf })
 //     }
 // }
+// ----------------
 
 fn list_dir2_rec(curpath: &mut PathBuf, parentdir: &OwnedFd, iter: &mut RawDir<&OwnedFd>, dirs: &mut Vec::<OsString>, files: &mut Vec::<OsString>, depth: usize) -> Result<(), Error> {
     if depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
@@ -179,6 +182,7 @@ fn list_dir2_rec(curpath: &mut PathBuf, parentdir: &OwnedFd, iter: &mut RawDir<&
                 let newdirfd = opendirat(parentdir, entry.file_name())?;
                 let mut buf = Vec::with_capacity(4096);
                 let mut newiter = RawDir::new(&newdirfd, buf.spare_capacity_mut());
+
                 list_dir2_rec(curpath, &newdirfd, &mut newiter, dirs, files, depth + 1)?;
                 curpath.pop();
             },
@@ -193,7 +197,6 @@ pub fn list_dir2(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> {
     let mut curpath = PathBuf::new();
     let mut dirs: Vec::<OsString> = vec![];
     let mut files: Vec::<OsString> = vec![];
-    // let dir = DIR::new(dir)?;
 
     let dirfd = opendir(dir)?;
     let mut buf = Vec::with_capacity(4096);
@@ -228,27 +231,48 @@ pub fn list_dir(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> {
     let mut dirs: Vec::<OsString> = vec![];
     let mut files: Vec::<OsString> = vec![];
     let mut curpath = PathBuf::new();
-    // let mut stack: Vec::<PathBuf> = Vec::with_capacity(32);
-    // stack.push(dir.into());
-    // while let Some(dir) = stack.pop() {
-    //     for entry in dir.read_dir().map_err(|_| Error::ReadDir)? {
-    //         let entry = entry.map_err(|_| Error::Entry)?;
-    //         let ftype = entry.file_type().map_err(|_| Error::FileType)?;
-    //         let mut haddir = false;
-    //         if ftype.is_file() {
-    //             files.push(curpath.join(entry.file_name()).into());
-    //         } else if ftype.is_dir() {
-    //             stack.push(entry.path().into());
-    //             dirs.push(curpath.join(entry.file_name()).into());
-    //             haddir = true;
-    //         }
-    //         if haddir {
-    //             curpath = 
-    //         } else {
-    //         }
-    //     }
-    // }
     list_dir_rec(&mut curpath, dir, &mut dirs, &mut files, 0)?;
+    files.sort();
+    dirs.sort();
+    Ok((dirs, files))
+}
+
+pub fn list_dir_nr(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> {
+    if !dir.is_dir() { return Err(Error::NotADir); }
+    let mut dirs: Vec::<OsString> = vec![];
+    let mut files: Vec::<OsString> = vec![];
+    let mut curpath = PathBuf::new();
+    let mut stack: Vec::<ReadDir> = Vec::with_capacity(32);
+    stack.push(dir.read_dir().map_err(|_| Error::ReadDir)?);
+    while let Some(ref mut reader) = stack.last_mut() {
+        match reader.next() {
+            None => {
+                curpath.pop();
+                stack.pop();
+            },
+            Some(Ok(entry)) => {
+                let ftype = entry.file_type().map_err(|_| Error::FileType)?;
+                if ftype.is_file() {
+                    files.push(curpath.join(entry.file_name()).into());
+                } else if ftype.is_dir() {
+                    curpath.push(entry.file_name());
+                    stack.push(entry.path().read_dir().map_err(|_| Error::ReadDir)?);
+                    dirs.push(curpath.clone().into());
+                }
+            },
+            Some(Err(_)) => { return Err(Error::ReadDir); }
+        }
+        // for entry in dir.read_dir().map_err(|_| Error::ReadDir)? {
+        //     let entry = entry.map_err(|_| Error::Entry)?;
+        //     let ftype = entry.file_type().map_err(|_| Error::FileType)?;
+        //     if ftype.is_file() {
+        //         files.push(curpath.join(entry.file_name()).into());
+        //     } else if ftype.is_dir() {
+        //         stack.push(entry.path().into());
+        //         dirs.push(curpath.join(entry.file_name()).into());
+        //     }
+        // }
+    }
     files.sort();
     dirs.sort();
     Ok((dirs, files))
