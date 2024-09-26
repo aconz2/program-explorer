@@ -4,12 +4,13 @@ use std::io;
 use std::io::{stdin,BufRead,Write,BufWriter,Seek,SeekFrom};
 use std::ffi::OsString;
 use std::os::unix::prelude::OsStrExt;
-use std::os::fd::{FromRawFd,AsRawFd,IntoRawFd};
+use std::os::fd::{FromRawFd,AsRawFd,IntoRawFd,OwnedFd};
 use std::fs::File;
 use memmap::MmapOptions;
 use std::fs;
 use std::path::PathBuf;
 use std::ffi::{CStr,OsStr};
+use rustix::fs::{RawDir,FileType};
 
 /// archive format
 /// num_dirs: u32le 
@@ -28,7 +29,7 @@ use std::ffi::{CStr,OsStr};
 // that would trigger a realloc and then we waste, so this should always be 4 less than a power of
 // 2. Seems like diminishing returns
 const NUM_OPEN_FDS: i32 = 256 - 4;
-const MAX_DIR_DEPTH: usize = 1024;
+const MAX_DIR_DEPTH: usize = 32;
 
 #[derive(Debug)]
 pub enum Error {
@@ -48,6 +49,7 @@ pub enum Error {
     DirEntName,
     FdOpenDir,
     OpenAt,
+    Getdents,
 }
 
 fn as_slice<T>(data: &[u8]) -> Option<&[T]> {
@@ -123,116 +125,85 @@ fn write_zero_separated<'a, I: Iterator<Item = &'a [u8]>, W: Write>(xs: I, out: 
     return Ok(size);
 }
 
-
-fn dirent_name_ptr(dirent: &*const libc::dirent) -> *const i8 {
-    use std::mem;
-    const offset: isize = mem::offset_of!(libc::dirent, d_name) as isize;
-    unsafe { dirent.byte_offset(offset) as *const i8 }
-}
-
-fn dirent_name_osstr(dirent: &*const libc::dirent) -> &OsStr {
-    let cname = unsafe { CStr::from_ptr(dirent_name_ptr(dirent)) };
-    unsafe { OsStr::from_encoded_bytes_unchecked(cname.to_bytes()) }
-}
-
-fn dirent_name_cstr(dirent: &*const libc::dirent) -> &CStr {
-    unsafe { CStr::from_ptr(dirent_name_ptr(dirent)) }
-}
-
-struct DIR {
-    dirp: *mut libc::DIR,
-    file: File,
-}
-
-fn fdopendir(file: &File) -> Result<*mut libc::DIR, Error> {
-    let p = unsafe {
-        libc::fdopendir(file.as_raw_fd())
+fn opendir(dir: &Path) -> Result<OwnedFd, Error> {
+    let fd = unsafe {
+        let cstr = dir.as_os_str().as_bytes(); // TODO idk if this is right
+        let ret = libc::open(cstr.as_ptr() as *const i8, libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC);
+        if ret < 0 { return Err(Error::Open); }
+        ret
     };
-    if p.is_null() { return Err(Error::FdOpenDir); }
-    Ok(p)
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-impl DIR {
-    fn open(path: &Path) -> Result<Self, Error> {
-        // TODO open this with O_DIRECTORY
-        let file = File::open(path).map_err(|_| Error::Open)?;
-        let dirp = fdopendir(&file)?;
-        Ok(Self { dirp: dirp, file: file })
-    }
-
-    fn readdir(&mut self) -> Option<*const libc::dirent> {
-        // TODO this mofo is calling fcntl(_, F_GETFL) then fcntl(_, F_SETFD, O_CLOEXEC) all the
-        // time
-        let ret = unsafe { libc::readdir(self.dirp) };
-        if ret.is_null() { return None; }
-        Some(ret)
-    }
-
-    fn openat(&self, dirent: *const libc::dirent) -> Result<Self, Error> {
-        let file = unsafe {
-            let ret = libc::openat(self.file.as_raw_fd(), dirent_name_ptr(&dirent), libc::O_RDONLY | libc::O_CLOEXEC);
-            if ret < 0 { return Err(Error::OpenAt) }
-            File::from_raw_fd(ret)
-        };
-        let dirp = fdopendir(&file)?;
-        Ok(Self { dirp: dirp, file: file })
-    }
+fn opendirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    let fd = unsafe {
+        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC);
+        if ret < 0 { return Err(Error::Open); }
+        ret
+    };
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn list_dir_c_rec(curpath: &mut PathBuf, dirp: &mut DIR, dirs: &mut Vec::<OsString>, files: &mut Vec::<OsString>, depth: usize) -> Result<(), Error> {
-    if depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
-
-    while let Some(dirent) = dirp.readdir() {
-        let d_type = unsafe { (*dirent).d_type };
-        match d_type {
-            libc::DT_REG => {
-                // TODO is this zero copy?
-                files.push(curpath.join(dirent_name_osstr(&dirent)).into());
-            },
-            libc::DT_DIR => {
-                let cstr = dirent_name_cstr(&dirent).to_bytes();
-                if cstr == b"." || cstr == b".." {
-                    continue;
-                }
-                dirs.push(curpath.join(dirent_name_osstr(&dirent)).into());
-                curpath.push(dirent_name_osstr(&dirent));
-                let mut newdir = dirp.openat(dirent)?;
-                list_dir_c_rec(curpath, &mut newdir, dirs, files, depth + 1)?;
-                curpath.pop();
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-// struct DIR {
-//     dir: *libc::DIR
+// struct DIR<'a> {
+//     file: File,
+//     iter: RawDir<'a, &File>,
+//     buf: Vec<u8>,
 // }
-
-// impl From<File: AsRawFd> for DIR {
-//     type Error = Error;
-//     fn try_from(file: &File) -> Result<Self, Error> {
-//         let p = libc::fopendir(dirfile.as_raw_fd());
-//         if p == 0 { return Err(Error::OpenDir); }
-//         Ok(Self { dir: p })
+// 
+// impl DIR<'_> {
+//     fn new(dir: &Path) -> Result<Self, Error> {
+//         let file = opendir(dir)?;
+//         let mut buf = Vec::with_capacity(8192);
+//         let iter = RawDir::new(&file, buf.spare_capacity_mut());
+//         Ok(Self { file:file, iter:iter, buf:buf })
 //     }
 // }
 
-pub fn list_dir_c(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> {
-    use std::ffi::CString;
-    // let dirfile = File::open(dir).map_err(|_| Error::Open)?;
-    // //let dirp: DIR = dirfile
-    // let dirp = unsafe {
-    //     let p = libc::fdopendir(dirfile.as_raw_fd());
-    //     if p.is_null() { return Err(Error::FdOpenDir); }
-    //     p
-    // };
-    let mut dirp = DIR::open(dir)?;
+fn list_dir2_rec(curpath: &mut PathBuf, parentdir: &OwnedFd, iter: &mut RawDir<&OwnedFd>, dirs: &mut Vec::<OsString>, files: &mut Vec::<OsString>, depth: usize) -> Result<(), Error> {
+    if depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
+    while let Some(entry) = iter.next() {
+        let entry = entry.map_err(|_| Error::Getdents)?;
+        match entry.file_type() {
+            FileType::RegularFile => {
+                let name = unsafe { OsStr::from_encoded_bytes_unchecked(entry.file_name().to_bytes()) };
+                files.push(curpath.join(name).into());
+            },
+            FileType::Directory => {
+                if entry.file_name() == c"." || entry.file_name() == c".." {
+                    continue;
+                }
+                let name = unsafe { OsStr::from_encoded_bytes_unchecked(entry.file_name().to_bytes()) };
+                println!("curpath={curpath:?} name={name:?}");
+                curpath.push(name);
+                println!("  curpath={curpath:?}");
+                dirs.push(curpath.clone().into());
+
+                let newdirfd = opendirat(parentdir, entry.file_name())?;
+                let mut buf = Vec::with_capacity(4096);
+                let mut newiter = RawDir::new(&newdirfd, buf.spare_capacity_mut());
+                list_dir2_rec(curpath, &newdirfd, &mut newiter, dirs, files, depth + 1)?;
+                curpath.pop();
+            },
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+pub fn list_dir2(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> {
+    let mut curpath = PathBuf::new();
     let mut dirs: Vec::<OsString> = vec![];
     let mut files: Vec::<OsString> = vec![];
-    let mut curpath = PathBuf::new();
-    list_dir_c_rec(&mut curpath, &mut dirp, &mut dirs, &mut files, 0)?;
+    // let dir = DIR::new(dir)?;
+
+    let dirfd = opendir(dir)?;
+    let mut buf = Vec::with_capacity(4096);
+    let mut iter = RawDir::new(&dirfd, buf.spare_capacity_mut());
+
+    list_dir2_rec(&mut curpath, &dirfd, &mut iter, &mut dirs, &mut files, 0)?;
+    files.sort();
+    dirs.sort();
     Ok((dirs, files))
 }
 
@@ -251,8 +222,6 @@ fn list_dir_rec(curpath: &mut PathBuf, dir: &Path, dirs: &mut Vec::<OsString>, f
         }
     }
     curpath.pop();
-    files.sort();
-    dirs.sort();
     Ok(())
 }
 

@@ -14,3 +14,4 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2.159"
 memmap = "0.7.0"
+rustix = { version = "0.38.37", features = ["fs"] }

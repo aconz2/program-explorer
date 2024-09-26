@@ -3,3 +3,4 @@ _ignore
 venv
 peinit/target
 perunner/target
+pearchive/target
