@@ -10,7 +10,11 @@
 # Copyright 2016 GitHub, Inc.
 # Licensed under the Apache License, Version 2.0 (the "License")
 
-# needs dnf install bcc kernel-module-core
+# needs dnf install bcc kernel-modules-core
+# after mega battle got this running with
+#  sudo podman run -v /sys:/sys --privileged -it --rm -w $(pwd) -v $(pwd):$(pwd) registry.fedoraproject.org/fedora-toolbox:40
+# but doesn't even give byte locations
+# so f it
 
 import os
 import sys
@@ -33,13 +37,20 @@ from time import sleep
 #         exit()
 #     stacks = sys.argv[2]
 # else:
-stacks = 1024
+stacks = 10
 
-# pid = os.fork()
-# if pid == 0:  # child
-#     print('child', os.getpid())
-#     os.kill(os.getpid(), signal.SIGSTOP)
-#     os.execvp(sys.argv[1], sys.argv[1:])
+pid = os.fork()
+if pid == 0:  # child
+    print('child', os.getpid())
+    os.kill(os.getpid(), signal.SIGSTOP)
+    os.execvp(sys.argv[1], sys.argv[1:])
+
+with open('/proc/self/status') as fh:
+    lines = list(fh)
+for line in lines:
+    if line.startswith('Cap'):
+        print(line[:-1])
+
 
 # TODO why doesn't it pick this up
 os.environ['BCC_KERNEL_SOURCE'] = '/lib/modules/6.10.11-200.fc40.x86_64/source'
@@ -64,7 +75,7 @@ int alloc_enter(struct pt_regs *ctx, size_t size) {{
     }}
     return 0;
 }};
-""", debug=0)
+""", debug=0x20)
 
 b.attach_uprobe(name="c", sym="malloc", fn_name="alloc_enter", pid=pid)
 print("Attaching to malloc in pid %d, Ctrl+C to quit." % pid)
@@ -72,10 +83,12 @@ print("Attaching to malloc in pid %d, Ctrl+C to quit." % pid)
 os.kill(pid, signal.SIGCONT)
 
 # sleep until Ctrl-C
-try:
-    sleep(99999999)
-except KeyboardInterrupt:
-    pass
+# try:
+#     sleep(99999999)
+# except KeyboardInterrupt:
+#     pass
+
+os.wait()
 
 calls = b.get_table("calls")
 stack_traces = b.get_table("stack_traces")
