@@ -21,7 +21,6 @@ pub enum Error {
     Api,
 }
 
-
 pub struct CloudHypervisorConfig {
     pub workdir: OsString,
     pub bin: OsString,

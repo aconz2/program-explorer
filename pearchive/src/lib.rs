@@ -262,16 +262,23 @@ pub fn list_dir_nr(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> 
             },
             Some(Err(_)) => { return Err(Error::ReadDir); }
         }
-        // for entry in dir.read_dir().map_err(|_| Error::ReadDir)? {
-        //     let entry = entry.map_err(|_| Error::Entry)?;
-        //     let ftype = entry.file_type().map_err(|_| Error::FileType)?;
-        //     if ftype.is_file() {
-        //         files.push(curpath.join(entry.file_name()).into());
-        //     } else if ftype.is_dir() {
-        //         stack.push(entry.path().into());
-        //         dirs.push(curpath.join(entry.file_name()).into());
-        //     }
-        // }
+    }
+    files.sort();
+    dirs.sort();
+    Ok((dirs, files))
+}
+
+pub fn list_dir_wd(dir: &Path) -> Result<(Vec<OsString>, Vec<OsString>), Error> {
+    use walkdir::WalkDir;
+    if !dir.is_dir() { return Err(Error::NotADir); }
+    let mut dirs: Vec::<OsString> = vec![];
+    let mut files: Vec::<OsString> = vec![];
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_dir() {
+            dirs.push(entry.path().into());
+        } else if entry.file_type().is_file() {
+            files.push(entry.path().into());
+        }
     }
     files.sort();
     dirs.sort();
