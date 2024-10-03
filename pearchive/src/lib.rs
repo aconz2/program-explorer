@@ -1,4 +1,4 @@
-use std::os::fd::{FromRawFd,AsRawFd,OwnedFd};
+use std::os::fd::{AsRawFd,OwnedFd};
 use std::fs::File;
 use std::path::Path;
 use std::ffi::{CStr,CString};
@@ -6,6 +6,9 @@ use std::io::{Write,BufWriter};
 
 use rustix::fs::{RawDir,FileType};
 use memmap::MmapOptions;
+
+mod open;
+use open::*;
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
@@ -28,18 +31,12 @@ const FILE_MODE: u32 = 0o644;
 ///   | pop:  <tag>
 ///
 
-
 #[derive(Debug)]
 pub enum Error {
-    // Entry,
-    // ReadDir,
-    // FileType,
     OpenAt,
     Getdents,
     DirTooDeep,
     MkdirAt,
-    // NotADir,
-    // FdOpenDir,
     Fstat,
     OnFile,
     OnDir,
@@ -50,7 +47,8 @@ pub enum Error {
     BadName,
     BadSize,
     EmptyStack,
-    // StackEmpty,
+    BadTag,
+    ArchiveTruncated,
 }
 
 pub enum ArchiveFormat1Tag {
@@ -80,51 +78,6 @@ fn chroot(dir: &Path) {
         .write_all(format!("0 {} 1", gid).as_bytes()).unwrap();
     fs::chroot(dir).unwrap();
     std::env::set_current_dir("/").unwrap();
-}
-
-fn openat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        if ret < 0 { return Err(Error::OpenAt); }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-fn openat_w<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC, FILE_MODE);
-        if ret < 0 { return Err(Error::OpenAt); }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-fn opendirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC);
-        if ret < 0 { return Err(Error::OpenAt); }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-fn opendirat_cwd(name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(libc::AT_FDCWD, name.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC);
-        if ret < 0 { return Err(Error::OpenAt); }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-fn openpathat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_DIRECTORY | libc::O_PATH | libc::O_CLOEXEC);
-        if ret < 0 { return Err(Error::OpenAt); }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn mkdirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
@@ -159,6 +112,12 @@ fn munch_cstr(input: &mut &[u8]) -> Result<(), Error> {
     let zbi = input.iter().position(|&x| x == 0).ok_or(Error::BadName)?;
     *input = &input[zbi+1..];
     Ok(())
+}
+
+fn read_cstr<'a>(input: &mut &'a [u8]) -> Result<&'a CStr, Error> {
+    let ret = unsafe { CStr::from_bytes_with_nul_unchecked(input) };
+    munch_cstr(input)?;
+    Ok(ret)
 }
 
 fn file_size<Fd: AsRawFd>(fd: &Fd) -> Result<u64, Error> {
@@ -200,8 +159,8 @@ impl PackToFileVisitor {
         Self { writer: BufWriter::new(out) }
     }
 
-    fn into_file(self) -> File {
-        self.writer.into_inner().map_err(|_| Error::Write).unwrap()
+    fn into_file(self) -> Result<File, Error> {
+        self.writer.into_inner().map_err(|_| Error::Write)
     }
 }
 
@@ -277,7 +236,7 @@ pub fn visit_dir<V: Visitor>(dir: &Path, v: &mut V) -> Result<(), Error> {
 pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
     let mut visitor = PackToFileVisitor::new(file);
     visit_dir(dir, &mut visitor).unwrap();
-    Ok(visitor.into_file())
+    visitor.into_file()
 }
 
 /// deemed unsafe because we unpack to cwd with no path traversal protection, caller should ensure
@@ -292,19 +251,18 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
             Some(Ok(ArchiveFormat1Tag::File)) => {
                 cur = &cur[1..];
                 let parent = stack.last().unwrap();
-                let name = unsafe { CStr::from_bytes_with_nul_unchecked(cur) };
-                let mut file: File = openat_w(parent, name)?.into();
-                munch_cstr(&mut cur)?;
+                let name = read_cstr(&mut cur)?;
                 let len = read_le_u32(&mut cur)? as usize;
-                file.write_all(&cur[..len]).unwrap();
+                if len > cur.len() { return Err(Error::ArchiveTruncated); }
+                let mut file: File = openat_w(parent, name)?.into();
+                file.write_all(&cur[..len]).map_err(|_| Error::Write)?;
                 cur = &cur[len..];
             },
             Some(Ok(ArchiveFormat1Tag::Dir)) => {
                 cur = &cur[1..];
                 let parent = stack.last().unwrap();
-                let name = unsafe { CStr::from_bytes_with_nul_unchecked(cur) };
+                let name = read_cstr(&mut cur)?;
                 mkdirat(parent, name).unwrap();
-                munch_cstr(&mut cur)?;
                 match cur.get(0).map(|x| x.try_into()) {
                     Some(Ok(ArchiveFormat1Tag::Pop)) => {
                         // fast path for empty dir, never open the dir and push it
@@ -315,7 +273,7 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                         stack.push(openpathat(parent, name)?);
                     }
                     _ => {
-                        // will fail in outer
+                        // handled in outer match next loop
                     }
                 }
             },
@@ -325,15 +283,19 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                 stack.pop().ok_or(Error::EmptyStack)?;
             },
             Some(Err(_)) => {
-                let b = cur[0];
-                panic!("oh no got bad tag byte {b}");
+                return Err(Error::BadTag);
             },
             None => {
-                break;
+                // idk if I like this
+                return (stack.len() == 1).then_some(()).ok_or(Error::ArchiveTruncated);
+                // if stack.len() != 1 {
+                //     return Err(Error::ArchiveTruncated);
+                // } else {
+                //     return Ok(())
+                // }
             }
         }
     }
-    Ok(())
 }
 
 pub fn unpack_file_to_dir_with_chroot(file: File, dir: &Path) -> Result<(), Error> {
