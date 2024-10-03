@@ -1,104 +1,47 @@
-use std::io::{stdin,BufRead,Write,BufWriter,Seek,SeekFrom};
-use std::fs::File;
-use pearchive::{pack_files,list_dir,pack_dir,list_dir2,list_dir_nr,list_dir_wd};
 use std::env;
 use std::path::Path;
-use std::ffi::OsString;
+use std::fs::File;
 
-fn read_files_from_stdin() -> Vec<OsString> {
-    let mut acc: Vec<_> = stdin().lock().lines().map(|x| x.unwrap().into()).collect();
-    acc.sort();
-    acc
+//use crate::lib;
+use pearchive::pack_dir_to_file;
+
+#[derive(Debug)]
+enum Error {
+    MissingArg,
+}
+
+
+/// args: <input dir> <output file>
+fn pack(args: &[String]) {
+    let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
+    let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
+    let indirpath = Path::new(indir);
+    assert!(indirpath.is_dir(), "{:?} should be a dir", indirpath);
+
+    let fileout = File::create(outname).unwrap();
+
+    let _ = pack_dir_to_file(indirpath, fileout).unwrap();
+}
+
+/// args: <input file> <output dir>
+fn unpack(args: &[String]) {
+    let inname = args.get(0).ok_or(Error::MissingArg).unwrap();
+    let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
+
+    let inpath = Path::new(&inname);
+    let outpath = Path::new(&outname);
+    assert!(inpath.is_file(), "{:?} should be a file", inpath);
+    assert!(outpath.is_dir(), "{:?} should be a dir", outpath);
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
-        Some("pack-files") => {
-            let args = &args[2..];
-            let outname = args.get(0).unwrap();
-            let files = read_files_from_stdin();
-            if !files.iter().all(|f| Path::new(&f).is_file()) {
-                println!("not everything is a file");
-                std::process::exit(1);
-            }
-            let mut outfile = File::create(outname).unwrap();
-            pack_files(files.as_slice(), &mut outfile).unwrap();
-        },
-        Some("list-dir") => {
-            let args = &args[2..];
-            let dirname = args.get(0).unwrap();
-            let dir = Path::new(dirname);
-            let (dirs, files) = list_dir(dir).unwrap();
-            for d in dirs {
-                println!("dir {:?}", d);
-            }
-            for f in files {
-                println!("file {:?}", f);
-            }
-        },
-        Some("list-dir2") => {
-            let args = &args[2..];
-            let dirname = args.get(0).unwrap();
-            let dir = Path::new(dirname);
-            let (dirs, files) = list_dir2(dir).unwrap();
-            for d in dirs {
-                println!("dir {:?}", d);
-            }
-            for f in files {
-                println!("file {:?}", f);
-            }
-        },
-        Some("list-dir-wd") => {
-            let args = &args[2..];
-            let dirname = args.get(0).unwrap();
-            let dir = Path::new(dirname);
-            let (dirs, files) = list_dir_wd(dir).unwrap();
-            for d in dirs {
-                println!("dir {:?}", d);
-            }
-            for f in files {
-                println!("file {:?}", f);
-            }
-        },
-        Some("list-dir-nr") => {
-            let args = &args[2..];
-            let dirname = args.get(0).unwrap();
-            let dir = Path::new(dirname);
-            let (dirs, files) = list_dir_nr(dir).unwrap();
-            for d in dirs {
-                println!("dir {:?}", d);
-            }
-            for f in files {
-                println!("file {:?}", f);
-            }
-        },
-        // Some("list-dir-c") => {
-        //     let args = &args[2..];
-        //     let dirname = args.get(0).unwrap();
-        //     let dir = Path::new(dirname);
-        //     let (dirs, files) = list_dir_c(dir).unwrap();
-        //     for d in dirs {
-        //         println!("dir {:?}", d);
-        //     }
-        //     for f in files {
-        //         println!("file {:?}", f);
-        //     }
-        // }
-        Some("pack-dir") => {
-            let args = &args[2..];
-            let dirname = args.get(0).unwrap();
-            let outname = args.get(1).unwrap();
-            let mut outfile = File::create(outname).unwrap();
-            let outdir = Path::new(dirname);
-            pack_dir(outdir, &mut outfile).unwrap();
-        }
-        // Some("unpack") => { unpack(&args[2..]); },
+        Some("pack")   => {   pack(&args[2..]); },
+        Some("unpack") => { unpack(&args[2..]); },
         _ => {
-            println!("pack-files <output-file> < <file-list>");
-            println!("pack-dir <input dir> <output file>");
-            println!("unpack <input-file> <output-file>");
-            println!("list-dir <dir>");
+            println!("pack <input-dir> <output-file>");
+            println!("unpack <input-file> <output-dir>");
         }
     }
 }
