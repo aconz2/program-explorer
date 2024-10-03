@@ -2,8 +2,7 @@ use std::env;
 use std::path::Path;
 use std::fs::File;
 
-//use crate::lib;
-use pearchive::pack_dir_to_file;
+use pearchive::{pack_dir_to_file,unpack_file_to_dir_with_chroot};
 
 #[derive(Debug)]
 enum Error {
@@ -32,6 +31,10 @@ fn unpack(args: &[String]) {
     let outpath = Path::new(&outname);
     assert!(inpath.is_file(), "{:?} should be a file", inpath);
     assert!(outpath.is_dir(), "{:?} should be a dir", outpath);
+
+    let file = File::open(inpath).unwrap();
+
+    unpack_file_to_dir_with_chroot(file, outpath).unwrap();
 }
 
 fn main() {

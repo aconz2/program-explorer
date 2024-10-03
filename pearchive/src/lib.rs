@@ -5,9 +5,12 @@ use std::ffi::{CStr,CString};
 use std::io::{Write,BufWriter};
 
 use rustix::fs::{RawDir,FileType};
+use memmap::MmapOptions;
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
+const MKDIR_MODE: u32 = 0o744;
+const FILE_MODE: u32 = 0o644;
 
 /// v1 archive format
 /// message+
@@ -28,20 +31,26 @@ const DIRENT_BUF_SIZE: usize = 2048;
 
 #[derive(Debug)]
 pub enum Error {
-    Entry,
-    ReadDir,
-    FileType,
+    // Entry,
+    // ReadDir,
+    // FileType,
     OpenAt,
     Getdents,
     DirTooDeep,
-    NotADir,
-    FdOpenDir,
+    MkdirAt,
+    // NotADir,
+    // FdOpenDir,
     Fstat,
     OnFile,
     OnDir,
     OnPop,
     Write,
     SendFile,
+    Flush,
+    BadName,
+    BadSize,
+    EmptyStack,
+    // StackEmpty,
 }
 
 pub enum ArchiveFormat1Tag {
@@ -51,14 +60,40 @@ pub enum ArchiveFormat1Tag {
 }
 
 pub trait Visitor {
-    fn on_file(&mut self, name: &CStr, size: u64, fd: OwnedFd) -> Result<(), ()>;
-    fn on_dir(&mut self, name: &CStr) -> Result<(), ()>;
-    fn leave_dir(&mut self) -> Result<(), ()>;
+    fn on_file(&mut self, name: &CStr, size: u64, fd: OwnedFd) -> Result<(), Error>;
+    fn on_dir(&mut self, name: &CStr) -> Result<(), Error>;
+    fn leave_dir(&mut self) -> Result<(), Error>;
+}
+
+fn chroot(dir: &Path) {
+    use std::os::unix::fs;
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    unsafe {
+        let ret = libc::unshare(libc::CLONE_NEWUSER);
+        assert!(ret == 0, "unshare fail");
+    }
+    File::create("/proc/self/uid_map").unwrap()
+        .write_all(format!("0 {} 1", uid).as_bytes()).unwrap();
+    File::create("/proc/self/setgroups").unwrap().write_all(b"deny").unwrap();
+    File::create("/proc/self/gid_map").unwrap()
+        .write_all(format!("0 {} 1", gid).as_bytes()).unwrap();
+    fs::chroot(dir).unwrap();
+    std::env::set_current_dir("/").unwrap();
 }
 
 fn openat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
     let fd = unsafe {
         let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if ret < 0 { return Err(Error::OpenAt); }
+        ret
+    };
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn openat_w<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    let fd = unsafe {
+        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC, FILE_MODE);
         if ret < 0 { return Err(Error::OpenAt); }
         ret
     };
@@ -83,6 +118,23 @@ fn opendirat_cwd(name: &CStr) -> Result<OwnedFd, Error> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+fn openpathat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    let fd = unsafe {
+        let ret = libc::openat(fd.as_raw_fd(), name.as_ptr(), libc::O_DIRECTORY | libc::O_PATH | libc::O_CLOEXEC);
+        if ret < 0 { return Err(Error::OpenAt); }
+        ret
+    };
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn mkdirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
+    unsafe {
+        let ret = libc::mkdirat(fd.as_raw_fd(), name.as_ptr(), MKDIR_MODE);
+        if ret < 0 { return Err(Error::MkdirAt); }
+        Ok(())
+    }
+}
+
 impl TryFrom<&u8> for ArchiveFormat1Tag {
     type Error = ();
     fn try_from(x: &u8) -> Result<ArchiveFormat1Tag, ()> {
@@ -96,10 +148,17 @@ impl TryFrom<&u8> for ArchiveFormat1Tag {
     }
 }
 
-fn read_le_u32(input: &mut &[u8]) -> u32 {
+fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
     let (int_bytes, rest) = input.split_at(std::mem::size_of::<u32>());
     *input = rest;
-    u32::from_le_bytes(int_bytes.try_into().unwrap())
+    Ok(u32::from_le_bytes(int_bytes.try_into().map_err(|_| Error::BadSize)?))
+}
+
+fn munch_cstr(input: &mut &[u8]) -> Result<(), Error> {
+    // memchr ...
+    let zbi = input.iter().position(|&x| x == 0).ok_or(Error::BadName)?;
+    *input = &input[zbi+1..];
+    Ok(())
 }
 
 fn file_size<Fd: AsRawFd>(fd: &Fd) -> Result<u64, Error> {
@@ -147,24 +206,24 @@ impl PackToFileVisitor {
 }
 
 impl Visitor for PackToFileVisitor {
-    fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), ()> {
-        self.writer.write_all(&[ArchiveFormat1Tag::File as u8]).map_err(|_| ())?;
-        self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| ())?;
-        self.writer.write_all(&(size as u32).to_le_bytes()).map_err(|_| ())?;
-        self.writer.flush().map_err(|_| ())?;
-        // let outfile = self.writer.get_mut();
-        sendfile_all(&mut fd, self.writer.get_mut(), size).map_err(|_| ())?;
+    fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), Error> {
+        let size_u32: u32 = size.try_into().map_err(|_| Error::Write)?;
+        self.writer.write_all(&[ArchiveFormat1Tag::File as u8]).map_err(|_| Error::Write)?;
+        self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| Error::Write)?;
+        self.writer.write_all(&size_u32.to_le_bytes()).map_err(|_| Error::Write)?;
+        self.writer.flush().map_err(|_| Error::Flush)?;
+        sendfile_all(&mut fd, self.writer.get_mut(), size)?;
         Ok(())
     }
 
-    fn on_dir(&mut self, name: &CStr) -> Result<(), ()> {
-        self.writer.write_all(&[ArchiveFormat1Tag::Dir as u8]).map_err(|_| ())?;
-        self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| ())?;
+    fn on_dir(&mut self, name: &CStr) -> Result<(), Error> {
+        self.writer.write_all(&[ArchiveFormat1Tag::Dir as u8]).map_err(|_| Error::Write)?;
+        self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| Error::Write)?;
         Ok(())
     }
 
-    fn leave_dir(&mut self) -> Result<(), ()> {
-        self.writer.write_all(&[ArchiveFormat1Tag::Pop as u8]).map_err(|_| ())?;
+    fn leave_dir(&mut self) -> Result<(), Error> {
+        self.writer.write_all(&[ArchiveFormat1Tag::Pop as u8]).map_err(|_| Error::Write)?;
         Ok(())
     }
 }
@@ -219,4 +278,71 @@ pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
     let mut visitor = PackToFileVisitor::new(file);
     visit_dir(dir, &mut visitor).unwrap();
     Ok(visitor.into_file())
+}
+
+/// deemed unsafe because we unpack to cwd with no path traversal protection, caller should ensure
+/// we are in a chroot or otherwise protected
+unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error> {
+    let mut stack: Vec<OwnedFd> = Vec::with_capacity(32);  // always non-empty
+    stack.push(starting_dir);
+
+    let mut cur = data;
+    loop {
+        match cur.get(0).map(|x| x.try_into()) {
+            Some(Ok(ArchiveFormat1Tag::File)) => {
+                cur = &cur[1..];
+                let parent = stack.last().unwrap();
+                let name = unsafe { CStr::from_bytes_with_nul_unchecked(cur) };
+                let mut file: File = openat_w(parent, name)?.into();
+                munch_cstr(&mut cur)?;
+                let len = read_le_u32(&mut cur)? as usize;
+                file.write_all(&cur[..len]).unwrap();
+                cur = &cur[len..];
+            },
+            Some(Ok(ArchiveFormat1Tag::Dir)) => {
+                cur = &cur[1..];
+                let parent = stack.last().unwrap();
+                let name = unsafe { CStr::from_bytes_with_nul_unchecked(cur) };
+                mkdirat(parent, name).unwrap();
+                munch_cstr(&mut cur)?;
+                match cur.get(0).map(|x| x.try_into()) {
+                    Some(Ok(ArchiveFormat1Tag::Pop)) => {
+                        // fast path for empty dir, never open the dir and push it
+                        // advance past Pop
+                        cur = &cur[1..];
+                    },
+                    Some(Ok(_)) => {
+                        stack.push(openpathat(parent, name)?);
+                    }
+                    _ => {
+                        // will fail in outer
+                    }
+                }
+            },
+            Some(Ok(ArchiveFormat1Tag::Pop)) => {
+                cur = &cur[1..];
+                // always expected to be nonempty, todo handle gracefully for malicious archives
+                stack.pop().ok_or(Error::EmptyStack)?;
+            },
+            Some(Err(_)) => {
+                let b = cur[0];
+                panic!("oh no got bad tag byte {b}");
+            },
+            None => {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn unpack_file_to_dir_with_chroot(file: File, dir: &Path) -> Result<(), Error> {
+    let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
+
+    chroot(&dir);
+
+    let starting_dir = opendirat_cwd(c".")?;
+
+    unsafe { unpack_to_cwd(mmap.as_ref(), starting_dir) }
+
 }
