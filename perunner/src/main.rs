@@ -5,6 +5,9 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use pearchive::pack_dir_to_file;
+use peinit::Config;
+
+use bincode;
 
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig};
@@ -30,27 +33,28 @@ fn round_up_to_pmem_size(f: &File) -> Result<u64, Error> {
 }
 
 // on the wire, the client sends
-//     <header size : u32le> <header> <archive>
-// and the server reads the header, and writes its own header and the archive size computed from
+//     <config size : u32le> <config> <archive>
+// and the server reads the config, and writes its own config and the archive size computed from
 // the content length
 // the packfile input format is
-//     <header size : u32le> <header> <archive size : u32le> <archive>
+//     <archive size : u32le> <config size : u32le> <config> <archive>
 // the return output format is
-//     <archive size : u32le> <header size> <header> <archive>
+//     <archive size : u32le> <config size> <config> <archive>
 
 // how do you get away from this P1 P2 thing
-fn create_pack_file_in<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &P1, file: &P2) {
+fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &P1, file: &P2) {
     let mut f = File::create(file).unwrap();
-    f.write_all(&[0u8; 4]).unwrap(); // empty header
-    let pos = f.stream_position().unwrap();
+    let config = Config { };
+    let config_bytes = bincode::serialize(&config).unwrap();
+    let config_size: u32 = config_bytes.len().try_into().unwrap();
     f.write_all(&[0u8; 4]).unwrap(); // archive size empty
+    f.write_all(&(config_size.to_le_bytes())).unwrap(); // config size
+    f.write_all(config_bytes.as_slice()).unwrap();
+    let archive_start_pos = f.stream_position().unwrap();
     let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
-    let ending_pos = f.stream_position().unwrap();
-    let diff = ending_pos - pos;
-    assert!(diff >= 4, "diff should be bigger than 4 | {pos} {ending_pos}"); // since we wrote the archive size
-    let diff = diff - 4;
-    let size: u32 = diff.try_into().unwrap();
-    f.seek(SeekFrom::Start(pos)).unwrap();
+    let archive_end_pos = f.stream_position().unwrap();
+    let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
+    f.seek(SeekFrom::Start(0)).unwrap();
     f.write_all(&(size.to_le_bytes())).unwrap();
     let _ = round_up_to_pmem_size(&f).unwrap();
 }
@@ -81,7 +85,7 @@ fn main() {
 
     { // pmem1
         let io_file = ch.workdir().join("io");
-        create_pack_file_in(&inputdir, &io_file);
+        create_pack_file_from_dir(&inputdir, &io_file);
         { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
         let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": true}}"#, io_file);
         println!("{}", pmemconfig);

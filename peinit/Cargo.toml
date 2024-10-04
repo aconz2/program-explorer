@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2021"
 default-run = "notabin"
 
+[lib]
+name = "peinit"
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "notabin"
 path = "src/notabin.rs"
 
 [dependencies]
 libc = "0.2.158"
+serde = { version = "1.0.210", features = ["derive"] }

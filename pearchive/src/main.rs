@@ -56,6 +56,7 @@ fn unpackdev(args: &[String]) {
     let inpath = Path::new(&inname);
     let outpath = Path::new(&outname);
 
+    println!("args are {args:?}");
     assert!(outpath.is_dir(), "{:?} should be a dir", outpath);
 
     let file = File::open(inpath).unwrap();

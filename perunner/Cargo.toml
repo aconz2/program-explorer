@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 api_client = { version = "0.1.0", path = "../../cloud-hypervisor/api_client" }
 pearchive = { version = "0.1.0", path = "../pearchive" }
+peinit = { version = "0.1.0", path = "../peinit" }
 libc = "0.2.158"
 rand = "0.8.5"
 wait-timeout = "0.2.0"
+bincode = "1.3.3"
