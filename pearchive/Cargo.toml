@@ -6,12 +6,17 @@ edition = "2021"
 [lib]
 name = "pearchive"
 path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 name = "pearchive"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 libc = "0.2.159"
 memmap = "0.7.0"
 rustix = { version = "0.38.37", features = ["fs"] }
+
+[dev-dependencies]
+rand = "0.8.5"

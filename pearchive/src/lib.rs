@@ -8,12 +8,13 @@ use rustix::fs::{RawDir,FileType};
 use memmap::MmapOptions;
 
 mod open;
-use open::*;
+use open::{openat,opendirat_cwd,openat_w,opendirat,openpathat};
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
 const MKDIR_MODE: u32 = 0o744;
 const FILE_MODE: u32 = 0o644;
+const MAX_NAME_LEN: usize = 255; // max len on tmpfs
 
 /// v1 archive format
 /// message+
@@ -33,6 +34,7 @@ const FILE_MODE: u32 = 0o644;
 
 #[derive(Debug)]
 pub enum Error {
+    Create,
     OpenAt,
     Getdents,
     DirTooDeep,
@@ -49,6 +51,9 @@ pub enum Error {
     EmptyStack,
     BadTag,
     ArchiveTruncated,
+    Chdir,
+    Chroot,
+    Unshare,
 }
 
 pub enum ArchiveFormat1Tag {
@@ -63,21 +68,27 @@ pub trait Visitor {
     fn leave_dir(&mut self) -> Result<(), Error>;
 }
 
-fn chroot(dir: &Path) {
-    use std::os::unix::fs;
+fn unshare_user() -> Result<(), Error> {
     let uid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getegid() };
     unsafe {
         let ret = libc::unshare(libc::CLONE_NEWUSER);
-        assert!(ret == 0, "unshare fail");
+        if ret < 0 { return Err(Error::Unshare); }
     }
-    File::create("/proc/self/uid_map").unwrap()
-        .write_all(format!("0 {} 1", uid).as_bytes()).unwrap();
-    File::create("/proc/self/setgroups").unwrap().write_all(b"deny").unwrap();
-    File::create("/proc/self/gid_map").unwrap()
-        .write_all(format!("0 {} 1", gid).as_bytes()).unwrap();
-    fs::chroot(dir).unwrap();
-    std::env::set_current_dir("/").unwrap();
+    File::create("/proc/self/uid_map").map_err(|_| Error::Create)?
+        .write_all(format!("0 {} 1", uid).as_bytes()).map_err(|_| Error::Write)?;
+    File::create("/proc/self/setgroups").map_err(|_| Error::Create)?
+        .write_all(b"deny").map_err(|_| Error::Write)?;
+    File::create("/proc/self/gid_map").map_err(|_| Error::Create)?
+        .write_all(format!("0 {} 1", gid).as_bytes()).map_err(|_| Error::Write)?;
+    Ok(())
+}
+
+fn chroot(dir: &Path) -> Result<(), Error> {
+    use std::os::unix::fs;
+    fs::chroot(dir).map_err(|_| Error::Chroot)?;
+    std::env::set_current_dir("/").map_err(|_| Error::Chdir)?;
+    Ok(())
 }
 
 fn mkdirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
@@ -109,9 +120,14 @@ fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
 
 fn munch_cstr(input: &mut &[u8]) -> Result<(), Error> {
     // memchr ...
-    let zbi = input.iter().position(|&x| x == 0).ok_or(Error::BadName)?;
-    *input = &input[zbi+1..];
-    Ok(())
+    // we don't care about an empty name, will fail on open
+    for i in 0..=MAX_NAME_LEN {
+        if input[i] == 0 {
+            *input = &input[i+1..];
+            return Ok(());
+        }
+    }
+    return Err(Error::BadName);
 }
 
 fn read_cstr<'a>(input: &mut &'a [u8]) -> Result<&'a CStr, Error> {
@@ -265,7 +281,7 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                 mkdirat(parent, name).unwrap();
                 match cur.get(0).map(|x| x.try_into()) {
                     Some(Ok(ArchiveFormat1Tag::Pop)) => {
-                        // fast path for empty dir, never open the dir and push it
+                        // fast path for empty dir, never open the dir or push it
                         // advance past Pop
                         cur = &cur[1..];
                     },
@@ -279,7 +295,6 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
             },
             Some(Ok(ArchiveFormat1Tag::Pop)) => {
                 cur = &cur[1..];
-                // always expected to be nonempty, todo handle gracefully for malicious archives
                 stack.pop().ok_or(Error::EmptyStack)?;
             },
             Some(Err(_)) => {
@@ -298,13 +313,111 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
     }
 }
 
-pub fn unpack_file_to_dir_with_chroot(file: File, dir: &Path) -> Result<(), Error> {
+pub fn unpack_file_to_dir_with_unshare_chroot(file: File, dir: &Path) -> Result<(), Error> {
     let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
 
-    chroot(&dir);
+    unshare_user()?;
+    chroot(&dir)?;
 
     let starting_dir = opendirat_cwd(c".")?;
 
     unsafe { unpack_to_cwd(mmap.as_ref(), starting_dir) }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::ffi::OsString;
+    use std::os::fd::FromRawFd;
+    use std::fs;
+    //use std::thread;
+    use std::process::Command;
+
+    use rand;
+    use rand::distributions::DistString;
+
+    struct TempDir { name: OsString }
+
+    impl TempDir {
+        fn new() -> Self {
+            let rng = rand::distributions::Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
+            let ret = Self { name: format!("/tmp/charchive-{rng}").into() };
+            std::fs::create_dir(&ret.name).unwrap();
+            ret
+        }
+
+        fn join<O: AsRef<Path>>(&self, other: O) -> PathBuf { self.as_ref().join(other) }
+
+        fn file(self, name: &str, data: &[u8]) -> Self {
+            File::create(&self.join(name)).unwrap().write_all(data).unwrap();
+            self
+        }
+
+        fn dir(self, name: &str) -> Self {
+            fs::create_dir(self.join(name)).unwrap();
+            self
+        }
+
+        #[allow(dead_code)]
+        fn digest(&self) -> String {
+            let output = Command::new("sh")
+                .current_dir(self)
+                .arg("-c")
+                .arg("cat <(find -type f -exec sha256sum '{}' '+' | sort) <(find -type d | sort) | sha256sum")
+                .output();
+            String::from_utf8(output.unwrap().stdout).unwrap()
+        }
+    }
+
+    impl AsRef<Path> for TempDir { fn as_ref(&self) -> &Path { return Path::new(&self.name) } }
+    impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(self); } }
+
+    fn tempfile() -> File {
+        unsafe {
+            let ret = libc::open(c"/tmp".as_ptr(), libc::O_TMPFILE | libc::O_RDWR, 0o600);
+            assert!(ret > 0);
+            File::from_raw_fd(ret)
+        }
+    }
+
+    #[test]
+    fn basic_pack() {
+        let td1 = TempDir::new()
+            .file("file-1", b"hello world")
+            .file("file-2", b"yooo")
+            .dir("adir")
+            .file("adir/another-file", b"some data");
+        // let td2 = TempDir::new().unwrap();
+
+        let f = pack_dir_to_file(td1.as_ref(), tempfile()).unwrap();
+        assert!(f.metadata().unwrap().len() > 0);
+
+        // can shell out to actual program
+        // but then annoyingly we have to link the tempfile
+        // println!("{}", std::env::current_exe().unwrap().display());
+        // TODO we can't use CLONE_NEWUSER in a threaded program;
+        // thread::scope(|s| {
+        //     s.spawn(|| {
+        //         unpack_file_to_dir_with_unshare_chroot(f, td2.as_ref()).unwrap();
+        //     });
+        // });
+
+        // assert_eq!(td1.digest(), td2.digest());
+    }
+
+    #[test]
+    fn pack_name_max_length_ok() {
+        let name255 = String::from_utf8(vec![97u8; 255]).unwrap();
+        let td1 = TempDir::new().file(&name255, b"hello world");
+        assert!(pack_dir_to_file(td1.as_ref(), tempfile()).is_ok());
+    }
+    #[test]
+    #[should_panic]
+    fn pack_name_max_length_too_long() {
+        let name256 = String::from_utf8(vec![97u8; 256]).unwrap();
+        let _ = TempDir::new().file(&name256, b"hello world");
+        // fail at creation of file
+        // assert!(pack_dir_to_file(td1.as_ref(), tempfile()).is_err());
+    }
 }
