@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-api_client = { version = "0.1.0", path = "/home/andrew/Repos/cloud-hypervisor/api_client" }
+api_client = { version = "0.1.0", path = "../../cloud-hypervisor/api_client" }
+pearchive = { version = "0.1.0", path = "../pearchive" }
 libc = "0.2.158"
 rand = "0.8.5"
 wait-timeout = "0.2.0"

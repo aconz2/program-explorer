@@ -1,3 +1,5 @@
+set -e
+
 k=/home/andrew/Repos/linux/vmlinux
 ch=${ch:-/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor}
 
@@ -10,15 +12,15 @@ rm -f /tmp/ch.sock
 
 rm -rf /tmp/_out
 mkdir /tmp/_out
-truncate -s 2M /tmp/_out/output
 
 rm -rf /tmp/_in
 mkdir -p /tmp/_in/dir
 echo 'hello this is stdin' > /tmp/_in/stdin
 echo 'this is the contents of file1' > /tmp/_in/dir/file1
 
-(cd /tmp/_in && mksquashfs . input.sqfs -no-compression -no-xattrs -force-uid 0 -force-gid 0)
-python makepmemsized.py /tmp/_in/input.sqfs
+# (cd /tmp/_in && mksquashfs . input.sqfs -no-compression -no-xattrs -force-uid 0 -force-gid 0)
+./pearchive/target/release/pearchive pack /tmp/_in/dir /tmp/in.pack
+python makepmemsized.py /tmp/in.pack
 
     #--disk path=gcc-14.1.0.sqfs,readonly=on,id=gcc14 \
 #strace --decode-pids=comm -f ./cloud-hypervisor-static \
@@ -27,16 +29,17 @@ time $ch \
     --initramfs initramfs \
     --serial off \
     --pmem file=gcc-14.1.0.sqfs,discard_writes=on \
-           file=/tmp/_in/input.sqfs,discard_writes=on \
-           file=/tmp/_out/output \
+           file=/tmp/in.pack,discard_writes=on \
     --cmdline "console=hvc0" \
     --cpus boot=1 \
     --memory size=1024M,thp=on \
     --api-socket /tmp/ch.sock \
     $@
 
-cpio --list < /tmp/_out/output
-mkdir /tmp/_out/outout
+echo $?
+
+#cpio --list < /tmp/_out/output
+#mkdir /tmp/_out/outout
 #(cd /tmp/_out/outout; cpio --extract < /tmp/_out/output)
-ls -l /tmp/_out/outout
+#ls -l /tmp/_out/outout
 # "sh", "-c", "echo 'into file' > /output/file1; echo 'to stdout'; echo 'to stderr' 1>&2"

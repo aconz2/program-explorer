@@ -4,9 +4,9 @@
 use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
-use std::os::unix::process::CommandExt;
+//use std::os::unix::process::CommandExt;
 use std::os::fd::{AsRawFd,FromRawFd};
-use walkdir::{WalkDir};
+use std::ffi::OsStr;
 
 #[derive(Debug)]
 enum Error {
@@ -25,11 +25,17 @@ fn exit() {
     std::process::exit(1);
 }
 
+fn setup_panic() {
+    std::panic::set_hook(Box::new(|p| {
+        eprintln!("{p:}");
+        //exit();
+    }));
+}
+
 fn check_libc(ret: i32) {
     if ret < 0 {
         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        println!("fail with error {errno}");
-        exit();
+        panic!("fail with error {errno}");
     }
 }
 
@@ -55,7 +61,7 @@ unsafe fn init_mounts() {
 
 unsafe fn mount_pmems() {
     check_libc(libc::mount(c"/dev/pmem0".as_ptr(), c"/mnt/rootfs".as_ptr(), c"squashfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
-    check_libc(libc::mount(c"/dev/pmem1".as_ptr(), c"/run/input".as_ptr(),  c"squashfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
+    // check_libc(libc::mount(c"/dev/pmem1".as_ptr(), c"/run/input".as_ptr(),  c"squashfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
 }
 
 unsafe fn setup_overlay() {
@@ -121,17 +127,36 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
     Ok(())
 }
 
+// kinda intended to do this in process but learned you can't do unshare(CLONE_NEWUSER) in a
+// threaded program
+fn unpack_input<P: AsRef<OsStr>>(archive: P, dir: P) {
+    let ret = Command::new("/bin/pearchive")
+        .arg("unpack")
+        .arg(archive)
+        .arg(dir)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ret);
+}
+
+fn pack_output<P: AsRef<OsStr>>(dir: P, archive: P) {
+    let ret = Command::new("/bin/pearchive")
+        .arg("pack")
+        .arg(dir)
+        .arg(archive)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ret);
+}
+
 fn run_crun() {
     let outfile = File::create_new("/run/output/stdout").unwrap();
     let errfile = File::create_new("/run/output/stderr").unwrap();
-    let infile  = {
-        let p = "/run/input/stdin";
-        let _ = File::create_new(p);
-        File::open("/run/input/stdin").unwrap()
-    };
-    let mut child = Command::new("/bin/crun")
+
     //let mut child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
-    //let mut child = Command::new("/bin/pivot_rootfs").arg("/abc").arg("/bin/crun")
+    let mut child = Command::new("/bin/crun")
         .arg("--debug")
         .arg("run")
         .arg("--bundle")
@@ -141,7 +166,10 @@ fn run_crun() {
         //.gid(1000)
         .stdout(Stdio::from(outfile))
         .stderr(Stdio::from(errfile))
-        .stdin(Stdio::from(infile))
+        .stdin(match File::open("/run/input/stdin") {
+            Ok(f) => { Stdio::from(f) }
+            Err(_) => { Stdio::null() }
+        })
         .spawn()
         .unwrap();
     //Command::new("busybox").arg("ps").arg("-T").spawn().unwrap().wait();
@@ -155,6 +183,11 @@ fn run_crun() {
 }
 
 fn main() {
+    setup_panic();
+
+    println!("hello world does this show up?");
+    eprintln!("hello world does this show up?");
+
     unsafe {
         init_mounts();
     }
@@ -168,23 +201,15 @@ fn main() {
         parent_rootfs();
     }
 
-
-
-    // Command::new("busybox").arg("mount").spawn().unwrap().wait();
-    // Command::new("busybox").arg("ls").arg("-l").arg("/run/").spawn().unwrap().wait();
-    // Command::new("busybox").arg("ls").arg("-l").arg("/run/output").spawn().unwrap().wait();
-    // Command::new("busybox").arg("stat").arg("/run/output").spawn().unwrap().wait();
-    // Command::new("busybox").arg("stat").arg("/run/output/dir").spawn().unwrap().wait();
-    // Command::new("busybox").arg("ls").arg("-l").arg("/run/bundle/rootfs").spawn().unwrap();
-    //
-    // let status = std::fs::read_to_string("/proc/self/status").unwrap();
-    // println!("status={status}");
-
-    // unpack_input();
+    let inout_device = "/dev/pmem1";
+    // TODO we need to slice off the input config
+    unpack_input(inout_device, "/run/input/dir");
 
     run_crun();
 
-    // pack_output();
+    // TODO we need to first write out the result metadata, so maybe pearchive needs to take an
+    // open fd
+    pack_output("/run/output", inout_device);
 
     exit()
     //check_libc(libc::setuid(1000));

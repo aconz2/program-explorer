@@ -45,6 +45,7 @@ fn main() {
         _ => {
             println!("pack <input-dir> <output-file>");
             println!("unpack <input-file> <output-dir>");
+            std::process::exit(1);
         }
     }
 }

@@ -2,7 +2,11 @@
 name = "peinit"
 version = "0.1.0"
 edition = "2021"
+default-run = "notabin"
+
+[[bin]]
+name = "notabin"
+path = "src/notabin.rs"
 
 [dependencies]
 libc = "0.2.158"
-walkdir = "2.5.0"

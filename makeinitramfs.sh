@@ -1,3 +1,5 @@
+#!/bin/bash
+
 ~/Repos/linux/usr/gen_init_cpio initramfs.file > initramfs
 
 # size=$(stat --format='%s' init1.initramfs)

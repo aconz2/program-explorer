@@ -26,6 +26,7 @@ dir /run/bundle        0755 0 0
 dir /run/bundle/rootfs 0755 0 0
 
 dir /run/input  0755 0 0
+dir /run/input/dir  0755 0 0
 dir /run/output 0777 0 0
 
 dir /run/crun 0777 0 0
@@ -34,6 +35,7 @@ dir /run/crun 0777 0 0
 
 #file /init      init1 0555 0 0
 file /init peinit/target/x86_64-unknown-linux-musl/debug/peinit 0555 0 0
+file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/release/pearchive 0555 0 0
 # file /bin/init2 init2 0555 0 0
 # file /bin/init3 init3 0555 0 0
 
