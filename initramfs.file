@@ -1,6 +1,26 @@
-# from linux/usr/gen_init_cpio
-# make with ~/Repos/linux/usr/gen_init_cpio initattempt1 > init1.initramfs
-# cpio -t < init1.initramfs
+# file <name> <location> <mode> <uid> <gid> [<hard links>]
+# dir <name> <mode> <uid> <gid>
+# nod <name> <mode> <uid> <gid> <dev_type> <maj> <min>
+# slink <name> <target> <mode> <uid> <gid>
+# pipe <name> <mode> <uid> <gid>
+# sock <name> <mode> <uid> <gid>
+# 
+# <name>       name of the file/dir/nod/etc in the archive
+# <location>   location of the file in the current filesystem
+#              expands shell variables quoted with ${}
+# <target>     link target
+# <mode>       mode/permissions of the file
+# <uid>        user id (0=root)
+# <gid>        group id (0=root)
+# <dev_type>   device type (b=block, c=character)
+# <maj>        major number of nod
+# <min>        minor number of nod
+# <hard links> space separated list of other links to file
+#
+# VARIABLES SUBSTITUTED
+# PROFILE -- to select between target/{debug,release}/pefoo
+#
+# TODO some of this might be faster/easier to just create in peinit
 
 dir /bin   0755 0 0
 dir /input 0755 0 0
@@ -33,12 +53,8 @@ dir /run/crun 0777 0 0
 
 #nod /dev/console 0600 0 0 c 5 1
 
-#file /init      init1 0555 0 0
-file /init peinit/target/x86_64-unknown-linux-musl/debug/peinit 0555 0 0
-file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/release/pearchive 0555 0 0
-# file /bin/init2 init2 0555 0 0
-# file /bin/init3 init3 0555 0 0
-
+file /init          peinit/target/x86_64-unknown-linux-musl/PROFILE/peinit       0555 0 0
+file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/PROFILE/pearchive 0555 0 0
 
 file /bin/busybox busybox 0555 0 0
 slink /bin/sh /bin/busybox 0555 0 0

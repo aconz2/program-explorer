@@ -1,6 +1,6 @@
 use std::time::Duration;
 use std::fs::File;
-use std::io;
+use std::io::{Write,Seek,SeekFrom};
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -29,10 +29,29 @@ fn round_up_to_pmem_size(f: &File) -> Result<u64, Error> {
     Ok(newlen)
 }
 
-// how do you get away from this
+// on the wire, the client sends
+//     <header size : u32le> <header> <archive>
+// and the server reads the header, and writes its own header and the archive size computed from
+// the content length
+// the packfile input format is
+//     <header size : u32le> <header> <archive size : u32le> <archive>
+// the return output format is
+//     <archive size : u32le> <header size> <header> <archive>
+
+// how do you get away from this P1 P2 thing
 fn create_pack_file_in<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &P1, file: &P2) {
-    let f = File::create(file).unwrap();
-    let f = pack_dir_to_file(dir.as_ref(), f).unwrap();
+    let mut f = File::create(file).unwrap();
+    f.write_all(&[0u8; 4]).unwrap(); // empty header
+    let pos = f.stream_position().unwrap();
+    f.write_all(&[0u8; 4]).unwrap(); // archive size empty
+    let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
+    let ending_pos = f.stream_position().unwrap();
+    let diff = ending_pos - pos;
+    assert!(diff >= 4, "diff should be bigger than 4 | {pos} {ending_pos}"); // since we wrote the archive size
+    let diff = diff - 4;
+    let size: u32 = diff.try_into().unwrap();
+    f.seek(SeekFrom::Start(pos)).unwrap();
+    f.write_all(&(size.to_le_bytes())).unwrap();
     let _ = round_up_to_pmem_size(&f).unwrap();
 }
 
@@ -63,6 +82,7 @@ fn main() {
     { // pmem1
         let io_file = ch.workdir().join("io");
         create_pack_file_in(&inputdir, &io_file);
+        { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
         let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": true}}"#, io_file);
         println!("{}", pmemconfig);
         let resp = ch.api("PUT", "vm.add-pmem", Some(&pmemconfig));
@@ -75,6 +95,7 @@ fn main() {
     }
     //let status = ch.status();
 
+    use std::io;
     println!("== log ==");
     let _ = io::copy(&mut File::open(ch.log_file().unwrap()).unwrap(), &mut io::stdout());
     println!("== console ==");

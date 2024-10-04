@@ -54,6 +54,7 @@ pub enum Error {
     Chdir,
     Chroot,
     Unshare,
+    Mmap,
 }
 
 pub enum ArchiveFormat1Tag {
@@ -182,6 +183,7 @@ impl PackToFileVisitor {
 
 impl Visitor for PackToFileVisitor {
     fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), Error> {
+        // println!("UNPACK file {name:?} {size}");
         let size_u32: u32 = size.try_into().map_err(|_| Error::Write)?;
         self.writer.write_all(&[ArchiveFormat1Tag::File as u8]).map_err(|_| Error::Write)?;
         self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| Error::Write)?;
@@ -192,12 +194,14 @@ impl Visitor for PackToFileVisitor {
     }
 
     fn on_dir(&mut self, name: &CStr) -> Result<(), Error> {
+        // println!("UNPACK dir {name:?}");
         self.writer.write_all(&[ArchiveFormat1Tag::Dir as u8]).map_err(|_| Error::Write)?;
         self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| Error::Write)?;
         Ok(())
     }
 
     fn leave_dir(&mut self) -> Result<(), Error> {
+        // println!("UNPACK pop");
         self.writer.write_all(&[ArchiveFormat1Tag::Pop as u8]).map_err(|_| Error::Write)?;
         Ok(())
     }
@@ -314,14 +318,17 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
 }
 
 pub fn unpack_file_to_dir_with_unshare_chroot(file: File, dir: &Path) -> Result<(), Error> {
-    let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
+    let mmap = unsafe { MmapOptions::new().map(&file).map_err(|_| Error::Mmap)? };
+    unpack_data_to_dir_with_unshare_chroot(mmap.as_ref(), dir)
+}
 
+pub fn unpack_data_to_dir_with_unshare_chroot(data: &[u8], dir: &Path) -> Result<(), Error> {
     unshare_user()?;
     chroot(&dir)?;
 
     let starting_dir = opendirat_cwd(c".")?;
 
-    unsafe { unpack_to_cwd(mmap.as_ref(), starting_dir) }
+    unsafe { unpack_to_cwd(data, starting_dir) }
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
+use std::io::{Seek,Read};
 //use std::os::unix::process::CommandExt;
 use std::os::fd::{AsRawFd,FromRawFd};
 use std::ffi::OsStr;
@@ -28,7 +29,7 @@ fn exit() {
 fn setup_panic() {
     std::panic::set_hook(Box::new(|p| {
         eprintln!("{p:}");
-        //exit();
+        exit();
     }));
 }
 
@@ -129,11 +130,28 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
 
 // kinda intended to do this in process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
-fn unpack_input<P: AsRef<OsStr>>(archive: P, dir: P) {
-    let ret = Command::new("/bin/pearchive")
-        .arg("unpack")
+fn unpack_input(archive: &str, dir: &str) {
+    let mut f = File::open(&archive).unwrap();
+    let mut buf = [0u8; 4];
+
+    f.read_exact(&mut buf).unwrap(); // header size
+    let header_size = u32::from_le_bytes(buf);
+
+    let mut header_data = Vec::with_capacity(header_size as usize); // todo uninit
+    f.read_exact(header_data.as_mut_slice()).unwrap();
+
+    f.read_exact(&mut buf).unwrap(); // archive size
+    let archive_size = u32::from_le_bytes(buf);
+    let offset = f.stream_position().unwrap();
+    println!("read offset and archive size from as header_size={header_size} archive_size={archive_size} offset={offset}");
+                                     
+    //let ret = Command::new("/bin/pearchive")
+    let ret = Command::new("strace").arg("-e").arg("mmap").arg("/bin/pearchive")
+        .arg("unpackdev")
         .arg(archive)
         .arg(dir)
+        .arg(format!("{offset}"))
+        .arg(format!("{archive_size}"))
         .status()
         .unwrap()
         .success();
@@ -185,9 +203,6 @@ fn run_crun() {
 fn main() {
     setup_panic();
 
-    println!("hello world does this show up?");
-    eprintln!("hello world does this show up?");
-
     unsafe {
         init_mounts();
     }
@@ -202,6 +217,8 @@ fn main() {
     }
 
     let inout_device = "/dev/pmem1";
+
+    let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
     // TODO we need to slice off the input config
     unpack_input(inout_device, "/run/input/dir");
 

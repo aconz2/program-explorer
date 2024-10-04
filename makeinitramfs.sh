@@ -1,6 +1,9 @@
 #!/bin/bash
 
-~/Repos/linux/usr/gen_init_cpio initramfs.file > initramfs
+profile=${1:-debug}
+echo "using profile $profile in initramfs"
+
+~/Repos/linux/usr/gen_init_cpio <(sed "s/PROFILE/${profile}/" initramfs.file) > initramfs
 
 # size=$(stat --format='%s' init1.initramfs)
 # size=$(($size / 1024 / 1024 + 10))
