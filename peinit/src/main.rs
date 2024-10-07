@@ -1,18 +1,15 @@
-use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
-use std::io::{Seek,Read};
-//use std::os::unix::process::CommandExt;
+use std::io::{Seek,Read,Write};
 use std::os::fd::{AsRawFd,FromRawFd};
+use std::os::unix::process::CommandExt;
 use std::ffi::{CStr,OsStr};
+use std::io;
 
 use peinit::Config;
 
+use libc;
 use bincode;
-
-// int mount(const char *source, const char *target,
-//           const char *filesystemtype, unsigned long mountflags,
-//           const void *_Nullable data);
 
 #[derive(Debug)]
 enum Error {
@@ -145,21 +142,43 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
     Ok(())
 }
 
+fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
 // kinda intended to do this in process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) {
     let mut f = File::open(&archive).unwrap();
-    let mut buf = [0u8; 4];
+    let archive_size = read_u32(&mut f).unwrap();
+    let config_size = read_u32(&mut f).unwrap();
 
-    f.read_exact(&mut buf).unwrap(); // config size
-    let config_size = u32::from_le_bytes(buf);
+    println!("archive_size: {archive_size} config_size: {config_size}");
 
-    let mut config_data = Vec::with_capacity(config_size as usize); // todo uninit
-    f.read_exact(config_data.as_mut_slice()).unwrap();
-    let config: Config = bincode::deserialize(config_data.as_slice()).unwrap();
+    let config_bytes = {
+        // let mut buf: Vec::<u8> = Vec::with_capacity(config_size as usize); // todo uninit
+        // f.read_exact(buf.spare_capacity_mut()).unwrap();
+        // buf.set_len(config_size as usize);
+        let mut buf = vec![0; config_size as usize];
+        f.read_exact(buf.as_mut_slice()).unwrap();
+        buf
+    };
 
-    f.read_exact(&mut buf).unwrap(); // archive size
-    let archive_size = u32::from_le_bytes(buf);
+    if true {
+        use sha2::{Sha256,Digest};
+        use base16ct;
+        let hash = Sha256::digest(&config_bytes);
+        let hash_hex = base16ct::lower::encode_string(&hash);
+        println!("config_bytes len {} {}", config_bytes.len(), hash_hex);
+    }
+    let config: Config = bincode::deserialize(config_bytes.as_slice()).unwrap();
+
+    println!("config is {config:?}");
+
+    File::create("/run/bundle/config.json").unwrap().write_all(config.oci_runtime_config.as_bytes()).unwrap();
+
     let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
                                      
@@ -177,6 +196,7 @@ fn unpack_input(archive: &str, dir: &str) {
 }
 
 fn pack_output<P: AsRef<OsStr>>(dir: P, archive: P) {
+    // TODO this needs to write the <archive size> <config size> <config>, then do the pack
     let ret = Command::new("/bin/pearchive")
         .arg("pack")
         .arg(dir)
@@ -198,8 +218,8 @@ fn run_crun() {
         .arg("--bundle")
         .arg("/run/bundle")
         .arg("containerid-1234")
-        //.uid(1000)
-        //.gid(1000)
+        .uid(1000)
+        .gid(1000)
         .stdout(Stdio::from(outfile))
         .stderr(Stdio::from(errfile))
         .stdin(match File::open("/run/input/stdin") {
@@ -232,7 +252,7 @@ fn main() {
 
     let inout_device = "/dev/pmem1";
 
-    let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
+    // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
     // TODO we need to slice off the input config
     unpack_input(inout_device, "/run/input/dir");
 

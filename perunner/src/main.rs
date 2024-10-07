@@ -21,7 +21,7 @@ const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 #[derive(Debug)]
 enum Error {
     Stat,
-    Truncate,
+Truncate,
 }
 
 fn round_up_to<const N: u64>(x: u64) -> u64 {
@@ -36,9 +36,62 @@ fn round_up_to_pmem_size(f: &File) -> io::Result<u64> {
     Ok(newlen)
 }
 
-fn create_runtime_spec(image_config: &oci_image::ImageConfiguration) -> Option<oci_runtime::Spec> {
+// ImageConfiguration: {created, architecture, os, config: {Env, User, Entrypoint, Cmd, WorkingDir}, rootfs, ...}
+// RuntimeSpec: {process: {terminal, user: {uid, gid}, args, env, cwd, capabilities, ...}
+
+// the allocations in this make me a bit unhappy, but maybe its all worth it
+fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &[String]) -> Option<oci_runtime::Spec> {
     //let spec: oci_runtime::Spec = Default::default();
-    let spec = oci_runtime::Spec::rootless(1000, 1000);
+    let mut spec = oci_runtime::Spec::rootless(1000, 1000);
+    // this has sane defaults
+    // terminal: false
+    // noNewPrivileges: true
+
+    // sanity checks
+    if *image_config.architecture() != oci_image::Arch::Amd64 { return None; }
+    if *image_config.os() != oci_image::Os::Linux { return None; }
+
+    // TODO how does oci-spec-rs deserialize the config .Env into .env ?
+
+    // we "know" that a defaulted runtime spec has Some process
+    let process = spec.process_mut().as_mut().unwrap();
+
+    if let Some(config) = image_config.config() {
+        // TODO: handle user
+        // from oci-spec-rs/src/image/config.rs
+        // user:
+        //   For Linux based systems, all
+        //   of the following are valid: user, uid, user:group,
+        //   uid:gid, uid:group, user:gid. If group/gid is not
+        //   specified, the default group and supplementary
+        //   groups of the given user/uid in /etc/passwd from
+        //   the container are applied.
+        // let _ = config.exposed_ports; // ignoring network for now
+
+        if let Some(env) = config.env() {
+            *process.env_mut() = Some(env.clone());
+        }
+
+        if run_args.is_empty() {
+            let args = {
+                let mut acc = vec![];
+                if let Some(entrypoint) = config.entrypoint() { acc.extend_from_slice(entrypoint); }
+                if let Some(cmd) = config.cmd()               { acc.extend_from_slice(cmd); }
+                if acc.is_empty() { return None; }
+                acc
+            };
+            process.set_args(Some(args));
+        } else {
+            process.set_args(Some(run_args.into()));
+        }
+
+        if let Some(cwd) = config.working_dir() { process.set_cwd(cwd.into()); }
+
+        // TODO will take args from user here as well
+        // what is with some things having set_ and some having _mut ??
+
+    }
+
     Some(spec)
 }
 
@@ -57,6 +110,13 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2
     let mut f = File::create(file).unwrap();
     let config = Config { oci_runtime_config: serde_json::to_string(runtime_spec).unwrap() };
     let config_bytes = bincode::serialize(&config).unwrap();
+    if true {
+        use sha2::{Sha256,Digest};
+        use base16ct;
+        let hash = Sha256::digest(&config_bytes);
+        let hash_hex = base16ct::lower::encode_string(&hash);
+        println!("config_bytes len {} {}", config_bytes.len(), hash_hex);
+    }
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     f.write_all(&[0u8; 4]).unwrap(); // archive size empty
     f.write_all(&(config_size.to_le_bytes())).unwrap(); // config size
@@ -95,16 +155,19 @@ fn main() {
         println!("{resp:?}");
     }
 
-    let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
-    let runtime_spec = create_runtime_spec(&image_spec).unwrap();
-    println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+    use std::env;
+    let args: Vec<_> = env::args().collect();
+    let run_args = &args[1..];
 
-    return;
+    let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
+    let runtime_spec = create_runtime_spec(&image_spec, run_args).unwrap();
+    //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
+    println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
     { // pmem1
         let io_file = ch.workdir().join("io");
         create_pack_file_from_dir(&inputdir, &io_file, &runtime_spec);
-        { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
+        // { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
         let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": true}}"#, io_file);
         println!("{}", pmemconfig);
         let resp = ch.api("PUT", "vm.add-pmem", Some(&pmemconfig));
@@ -122,5 +185,15 @@ fn main() {
     let _ = io::copy(&mut File::open(ch.log_file().unwrap()).unwrap(), &mut io::stdout());
     println!("== console ==");
     let _ = io::copy(&mut File::open(ch.console_file().unwrap()).unwrap(), &mut io::stdout());
+
+    println!("== archive out ==");
+    {
+        use std::io::Read;
+        let io_file = ch.workdir().join("io");
+        let mut buf = Vec::with_capacity(4096);
+        File::open(io_file).unwrap().read_to_end(&mut buf).unwrap();
+        let escaped = escape_bytes::escape(buf);
+        io::stdout().write_all(&escaped).unwrap();
+    }
 
 }
