@@ -1,5 +1,6 @@
 use std::time::Duration;
 use std::fs::File;
+use std::io;
 use std::io::{Write,Seek,SeekFrom};
 use std::ffi::OsString;
 use std::path::Path;
@@ -7,6 +8,9 @@ use std::path::Path;
 use pearchive::pack_dir_to_file;
 use peinit::Config;
 
+use oci_spec::runtime as oci_runtime;
+use oci_spec::image as oci_image;
+use serde_json;
 use bincode;
 
 mod cloudhypervisor;
@@ -25,11 +29,17 @@ fn round_up_to<const N: u64>(x: u64) -> u64 {
     ((x + (N - 1)) / N) * N
 }
 
-fn round_up_to_pmem_size(f: &File) -> Result<u64, Error> {
-    let cur = f.metadata().map_err(|_| Error::Stat)?.len();
+fn round_up_to_pmem_size(f: &File) -> io::Result<u64> {
+    let cur = f.metadata()?.len();
     let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
-    let _ = f.set_len(newlen).map_err(|_| Error::Truncate)?;
+    let _ = f.set_len(newlen)?;
     Ok(newlen)
+}
+
+fn create_runtime_spec(image_config: &oci_image::ImageConfiguration) -> Option<oci_runtime::Spec> {
+    //let spec: oci_runtime::Spec = Default::default();
+    let spec = oci_runtime::Spec::rootless(1000, 1000);
+    Some(spec)
 }
 
 // on the wire, the client sends
@@ -37,14 +47,15 @@ fn round_up_to_pmem_size(f: &File) -> Result<u64, Error> {
 // and the server reads the config, and writes its own config and the archive size computed from
 // the content length
 // the packfile input format is
-//     <archive size : u32le> <config size : u32le> <config> <archive>
+//     <archive size : u32le> <config size : u32le> <config> <archive> <padding>
 // the return output format is
-//     <archive size : u32le> <config size> <config> <archive>
+//                            |--------- sent to client ---------|
+//     <archive size : u32le> [ <config size> <config> <archive> ] <padding>
 
 // how do you get away from this P1 P2 thing
-fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &P1, file: &P2) {
+fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2, runtime_spec: &oci_runtime::Spec) {
     let mut f = File::create(file).unwrap();
-    let config = Config { };
+    let config = Config { oci_runtime_config: serde_json::to_string(runtime_spec).unwrap() };
     let config_bytes = bincode::serialize(&config).unwrap();
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     f.write_all(&[0u8; 4]).unwrap(); // archive size empty
@@ -66,6 +77,7 @@ fn main() {
     let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramfs".into();
     let rootfs:         OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs".into();
     let inputdir:       OsString = "/home/andrew/Repos/program-explorer/inputdir".into();
+    let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
 
     let mut ch = CloudHypervisor::start(CloudHypervisorConfig {
         workdir: "/tmp".into(),
@@ -83,9 +95,15 @@ fn main() {
         println!("{resp:?}");
     }
 
+    let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
+    let runtime_spec = create_runtime_spec(&image_spec).unwrap();
+    println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+
+    return;
+
     { // pmem1
         let io_file = ch.workdir().join("io");
-        create_pack_file_from_dir(&inputdir, &io_file);
+        create_pack_file_from_dir(&inputdir, &io_file, &runtime_spec);
         { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
         let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": true}}"#, io_file);
         println!("{}", pmemconfig);

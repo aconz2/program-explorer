@@ -14,5 +14,6 @@ name = "notabin"
 path = "src/notabin.rs"
 
 [dependencies]
+bincode = "1.3.3"
 libc = "0.2.158"
 serde = { version = "1.0.210", features = ["derive"] }

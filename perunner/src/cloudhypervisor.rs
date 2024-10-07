@@ -167,8 +167,13 @@ impl CloudHypervisor {
     }
 }
 
-// impl Drop for CloudHypervisor {
-//     fn drop(&mut self) {
-//         let _ = std::fs::remove_dir_all(&self.workdir);
-//     }
-// }
+impl Drop for CloudHypervisor {
+    fn drop(&mut self) {
+        match self.child.kill() {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error {e:?} terminating cloud-hypervisor process");
+            }
+        }
+    }
+}

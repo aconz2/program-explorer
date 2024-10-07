@@ -1,13 +1,18 @@
-//        int mount(const char *source, const char *target,
-//                  const char *filesystemtype, unsigned long mountflags,
-//                  const void *_Nullable data);
 use libc;
 use std::fs::File;
 use std::process::{Stdio, Command};
 use std::io::{Seek,Read};
 //use std::os::unix::process::CommandExt;
 use std::os::fd::{AsRawFd,FromRawFd};
-use std::ffi::OsStr;
+use std::ffi::{CStr,OsStr};
+
+use peinit::Config;
+
+use bincode;
+
+// int mount(const char *source, const char *target,
+//           const char *filesystemtype, unsigned long mountflags,
+//           const void *_Nullable data);
 
 #[derive(Debug)]
 enum Error {
@@ -40,38 +45,50 @@ fn check_libc(ret: i32) {
     }
 }
 
-unsafe fn parent_rootfs() {
-    let pivot_dir = c"/abc";
-    check_libc(libc::unshare(libc::CLONE_NEWNS));
-    check_libc(libc::mount(c"/".as_ptr(), pivot_dir.as_ptr(), std::ptr::null(), libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, std::ptr::null()));
-    check_libc(libc::chdir(pivot_dir.as_ptr()));
-    check_libc(libc::mount(pivot_dir.as_ptr(), c"/".as_ptr(), std::ptr::null(), libc::MS_MOVE | libc::MS_SILENT, std::ptr::null()));
-    check_libc(libc::chroot(c".".as_ptr()));
+fn mount(source: &CStr, target: &CStr, filesystem: Option<&CStr>, flags: libc::c_ulong, data: Option<&CStr>) {
+    let filesystem = filesystem.map_or(std::ptr::null(), |x| x.as_ptr());
+    let data = data.map_or(std::ptr::null(), |x| x.as_ptr() as *const libc::c_void);
+    check_libc(unsafe { libc::mount(source.as_ptr(), target.as_ptr(), filesystem, flags, data) });
 }
 
-unsafe fn init_mounts() {
-    check_libc(libc::mount(c"none".as_ptr(), c"/proc".as_ptr(),          c"proc".as_ptr(),     libc::MS_SILENT, std::ptr::null()));
-    check_libc(libc::mount(c"none".as_ptr(), c"/sys/fs/cgroup".as_ptr(), c"cgroup2".as_ptr(),  libc::MS_SILENT, std::ptr::null()));
-    check_libc(libc::mount(c"none".as_ptr(), c"/dev".as_ptr(),           c"devtmpfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
-    check_libc(libc::mount(c"none".as_ptr(), c"/run/output".as_ptr(),    c"tmpfs".as_ptr(),    libc::MS_SILENT, c"size=2M,mode=777".as_ptr() as *const libc::c_void));
+fn unshare(flags: libc::c_int) { check_libc(unsafe { libc::unshare(flags) }); }
+fn chdir(dir: &CStr) { check_libc(unsafe { libc::chdir(dir.as_ptr()) }); }
+fn chroot(dir: &CStr) { check_libc(unsafe { libc::chroot(dir.as_ptr()) }); }
+fn mkdir(dir: &CStr, mode: libc::mode_t) { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }); }
+fn chmod(path: &CStr, mode: libc::mode_t) { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }); }
+
+fn parent_rootfs() {
+    let pivot_dir = c"/abc";
+    unshare(libc::CLONE_NEWNS);
+    mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None);
+    chdir(pivot_dir);
+    mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None);
+    chroot(c".");
+}
+
+fn init_mounts() {
+    mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None);
+    mount(c"none", c"/sys/fs/cgroup", Some(c"cgroup2"),  libc::MS_SILENT, None);
+    mount(c"none", c"/dev",           Some(c"devtmpfs"), libc::MS_SILENT, None);
+    mount(c"none", c"/run/output",    Some(c"tmpfs"),    libc::MS_SILENT, Some(c"size=2M,mode=777"));
+
     // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
     // have set umask
-    check_libc(libc::mkdir(c"/run/output/dir".as_ptr(), 0o777));
-    check_libc(libc::chmod(c"/run/output/dir".as_ptr(), 0o777));
+    mkdir(c"/run/output/dir", 0o777);
+    chmod(c"/run/output/dir", 0o777);
 }
 
-unsafe fn mount_pmems() {
-    check_libc(libc::mount(c"/dev/pmem0".as_ptr(), c"/mnt/rootfs".as_ptr(), c"squashfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
-    // check_libc(libc::mount(c"/dev/pmem1".as_ptr(), c"/run/input".as_ptr(),  c"squashfs".as_ptr(), libc::MS_SILENT, std::ptr::null()));
+fn mount_pmems() {
+    mount(c"/dev/pmem0", c"/mnt/rootfs", Some(c"squashfs"), libc::MS_SILENT, None);
 }
 
-unsafe fn setup_overlay() {
-    check_libc(libc::mount(c"none".as_ptr(), c"/run/bundle/rootfs".as_ptr(), c"overlay".as_ptr(), libc::MS_SILENT, c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work".as_ptr() as *const libc::c_void));
+fn setup_overlay() {
+    mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT, Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"));
 }
 
-unsafe fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
-    let mut buf: libc::stat = std::mem::zeroed(); 
-    let ret = libc::fstatat(file.as_raw_fd(), name.as_ptr(), &mut buf, 0);
+fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
+    let mut buf: libc::stat = unsafe { std::mem::zeroed() }; 
+    let ret = unsafe { libc::fstatat(file.as_raw_fd(), name.as_ptr(), &mut buf, 0) };
     ret == 0
 }
 
@@ -84,7 +101,7 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
         File::from_raw_fd(ret)
     };
 
-    if files.iter().all(|file| unsafe { fstatat_exists(&dev_file, file) }) {
+    if files.iter().all(|file| fstatat_exists(&dev_file, file)) {
         return Ok(());
     }
 
@@ -105,14 +122,14 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
 
     for file in files.iter() {
         loop {
-            if unsafe { fstatat_exists(&dev_file, file) } {
+            if fstatat_exists(&dev_file, file) {
                 println!("pmem exists");
                 break;
             } else {
                 // check one more time before blocking on reading inotify in case it got added
                 // after we stat'd but before we created the watcher. idk this still isn't atomic
                 // though
-                if unsafe { fstatat_exists(&dev_file, file) } {
+                if fstatat_exists(&dev_file, file) {
                     println!("pmem exists");
                     break;
                 } else {
@@ -134,19 +151,20 @@ fn unpack_input(archive: &str, dir: &str) {
     let mut f = File::open(&archive).unwrap();
     let mut buf = [0u8; 4];
 
-    f.read_exact(&mut buf).unwrap(); // header size
-    let header_size = u32::from_le_bytes(buf);
+    f.read_exact(&mut buf).unwrap(); // config size
+    let config_size = u32::from_le_bytes(buf);
 
-    let mut header_data = Vec::with_capacity(header_size as usize); // todo uninit
-    f.read_exact(header_data.as_mut_slice()).unwrap();
+    let mut config_data = Vec::with_capacity(config_size as usize); // todo uninit
+    f.read_exact(config_data.as_mut_slice()).unwrap();
+    let config: Config = bincode::deserialize(config_data.as_slice()).unwrap();
 
     f.read_exact(&mut buf).unwrap(); // archive size
     let archive_size = u32::from_le_bytes(buf);
     let offset = f.stream_position().unwrap();
-    println!("read offset and archive size from as header_size={header_size} archive_size={archive_size} offset={offset}");
+    // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
                                      
-    //let ret = Command::new("/bin/pearchive")
-    let ret = Command::new("strace").arg("-e").arg("mmap").arg("/bin/pearchive")
+    let ret = Command::new("/bin/pearchive")
+    //let ret = Command::new("strace").arg("-e").arg("mmap").arg("/bin/pearchive")
         .arg("unpackdev")
         .arg(archive)
         .arg(dir)
@@ -203,18 +221,14 @@ fn run_crun() {
 fn main() {
     setup_panic();
 
-    unsafe {
-        init_mounts();
-    }
+    init_mounts();
 
     //              rootfs    input/output
     wait_for_pmem(&[c"pmem0", c"pmem1"]).unwrap();
 
-    unsafe {
-        mount_pmems();
-        setup_overlay();
-        parent_rootfs();
-    }
+    mount_pmems();
+    setup_overlay();
+    parent_rootfs();
 
     let inout_device = "/dev/pmem1";
 
