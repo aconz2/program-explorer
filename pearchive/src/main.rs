@@ -8,7 +8,7 @@ use pearchive::{
     unpack_data_to_dir_with_unshare_chroot,
 };
 
-use memmap::MmapOptions;
+use memmap2::MmapOptions;
 
 #[derive(Debug)]
 enum Error {

@@ -5,7 +5,7 @@ use std::ffi::{CStr,CString};
 use std::io::{Write,BufWriter};
 
 use rustix::fs::{RawDir,FileType};
-use memmap::MmapOptions;
+use memmap2::MmapOptions;
 
 mod open;
 use open::{openat,opendirat_cwd,openat_w,opendirat,openpathat};
