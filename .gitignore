@@ -4,3 +4,4 @@ venv
 peinit/target
 perunner/target
 pearchive/target
+waitid_timeout/target
