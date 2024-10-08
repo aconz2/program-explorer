@@ -1,6 +1,7 @@
 use std::env;
 use std::path::Path;
 use std::fs::File;
+use std::io::{Seek,SeekFrom,Write};
 
 use pearchive::{
     pack_dir_to_file,
@@ -26,7 +27,7 @@ fn pack(args: &[String]) {
 
     let fileout = File::create(outname).unwrap();
 
-    let _ = pack_dir_to_file(indirpath, fileout).unwrap();
+    pack_dir_to_file(indirpath, fileout).unwrap();
 }
 
 /// args: <input file> <output dir>
@@ -71,15 +72,60 @@ fn unpackdev(args: &[String]) {
     unpack_data_to_dir_with_unshare_chroot(mmap.as_ref(), outpath).unwrap();
 }
 
+use std::io;
+use std::io::Read;
+fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+/// args: <input dir> <output file> <offset>
+fn packdev(args: &[String]) {
+    let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
+    let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
+    let indirpath = Path::new(indir);
+    assert!(indirpath.is_dir(), "{:?} should be a dir", indirpath);
+
+    let offset: u64 = args.get(2).ok_or(Error::MissingArg).unwrap().parse::<u64>().unwrap();
+    println!("packdev starting at offset {offset}");
+
+    let mut fileout = File::create(outname).unwrap();
+    fileout.seek(SeekFrom::Start(offset)).unwrap();
+
+    // its a bit quirky that we move fileout in and get it back out, which should be the same as an
+    // &mut, but then the type of BufWriter<&mut File> gets weird and I don't know what to do
+    let mut fileout = pack_dir_to_file(indirpath, fileout).unwrap();
+
+    let ending_offset = fileout.stream_position().unwrap();
+    assert!(ending_offset > offset);
+    let archive_size = ending_offset - offset;
+    let encoded_size: u32 = archive_size.try_into().unwrap();
+    fileout.seek(SeekFrom::Start(0)).unwrap();
+    fileout.write_all(&(encoded_size.to_le_bytes())).unwrap();
+    println!("packdev archive_size {encoded_size}");
+
+    {
+        let mut file = File::open(outname).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let archive_size = read_u32(&mut file).unwrap();
+        let response_size = read_u32(&mut file).unwrap();
+        println!("packdev reread archive_size {archive_size} response_size {response_size}");
+    }
+
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("pack")      => {      pack(&args[2..]); },
         Some("unpack")    => {    unpack(&args[2..]); },
+        Some("packdev")    => {  packdev(&args[2..]); },
         Some("unpackdev") => { unpackdev(&args[2..]); },
         _ => {
             println!("pack <input-dir> <output-file>");
             println!("unpack <input-file> <output-dir>");
+            println!("packdev <input-file> <output-dir> <offset>");
             println!("unpackdev <input-file> <output-dir> <offset> <len>");
             std::process::exit(1);
         }

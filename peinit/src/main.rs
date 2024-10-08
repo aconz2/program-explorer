@@ -1,12 +1,14 @@
+use std::fs;
 use std::fs::File;
 use std::process::{Stdio, Command};
 use std::io::{Seek,Read,Write};
 use std::os::fd::{AsRawFd,FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::ffi::{CStr,OsStr};
+use std::path::Path;
 use std::io;
 
-use peinit::Config;
+use peinit::{Config,Response,Status,Rusage};
 
 use libc;
 use bincode;
@@ -17,6 +19,13 @@ enum Error {
     InotifyInit,
     InotifyAddWatch,
     InotifyRead,
+    Wait4,
+}
+
+#[derive(Debug)]
+struct CrunOutput {
+    pub status: Status,
+    pub rusage: Rusage,
 }
 
 fn size_of<T>(_t: T) -> usize { return std::mem::size_of::<T>(); }
@@ -84,7 +93,7 @@ fn setup_overlay() {
 }
 
 fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
-    let mut buf: libc::stat = unsafe { std::mem::zeroed() }; 
+    let mut buf: libc::stat = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::fstatat(file.as_raw_fd(), name.as_ptr(), &mut buf, 0) };
     ret == 0
 }
@@ -150,7 +159,7 @@ fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
 
 // kinda intended to do this in process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
-fn unpack_input(archive: &str, dir: &str) {
+fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut f = File::open(&archive).unwrap();
     let archive_size = read_u32(&mut f).unwrap();
     let config_size = read_u32(&mut f).unwrap();
@@ -175,13 +184,10 @@ fn unpack_input(archive: &str, dir: &str) {
     }
     let config: Config = bincode::deserialize(config_bytes.as_slice()).unwrap();
 
-    println!("config is {config:?}");
-
-    File::create("/run/bundle/config.json").unwrap().write_all(config.oci_runtime_config.as_bytes()).unwrap();
 
     let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
-                                     
+
     let ret = Command::new("/bin/pearchive")
     //let ret = Command::new("strace").arg("-e").arg("mmap").arg("/bin/pearchive")
         .arg("unpackdev")
@@ -193,26 +199,55 @@ fn unpack_input(archive: &str, dir: &str) {
         .unwrap()
         .success();
     assert!(ret);
+
+    config
 }
 
-fn pack_output<P: AsRef<OsStr>>(dir: P, archive: P) {
+fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archive: P) {
+    use std::io::{Seek,SeekFrom};
     // TODO this needs to write the <archive size> <config size> <config>, then do the pack
+    let mut f = File::create(&archive).unwrap();
+    let response_bytes = bincode::serialize(response).unwrap();
+
+    if true {
+        use sha2::{Sha256,Digest};
+        use base16ct;
+        let hash = Sha256::digest(&response_bytes);
+        let hash_hex = base16ct::lower::encode_string(&hash);
+        println!("response_bytes len {} {}", response_bytes.len(), hash_hex);
+    }
+
+    let response_size: u32 = response_bytes.len().try_into().unwrap();
+    f.seek(SeekFrom::Start(4)).unwrap();  // packdev fills in the <archive size>
+    f.write_all(&(response_size.to_le_bytes())).unwrap();
+    f.write_all(&response_bytes).unwrap();
+    let offset = f.stream_position().unwrap();
+
     let ret = Command::new("/bin/pearchive")
-        .arg("pack")
+        .arg("packdev")
         .arg(dir)
         .arg(archive)
+        .arg(format!("{offset}"))
         .status()
         .unwrap()
         .success();
     assert!(ret);
 }
 
-fn run_crun() {
+fn wait4(pid: i32) -> Result<(libc::c_int, libc::rusage), Error> {
+    let mut status: libc::c_int = 0;
+    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
+    if ret < 0 { return Err(Error::Wait4); }
+    Ok((status, rusage))
+}
+
+fn run_crun() -> CrunOutput {
     let outfile = File::create_new("/run/output/stdout").unwrap();
     let errfile = File::create_new("/run/output/stderr").unwrap();
 
     //let mut child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
-    let mut child = Command::new("/bin/crun")
+    let child = Command::new("/bin/crun")
         .arg("--debug")
         .arg("run")
         .arg("--bundle")
@@ -228,14 +263,23 @@ fn run_crun() {
         })
         .spawn()
         .unwrap();
+
+    // TODO proper thing is to get a pidfd
+    let pid: i32 = child.id().try_into().unwrap();
+
+    // todo need to wait with timeout, which idk if we can do and get rusage...
+    let (status, rusage) = wait4(pid).unwrap();
     //Command::new("busybox").arg("ps").arg("-T").spawn().unwrap().wait();
     //let pid = child.id();
     //let uid_map = std::fs::read_to_string(format!("/proc/{pid}/uid_map")).unwrap();
     //println!("{uid_map}");
     // TODO we need to wait with timeout from here too
-    let ecode = child.wait().unwrap();
+    // let ecode = child.wait().unwrap();
     // TODO this is an ExitStatus and will have none exitcode if it is terminated by a signal
-    println!("exit code of crun {ecode}");
+    CrunOutput {
+        rusage: rusage.into(),
+        status: status.into(),
+    }
 }
 
 fn main() {
@@ -254,13 +298,19 @@ fn main() {
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
     // TODO we need to slice off the input config
-    unpack_input(inout_device, "/run/input/dir");
+    let config = unpack_input(inout_device, "/run/input/dir");
+    println!("config is {config:?}");
+    fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
-    run_crun();
+    let crun_output = run_crun();
+    let response = Response {
+        status: crun_output.status,
+        rusage: crun_output.rusage,
+    };
 
     // TODO we need to first write out the result metadata, so maybe pearchive needs to take an
     // open fd
-    pack_output("/run/output", inout_device);
+    pack_output(&response, "/run/output", inout_device);
 
     exit()
     //check_libc(libc::setuid(1000));
