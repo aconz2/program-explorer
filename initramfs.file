@@ -4,7 +4,7 @@
 # slink <name> <target> <mode> <uid> <gid>
 # pipe <name> <mode> <uid> <gid>
 # sock <name> <mode> <uid> <gid>
-# 
+#
 # <name>       name of the file/dir/nod/etc in the archive
 # <location>   location of the file in the current filesystem
 #              expands shell variables quoted with ${}
@@ -40,7 +40,8 @@ dir /mnt/upper/scratch 0755 0 0
 dir /mnt/upper/input   0755 0 0
 dir /mnt/upper/output  0777 0 0
 
-dir /run               0755 0 0
+# we need crun to write into this and it runs as 1000
+dir /run               0777 0 0
 
 dir /run/bundle        0755 0 0
 dir /run/bundle/rootfs 0755 0 0

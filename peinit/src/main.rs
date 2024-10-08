@@ -6,10 +6,10 @@ use std::os::fd::{AsRawFd,FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::ffi::{CStr,OsStr};
 use std::path::Path;
-use std::io;
 
 use peinit::{Config,Response,Status,Rusage};
 
+use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use libc;
 use bincode;
 
@@ -151,18 +151,12 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
-}
-
 // kinda intended to do this in process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut f = File::open(&archive).unwrap();
-    let archive_size = read_u32(&mut f).unwrap();
-    let config_size = read_u32(&mut f).unwrap();
+    let archive_size = f.read_u32::<LE>().unwrap();
+    let config_size = f.read_u32::<LE>().unwrap();
 
     println!("archive_size: {archive_size} config_size: {config_size}");
 
@@ -219,7 +213,7 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
 
     let response_size: u32 = response_bytes.len().try_into().unwrap();
     f.seek(SeekFrom::Start(4)).unwrap();  // packdev fills in the <archive size>
-    f.write_all(&(response_size.to_le_bytes())).unwrap();
+    f.write_u32::<LE>(response_size).unwrap();
     f.write_all(&response_bytes).unwrap();
     let offset = f.stream_position().unwrap();
 
@@ -246,12 +240,15 @@ fn run_crun() -> CrunOutput {
     let outfile = File::create_new("/run/output/stdout").unwrap();
     let errfile = File::create_new("/run/output/stderr").unwrap();
 
-    //let mut child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
+    //let child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
     let child = Command::new("/bin/crun")
-        .arg("--debug")
+        // TODO can we get debug info on another fd?
+        //.arg("--debug")
         .arg("run")
-        .arg("--bundle")
+        .arg("-b") // --bundle
         .arg("/run/bundle")
+        .arg("-d") // --detach
+        .arg("--pid-file=/run/pid")
         .arg("containerid-1234")
         .uid(1000)
         .gid(1000)
@@ -262,20 +259,22 @@ fn run_crun() -> CrunOutput {
             Err(_) => { Stdio::null() }
         })
         .spawn()
+        .unwrap()
+        .wait()
         .unwrap();
 
+    //Command::new("busybox").arg("ls").arg("/run").spawn().unwrap().wait().unwrap();
+    let pid = fs::read_to_string("/run/pid").unwrap().parse::<i32>().unwrap();
+
     // TODO proper thing is to get a pidfd
-    let pid: i32 = child.id().try_into().unwrap();
+    // let pid: i32 = child.id().try_into().unwrap();
 
     // todo need to wait with timeout, which idk if we can do and get rusage...
+    // WE CAN waitid has a hidden rusage parameter at the end lol wtf everything is crazy
     let (status, rusage) = wait4(pid).unwrap();
-    //Command::new("busybox").arg("ps").arg("-T").spawn().unwrap().wait();
-    //let pid = child.id();
-    //let uid_map = std::fs::read_to_string(format!("/proc/{pid}/uid_map")).unwrap();
-    //println!("{uid_map}");
-    // TODO we need to wait with timeout from here too
-    // let ecode = child.wait().unwrap();
-    // TODO this is an ExitStatus and will have none exitcode if it is terminated by a signal
+    // so funny thing about pid 1 in the container is that it doesn't respond to sigterm signals
+    // so not sure we'll ever get sig info but :shrug:
+
     CrunOutput {
         rusage: rusage.into(),
         status: status.into(),

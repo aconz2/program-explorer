@@ -66,6 +66,7 @@ dependencies = [
 name = "pearchive"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "libc",
  "memmap2",
  "rand",

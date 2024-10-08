@@ -10,6 +10,7 @@ use pearchive::{
 };
 
 use memmap2::MmapOptions;
+use byteorder::{WriteBytesExt,ReadBytesExt,LE};
 
 #[derive(Debug)]
 enum Error {
@@ -72,14 +73,6 @@ fn unpackdev(args: &[String]) {
     unpack_data_to_dir_with_unshare_chroot(mmap.as_ref(), outpath).unwrap();
 }
 
-use std::io;
-use std::io::Read;
-fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
-}
-
 /// args: <input dir> <output file> <offset>
 fn packdev(args: &[String]) {
     let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
@@ -102,14 +95,14 @@ fn packdev(args: &[String]) {
     let archive_size = ending_offset - offset;
     let encoded_size: u32 = archive_size.try_into().unwrap();
     fileout.seek(SeekFrom::Start(0)).unwrap();
-    fileout.write_all(&(encoded_size.to_le_bytes())).unwrap();
+    fileout.write_u32::<LE>(encoded_size).unwrap();
     println!("packdev archive_size {encoded_size}");
 
     {
         let mut file = File::open(outname).unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
-        let archive_size = read_u32(&mut file).unwrap();
-        let response_size = read_u32(&mut file).unwrap();
+        let archive_size  = file.read_u32::<LE>().unwrap();
+        let response_size = file.read_u32::<LE>().unwrap();
         println!("packdev reread archive_size {archive_size} response_size {response_size}");
     }
 

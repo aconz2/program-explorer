@@ -1,4 +1,5 @@
 use std::os::fd::{AsRawFd,OwnedFd};
+use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::ffi::{CStr,CString};
@@ -76,12 +77,12 @@ fn unshare_user() -> Result<(), Error> {
         let ret = libc::unshare(libc::CLONE_NEWUSER);
         if ret < 0 { return Err(Error::Unshare); }
     }
-    File::create("/proc/self/uid_map").map_err(|_| Error::Create)?
-        .write_all(format!("0 {} 1", uid).as_bytes()).map_err(|_| Error::Write)?;
-    File::create("/proc/self/setgroups").map_err(|_| Error::Create)?
-        .write_all(b"deny").map_err(|_| Error::Write)?;
-    File::create("/proc/self/gid_map").map_err(|_| Error::Create)?
-        .write_all(format!("0 {} 1", gid).as_bytes()).map_err(|_| Error::Write)?;
+    fs::write("/proc/self/uid_map", format!("0 {} 1", uid).as_bytes())
+        .map_err(|_| Error::Write)?;
+    fs::write("/proc/self/setgroups", b"deny")
+        .map_err(|_| Error::Write)?;
+    fs::write("/proc/self/gid_map", format!("0 {} 1", gid).as_bytes())
+        .map_err(|_| Error::Write)?;
     Ok(())
 }
 

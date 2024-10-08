@@ -12,6 +12,7 @@ use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
 use serde_json;
 use bincode;
+use byteorder::{WriteBytesExt,ReadBytesExt,LE};
 
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig};
@@ -34,12 +35,6 @@ fn round_up_to_pmem_size(f: &File) -> io::Result<u64> {
     let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
     let _ = f.set_len(newlen)?;
     Ok(newlen)
-}
-
-fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
 }
 
 // ImageConfiguration: {created, architecture, os, config: {Env, User, Entrypoint, Cmd, WorkingDir}, rootfs, ...}
@@ -124,15 +119,15 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2
         println!("config_bytes len {} {}", config_bytes.len(), hash_hex);
     }
     let config_size: u32 = config_bytes.len().try_into().unwrap();
-    f.write_all(&[0u8; 4]).unwrap(); // archive size empty
-    f.write_all(&(config_size.to_le_bytes())).unwrap(); // config size
+    f.write_u32::<LE>(0).unwrap(); // or seek
+    f.write_u32::<LE>(config_size).unwrap();
     f.write_all(config_bytes.as_slice()).unwrap();
     let archive_start_pos = f.stream_position().unwrap();
     let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
     let archive_end_pos = f.stream_position().unwrap();
     let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
     f.seek(SeekFrom::Start(0)).unwrap();
-    f.write_all(&(size.to_le_bytes())).unwrap();
+    f.write_u32::<LE>(size).unwrap();
     let _ = round_up_to_pmem_size(&f).unwrap();
 }
 
@@ -220,8 +215,8 @@ fn main() {
         std::fs::copy(&io_filepath, "/tmp/pe-io").unwrap();
         // let mut buf = Vec::with_capacity(4096);
         let mut file = File::open(io_filepath).unwrap();
-        let archive_size = read_u32(&mut file).unwrap();
-        let response_size = read_u32(&mut file).unwrap();
+        let archive_size = file.read_u32::<LE>().unwrap();
+        let response_size = file.read_u32::<LE>().unwrap();
         // todo wtf is going on with the options
         //let response: Response = bincode::options()
         //    .with_fixint_encoding()
