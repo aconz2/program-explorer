@@ -7,6 +7,7 @@ edition = "2021"
 api_client = { version = "0.1.0", path = "../../cloud-hypervisor/api_client" }
 pearchive = { version = "0.1.0", path = "../pearchive" }
 peinit = { version = "0.1.0", path = "../peinit" }
+waitid_timeout = { version = "0.1.0", path = "../waitid_timeout" }
 libc = "0.2.158"
 rand = "0.8.5"
 wait-timeout = "0.2.0"

@@ -7,7 +7,7 @@ use libc;
 use libc::{c_int,idtype_t,id_t,siginfo_t};
 use libc::rusage as rusage_t;
 
-use mio_pidfd::PidFd;
+pub use mio_pidfd::PidFd;
 use mio::{Poll,Token,Events,Interest};
 
 #[cfg(not(target_os = "linux"))]
@@ -40,6 +40,12 @@ pub enum WaitIdData {
     NotExited,
 }
 
+pub enum WaitIdDataOvertime {
+    Exited{siginfo: siginfo_t, rusage: rusage_t},
+    ExitedOvertime{siginfo: siginfo_t, rusage: rusage_t},
+    NotExited,
+}
+
 fn waitid(idtype: idtype_t, id: id_t, options: c_int) -> io::Result<WaitIdData> {
     let mut siginfo: siginfo_t = unsafe { std::mem::zeroed() };
     let mut rusage:  rusage_t = unsafe { std::mem::zeroed() };
@@ -51,14 +57,14 @@ fn waitid(idtype: idtype_t, id: id_t, options: c_int) -> io::Result<WaitIdData> 
     }
 }
 
-fn waitid_pidfd_exited_nohang<Fd: AsRawFd>(pidfd: &Fd) -> io::Result<WaitIdData> {
+pub fn waitid_pidfd_exited_nohang<Fd: AsRawFd>(pidfd: &Fd) -> io::Result<WaitIdData> {
     let pidfd: u32 = pidfd.as_raw_fd().try_into()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "pidfd into u32 failed"))?;
     waitid(libc::P_PIDFD, pidfd, libc::WEXITED | libc::WNOHANG)
 }
 
 // ugh pid is such a pain, command returns a u32 but pid_t is i32 but id_t is u32...
-fn waitid_pid_exited_nohang(pid: u32) -> io::Result<WaitIdData> {
+pub fn waitid_pid_exited_nohang(pid: u32) -> io::Result<WaitIdData> {
     waitid(libc::P_PID, pid, libc::WEXITED | libc::WNOHANG)
 }
 
@@ -68,14 +74,18 @@ pub struct PidFdWaiter<'a> {
 }
 
 impl<'a> PidFdWaiter<'a> {
-    fn new(pidfd: &'a mut PidFd) -> io::Result<Self> {
+    pub fn new(pidfd: &'a mut PidFd) -> io::Result<Self> {
         let poll = Poll::new()?;
         poll.registry()
             .register(pidfd, Token(0), Interest::READABLE)?;
         Ok(Self { poll, pidfd })
     }
 
-    fn wait_timeout(&mut self, duration: Duration) -> io::Result<WaitIdData> {
+    pub fn kill(&mut self, signal: c_int) -> io::Result<()> {
+        self.pidfd.kill(signal)
+    }
+
+    pub fn wait_timeout(&mut self, duration: Duration) -> io::Result<WaitIdData> {
         let mut events = Events::with_capacity(1);
         self.poll.poll(&mut events, Some(duration))?;
         if events.is_empty() {
@@ -84,14 +94,25 @@ impl<'a> PidFdWaiter<'a> {
         waitid_pidfd_exited_nohang(self.pidfd)
     }
 
-    fn kill(&mut self, signal: c_int) -> io::Result<()> {
-        self.pidfd.kill(signal)
+    pub fn wait_timeout_or_kill(&mut self, duration: Duration) -> io::Result<WaitIdDataOvertime> {
+        match self.wait_timeout(duration) {
+            Ok(WaitIdData::NotExited) => {
+                self.kill(libc::SIGKILL)?;
+                match self.wait_timeout(Duration::from_millis(10)) {
+                    Ok(WaitIdData::Exited{siginfo, rusage}) => Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, rusage}),
+                    Ok(WaitIdData::NotExited)               => Ok(WaitIdDataOvertime::NotExited),
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(WaitIdData::Exited{siginfo, rusage}) => Ok(WaitIdDataOvertime::Exited{siginfo, rusage}),
+            Err(e) => Err(e),
+        }
     }
 }
 
-trait ChildWaitIdExt {
+pub trait ChildWaitIdExt {
     fn wait_timeout(&self, duration: Duration) -> io::Result<WaitIdData>;
-    fn wait_timeout_or_kill(&self, duration: Duration) -> io::Result<WaitIdData>;
+    fn wait_timeout_or_kill(&self, duration: Duration) -> io::Result<WaitIdDataOvertime>;
 }
 
 impl ChildWaitIdExt for Child {
@@ -101,16 +122,13 @@ impl ChildWaitIdExt for Child {
         waiter.wait_timeout(duration)
     }
 
-    fn wait_timeout_or_kill(&self, duration: Duration) -> io::Result<WaitIdData> {
+    /// if you get Ok(WaitIdDataOvertime::NotExited) from this, something has gone pretty wrong and
+    /// the child is probably not reaped, idk what else to do though
+    // TODO the second 10ms wait for reaping is pretty hacky
+    fn wait_timeout_or_kill(&self, duration: Duration) -> io::Result<WaitIdDataOvertime> {
         let mut pidfd = PidFd::new(self)?;
         let mut waiter = PidFdWaiter::new(&mut pidfd)?;
-        match waiter.wait_timeout(duration) {
-            Ok(WaitIdData::NotExited) => {
-                waiter.kill(libc::SIGKILL)?;
-                waiter.wait_timeout(Duration::from_millis(10))
-            }
-            ret => { ret }
-        }
+        waiter.wait_timeout_or_kill(duration)
     }
 }
 
@@ -120,12 +138,12 @@ mod tests {
     use std::time::Instant;
     use std::process::Command;
 
-    fn assert_exited(result: io::Result<WaitIdData>, pid: u32, code: i32) {
+    fn assert_exited(result: io::Result<WaitIdData>, pid: u32, status: i32) {
         match result {
             Ok(WaitIdData::Exited{siginfo, ..}) => {
                 assert_eq!(pid, unsafe { siginfo.si_pid().try_into().unwrap() });
                 assert_eq!(libc::CLD_EXITED, siginfo.si_code);
-                assert_eq!(code, unsafe { siginfo.si_status() });
+                assert_eq!(status, unsafe { siginfo.si_status() });
             },
             Ok(WaitIdData::NotExited) => { panic!("got NotExited and I shouldnt"); }
             Err(err)                  => { panic!("got err={err:?} and I shouldnt"); }
@@ -252,9 +270,15 @@ mod tests {
     #[test]
     fn child_wait_timeout_kill() {
         let child = Command::new("sh").arg("-c").arg("sleep 1000").spawn().unwrap();
-        let ret = child.wait_timeout_or_kill(Duration::from_millis(50));
         let start = Instant::now();
-        assert_signaled(ret, child.id(), libc::SIGKILL);
+        match child.wait_timeout_or_kill(Duration::from_millis(50)) {
+            Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, ..}) => {
+                assert_eq!(child.id(), unsafe { siginfo.si_pid().try_into().unwrap() });
+                assert_eq!(libc::CLD_KILLED, siginfo.si_code);
+                assert_eq!(libc::SIGKILL, unsafe { siginfo.si_status() });
+            }
+            _ => { panic!("should have gotten exitedovertime"); }
+        }
         let elapsed = start.elapsed();
         assert!(elapsed < Duration::from_millis(100));
     }

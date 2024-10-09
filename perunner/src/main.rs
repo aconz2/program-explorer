@@ -7,6 +7,7 @@ use std::path::Path;
 
 use pearchive::pack_dir_to_file;
 use peinit::{Config,Response};
+use waitid_timeout::WaitIdDataOvertime;
 
 use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
@@ -22,7 +23,14 @@ const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 #[derive(Debug)]
 enum Error {
     Stat,
-Truncate,
+    Truncate,
+}
+
+fn sha2_hex(buf: &[u8]) -> String {
+    use sha2::{Sha256,Digest};
+    use base16ct;
+    let hash = Sha256::digest(&buf);
+    base16ct::lower::encode_string(&hash)
 }
 
 fn round_up_to<const N: u64>(x: u64) -> u64 {
@@ -107,16 +115,12 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
 //     <archive size : u32le> [ <config size> <config> <archive> ] <padding>
 
 // how do you get away from this P1 P2 thing
-fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2, runtime_spec: &oci_runtime::Spec) {
+fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2, config: &Config) {
     let mut f = File::create(file).unwrap();
-    let config = Config { oci_runtime_config: serde_json::to_string(runtime_spec).unwrap() };
     let config_bytes = bincode::serialize(&config).unwrap();
     if true {
-        use sha2::{Sha256,Digest};
-        use base16ct;
-        let hash = Sha256::digest(&config_bytes);
-        let hash_hex = base16ct::lower::encode_string(&hash);
-        println!("config_bytes len {} {}", config_bytes.len(), hash_hex);
+        let hash_hex = sha2_hex(&config_bytes);
+        println!("HOST config_bytes len {} {}", config_bytes.len(), hash_hex);
     }
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     f.write_u32::<LE>(0).unwrap(); // or seek
@@ -182,9 +186,16 @@ fn main() {
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
     println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
+    let timeout = Duration::from_millis(1000);
+    let ch_timeout = timeout + Duration::from_millis(200);
+    let config = Config {
+        timeout: timeout,
+        oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap()
+    };
+
     { // pmem1
         let io_file = ch.workdir().join("io");
-        create_pack_file_from_dir(&inputdir, &io_file, &runtime_spec);
+        create_pack_file_from_dir(&inputdir, &io_file, &config);
         // { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
         let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": false}}"#, io_file);
         println!("{}", pmemconfig);
@@ -192,9 +203,22 @@ fn main() {
         println!("{resp:?}");
     }
 
-    match ch.wait_timeout_or_kill(Duration::from_secs(1)) {
-        Some(status) => println!("exited with status {status:?}"),
-        None => println!("either didn't exit or got killed"),
+    match ch.wait_timeout_or_kill(ch_timeout) {
+        Ok(WaitIdDataOvertime::NotExited) => {
+            println!("HOST warning ch didn't exit, this is real bad!");
+            ch.kill().unwrap();
+        }
+        Ok(WaitIdDataOvertime::Exited{..}) => {
+            println!("HOST ch exited on time");
+        }
+        Ok(WaitIdDataOvertime::ExitedOvertime{..}) => {
+            println!("HOST ch ran over time and was successfully killed");
+        }
+        Err(e) => {
+            println!("HOST warning ch ran into an error waiting {e:?}");
+        }
+        // Some(status) => println!("exited with status {status:?}"),
+        // None => println!("either didn't exit or got killed"),
     }
     //let status = ch.status();
 
@@ -210,7 +234,6 @@ fn main() {
 
     println!("== archive out ==");
     {
-        use bincode::Options;
         let io_filepath = ch.workdir().join("io");
         std::fs::copy(&io_filepath, "/tmp/pe-io").unwrap();
         // let mut buf = Vec::with_capacity(4096);
@@ -224,27 +247,31 @@ fn main() {
         //    .with_limit(response_size.into())
         //    .deserialize_from(&mut file)
         //    .unwrap();
-        println!("archive size {archive_size} response_size {response_size}");
+        println!("HOST archive size {archive_size} response_size {response_size}");
         let response: Response = {
             let mut buf = vec![0; response_size.try_into().unwrap()];
             file.read_exact(buf.as_mut_slice()).unwrap();
 
             if true {
-                use sha2::{Sha256,Digest};
-                use base16ct;
-                let hash = Sha256::digest(&buf);
-                let hash_hex = base16ct::lower::encode_string(&hash);
-                println!("response_bytes len {} {}", response_size, hash_hex);
+                let hash_hex = sha2_hex(&buf);
+                println!("HOST response_bytes len {} {}", response_size, hash_hex);
             }
             bincode::deserialize(&buf).unwrap()
         };
-        println!("got response {response:#?}");
+        println!("HOST got response {response:#?}");
         println!("== archvive raw ==");
         write_escaped(&mut file, archive_size, &mut io::stdout());
         println!("\n== /archvive raw ==");
-        // file.read_to_end(&mut buf).unwrap();
-        // let escaped = escape_bytes::escape(buf);
-        // io::stdout().write_all(&escaped).unwrap();
     }
 
+    // use std::process::Command;
+    // use peinit::Rusage;
+    // use waitid_timeout::{WaitIdData,ChildWaitIdExt};
+    // match Command::new("gcc").arg("-v").spawn().unwrap().wait_timeout(Duration::from_millis(100)) {
+    //     Ok(WaitIdData::Exited{rusage,..}) => {
+    //         let rusage: Rusage = rusage.into();
+    //         println!("host gcc -v {rusage:#?}");
+    //     }
+    //     _ => todo!()
+    // }
 }

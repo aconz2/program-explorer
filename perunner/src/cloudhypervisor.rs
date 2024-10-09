@@ -1,14 +1,16 @@
 use std::os::fd::AsRawFd;
 use std::fs;
 use std::path::{Path,PathBuf};
-use std::process::{Command,Stdio,ExitStatus,Child};
+use std::process::{Command,Stdio,Child};
 use std::os::unix::net::{UnixListener,UnixStream};
+use std::io;
 
 use std::ffi::OsString;
 use std::time::Duration;
 
 use rand::distributions::{Alphanumeric, DistString};
-use wait_timeout::ChildExt;
+// use wait_timeout::ChildExt;
+use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
 use libc;
 
 #[derive(Debug)]
@@ -129,29 +131,12 @@ impl CloudHypervisor {
         api_client::simple_api_full_command_and_response(&mut self.socket_stream, method, command, data)
     }
 
-    pub fn wait_timeout_or_kill(&mut self, duration: Duration) -> Option<ExitStatus> {
-        // TODO I don't really like wait_timeout; I think we can do something nicer
-        match self.child.wait_timeout(duration) {
-            Ok(None) => {
-                println!("none status");
-                // have elapsed without exiting
-                let _ = self.child.kill();
-                // TODO probably want to guard against blocking forever, but idk really what to do
-                let e = self.child.wait();
-                println!("result of waiting {e:?}");
-                None
-            },
-            Ok(status) => status,
-            Err(_) => {
-                println!("error waiting");
-                // TODO what do we do to cleanup the child?
-                None
-            }
-        }
+    pub fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
     }
 
-    pub fn status(&mut self) -> Option<ExitStatus> {
-        return self.child.try_wait().unwrap_or(None);
+    pub fn wait_timeout_or_kill(&mut self, duration: Duration) -> io::Result<WaitIdDataOvertime> {
+        self.child.wait_timeout_or_kill(duration)
     }
 
     pub fn console_file(&self) -> Option<&OsString> {
@@ -167,13 +152,9 @@ impl CloudHypervisor {
     }
 }
 
+// TODO I don't really like this because we regrab the pidfd and might already be killed etc
 impl Drop for CloudHypervisor {
     fn drop(&mut self) {
-        match self.child.kill() {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("error {e:?} terminating cloud-hypervisor process");
-            }
-        }
+        let _ = self.wait_timeout_or_kill(Duration::from_millis(5));
     }
 }

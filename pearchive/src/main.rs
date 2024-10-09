@@ -1,7 +1,7 @@
 use std::env;
 use std::path::Path;
 use std::fs::File;
-use std::io::{Seek,SeekFrom,Write};
+use std::io::{Seek,SeekFrom};
 
 use pearchive::{
     pack_dir_to_file,

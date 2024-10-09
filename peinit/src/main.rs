@@ -6,8 +6,12 @@ use std::os::fd::{AsRawFd,FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::ffi::{CStr,OsStr};
 use std::path::Path;
+use std::io;
+use std::time::Duration;
+use std::time::Instant;
 
-use peinit::{Config,Response,Status,Rusage};
+use peinit::{Config,Response,ExitKind};
+use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
 use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use libc;
@@ -19,16 +23,16 @@ enum Error {
     InotifyInit,
     InotifyAddWatch,
     InotifyRead,
-    Wait4,
-}
-
-#[derive(Debug)]
-struct CrunOutput {
-    pub status: Status,
-    pub rusage: Rusage,
 }
 
 fn size_of<T>(_t: T) -> usize { return std::mem::size_of::<T>(); }
+
+fn sha2_hex(buf: &[u8]) -> String {
+    use sha2::{Sha256,Digest};
+    use base16ct;
+    let hash = Sha256::digest(&buf);
+    base16ct::lower::encode_string(&hash)
+}
 
 fn exit() {
     unsafe {
@@ -158,7 +162,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     let archive_size = f.read_u32::<LE>().unwrap();
     let config_size = f.read_u32::<LE>().unwrap();
 
-    println!("archive_size: {archive_size} config_size: {config_size}");
+    println!("VM   archive_size: {archive_size} config_size: {config_size}");
 
     let config_bytes = {
         // let mut buf: Vec::<u8> = Vec::with_capacity(config_size as usize); // todo uninit
@@ -170,11 +174,8 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     };
 
     if true {
-        use sha2::{Sha256,Digest};
-        use base16ct;
-        let hash = Sha256::digest(&config_bytes);
-        let hash_hex = base16ct::lower::encode_string(&hash);
-        println!("config_bytes len {} {}", config_bytes.len(), hash_hex);
+        let hash_hex = sha2_hex(&config_bytes);
+        println!("VM   config_bytes len {} {}", config_bytes.len(), hash_hex);
     }
     let config: Config = bincode::deserialize(config_bytes.as_slice()).unwrap();
 
@@ -208,7 +209,7 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
         use base16ct;
         let hash = Sha256::digest(&response_bytes);
         let hash_hex = base16ct::lower::encode_string(&hash);
-        println!("response_bytes len {} {}", response_bytes.len(), hash_hex);
+        println!("VM   response_bytes len {} {}", response_bytes.len(), hash_hex);
     }
 
     let response_size: u32 = response_bytes.len().try_into().unwrap();
@@ -228,20 +229,21 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
     assert!(ret);
 }
 
-fn wait4(pid: i32) -> Result<(libc::c_int, libc::rusage), Error> {
-    let mut status: libc::c_int = 0;
-    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
-    if ret < 0 { return Err(Error::Wait4); }
-    Ok((status, rusage))
-}
+// fn wait4(pid: i32) -> Result<(libc::c_int, libc::rusage), Error> {
+//     let mut status: libc::c_int = 0;
+//     let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+//     let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
+//     if ret < 0 { return Err(Error::Wait4); }
+//     Ok((status, rusage))
+// }
 
-fn run_crun() -> CrunOutput {
+fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
     let outfile = File::create_new("/run/output/stdout").unwrap();
     let errfile = File::create_new("/run/output/stderr").unwrap();
 
     //let child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
-    let child = Command::new("/bin/crun")
+    let start = Instant::now();
+    let _ = Command::new("/bin/crun")
         // TODO can we get debug info on another fd?
         //.arg("--debug")
         .arg("run")
@@ -262,25 +264,20 @@ fn run_crun() -> CrunOutput {
         .unwrap()
         .wait()
         .unwrap();
+    let elapsed = start.elapsed();
+    println!("VM   crun ran in {elapsed:?}");
+    // we wait on crun since it should run to completion and leave the pid in pidfd
 
     //Command::new("busybox").arg("ls").arg("/run").spawn().unwrap().wait().unwrap();
     let pid = fs::read_to_string("/run/pid").unwrap().parse::<i32>().unwrap();
+    let mut pidfd = PidFd::open(pid, 0).unwrap();
+    let mut waiter = PidFdWaiter::new(&mut pidfd).unwrap();
 
-    // TODO proper thing is to get a pidfd
-    // let pid: i32 = child.id().try_into().unwrap();
-
-    // todo need to wait with timeout, which idk if we can do and get rusage...
-    // WE CAN waitid has a hidden rusage parameter at the end lol wtf everything is crazy
-    let (status, rusage) = wait4(pid).unwrap();
-    // so funny thing about pid 1 in the container is that it doesn't respond to sigterm signals
-    // so not sure we'll ever get sig info but :shrug:
-
-    CrunOutput {
-        rusage: rusage.into(),
-        status: status.into(),
-    }
+    waiter.wait_timeout_or_kill(duration)
 }
 
+// TODO think about how to give a more bulletproof indication if we panic to our host
+// maybe something like reading in a challenge hash and writing out the hash of it
 fn main() {
     setup_panic();
 
@@ -296,21 +293,37 @@ fn main() {
     let inout_device = "/dev/pmem1";
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
-    // TODO we need to slice off the input config
+
     let config = unpack_input(inout_device, "/run/input/dir");
-    println!("config is {config:?}");
+    println!("VM   config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
-    let crun_output = run_crun();
-    let response = Response {
-        status: crun_output.status,
-        rusage: crun_output.rusage,
+    let container_output = run_container(config.timeout);
+    let response = match container_output {
+        Err(_) | Ok(WaitIdDataOvertime::NotExited) => {
+            Response {
+                status: ExitKind::Abnormal,
+                siginfo: None,
+                rusage: None,
+            }
+        }
+        Ok(WaitIdDataOvertime::Exited{siginfo, rusage}) => {
+            Response {
+                status: ExitKind::Ok,
+                siginfo: Some(siginfo.into()),
+                rusage: Some(rusage.into()),
+            }
+        }
+        Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, rusage}) => {
+            Response {
+                status: ExitKind::Overtime,
+                siginfo: Some(siginfo.into()),
+                rusage: Some(rusage.into()),
+            }
+        }
     };
 
-    // TODO we need to first write out the result metadata, so maybe pearchive needs to take an
-    // open fd
     pack_output(&response, "/run/output", inout_device);
 
     exit()
-    //check_libc(libc::setuid(1000));
 }

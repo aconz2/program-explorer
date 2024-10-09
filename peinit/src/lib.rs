@@ -1,16 +1,45 @@
 use serde::{Serialize, Deserialize};
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     // https://github.com/opencontainers/runtime-spec/blob/main/config.md
     // fully filled in config.json ready to pass to crun
     pub oci_runtime_config: String,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Response {
+    pub status  : ExitKind,
+    pub siginfo : Option<SigInfoRedux>,
+    pub rusage  : Option<Rusage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ExitKind {
+    Ok,
+    Overtime,
+    Abnormal,
+    Unk,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimeVal {
     pub sec: i64,
     pub usec: i64, // this is susec_t which is signed for some reason
+}
+
+// this is a portion of siginfo interpreted from waitid(2)
+#[derive(Debug, Serialize, Deserialize)]
+pub enum SigInfoRedux {
+    Exited(i32), // this is really i8/u8 but
+    Killed(i32),
+    Dumped(i32),
+    Stopped(i32),
+    Trapped(i32),
+    Continued(i32),
+    Unk{status: i32, code: i32},
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,23 +62,25 @@ pub struct Rusage {
     pub ru_nivcsw   : i64,         /* involuntary context switches */
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Status {
-    pub status: Option<u8>,
-    pub signal: Option<i32>,
-}
+// impl From<libc::c_int> for Status {
+//     fn from(status: libc::c_int) -> Self {
+//         Self {
+//             status: if libc::WIFEXITED(status) { Some(libc::WEXITSTATUS(status) as u8) } else { None },
+//             signal: if libc::WIFSIGNALED(status) { Some(libc::WTERMSIG(status)) } else { None },
+//         }
+//     }
+// }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Response {
-    pub status: Status,
-    pub rusage: Rusage,
-}
-
-impl From<libc::c_int> for Status {
-    fn from(status: libc::c_int) -> Self {
-        Self {
-            status: if libc::WIFEXITED(status) { Some(libc::WEXITSTATUS(status) as u8) } else { None },
-            signal: if libc::WIFSIGNALED(status) { Some(libc::WTERMSIG(status)) } else { None },
+impl From<libc::siginfo_t> for SigInfoRedux {
+    fn from(siginfo: libc::siginfo_t) -> Self {
+        let status = unsafe { siginfo.si_status() }; // why is this unsafe?
+        match siginfo.si_code {
+            libc::CLD_EXITED => SigInfoRedux::Exited(status),
+            libc::CLD_KILLED => SigInfoRedux::Killed(status),
+            libc::CLD_DUMPED => SigInfoRedux::Dumped(status),
+            libc::CLD_TRAPPED => SigInfoRedux::Trapped(status),
+            libc::CLD_CONTINUED => SigInfoRedux::Continued(status),
+            _ => SigInfoRedux::Unk{code: siginfo.si_code, status: status},
         }
     }
 }
