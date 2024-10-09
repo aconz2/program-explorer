@@ -10,4 +10,7 @@ doctest = false
 
 [dependencies]
 libc = "0.2.159"
-syscalls = { version = "0.6.18", defautl-features = false, features = ["std"] }
+mio = { version = "1.0.2", features = ["os-ext"] }
+#mio-pidfd = "0.3.0"
+mio-pidfd = { path = "../../mio-pidfd" }
+# syscalls = { version = "0.6.18", default-features = false, features = ["std"] }
