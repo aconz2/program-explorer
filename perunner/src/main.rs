@@ -52,15 +52,18 @@ fn round_up_to_pmem_size(f: &File) -> io::Result<u64> {
 fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &[String]) -> Option<oci_runtime::Spec> {
     //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(1000, 1000);
-    // this has sane defaults
-    // terminal: false
-    // noNewPrivileges: true
 
     // sanity checks
     if *image_config.architecture() != oci_image::Arch::Amd64 { return None; }
     if *image_config.os() != oci_image::Os::Linux { return None; }
 
     // TODO how does oci-spec-rs deserialize the config .Env into .env ?
+
+    // TODO add tmpfs of /tmp
+    //      add the bind mounts of /run/{input,output}
+    //      uid mapping isn't quite right, getting lots of nobody/nogroup
+    //      which is because our uid_map only maps 1000 to 0, but the podman map
+    //      maps 65k uids from 1- (starting at host 52488, which is my host subuid)
 
     // we "know" that a defaulted runtime spec has Some process
     let process = spec.process_mut().as_mut().unwrap();
