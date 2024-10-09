@@ -3,5 +3,11 @@ name = "waitid_timeout"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "waitid_timeout"
+path = "src/lib.rs"
+doctest = false
+
 [dependencies]
 libc = "0.2.159"
+syscalls = { version = "0.6.18", defautl-features = false, features = ["std"] }
