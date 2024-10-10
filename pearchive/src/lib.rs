@@ -223,7 +223,8 @@ fn visit_dirc_rec<V: Visitor>(curdir: &OwnedFd, v: &mut V, depth: usize) -> Resu
                 let name = entry.file_name();
                 let fd = openat(curdir, name)?;
                 let size = file_size(&fd)?;
-                v.on_file(name, size, fd).map_err(|_| Error::OnFile)?;
+                //v.on_file(name, size, fd).map_err(|_| Error::OnFile)?;
+                v.on_file(name, size, fd)?;
             },
             FileType::Directory => {
                 if entry.file_name() == c"." || entry.file_name() == c".." {

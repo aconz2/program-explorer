@@ -9,18 +9,21 @@ pub struct Config {
     pub timeout: Duration,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Response {
     pub status  : ExitKind,
+    pub panic   : Option<String>,
     pub siginfo : Option<SigInfoRedux>,
     pub rusage  : Option<Rusage>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize,Default)]
 pub enum ExitKind {
     Ok,
+    Panic,
     Overtime,
     Abnormal,
+    #[default]
     Unk,
 }
 

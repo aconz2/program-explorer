@@ -16,7 +16,7 @@ use bincode;
 use byteorder::{WriteBytesExt,ReadBytesExt,LE};
 
 mod cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig};
+use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,ChLogLevel};
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 
@@ -123,7 +123,7 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2
     let config_bytes = bincode::serialize(&config).unwrap();
     if true {
         let hash_hex = sha2_hex(&config_bytes);
-        println!("HOST config_bytes len {} {}", config_bytes.len(), hash_hex);
+        println!("H config_bytes len {} {}", config_bytes.len(), hash_hex);
     }
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     f.write_u32::<LE>(0).unwrap(); // or seek
@@ -169,6 +169,7 @@ fn write_escaped<W: Write, R: Read>(r: &mut R, size: u32, w: &mut W) {
 fn main() {
 
     let ch_binpath:     OsString = "/home/andrew/Repos/program-explorer/cloud-hypervisor-static".into();
+    // let ch_binpath:     OsString = "/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/debug/cloud-hypervisor".into();
     let kernel_path:    OsString = "/home/andrew/Repos/linux/vmlinux".into();
     let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramfs".into();
     let rootfs:         OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs".into();
@@ -180,9 +181,15 @@ fn main() {
         bin: ch_binpath,
         kernel: kernel_path,
         initramfs: initramfs_path,
+        log_level: Some(ChLogLevel::Warn),
         log: true,
         console: true,
     }).unwrap();
+
+    // {
+    //     let resp = ch.api("GET", "vm.info", None);
+    //     println!("{resp:?}");
+    // }
 
     { // pmem0
         let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": true}}"#, rootfs);
@@ -219,17 +226,17 @@ fn main() {
 
     match ch.wait_timeout_or_kill(ch_timeout) {
         Ok(WaitIdDataOvertime::NotExited) => {
-            println!("HOST warning ch didn't exit, this is real bad!");
+            println!("H warning ch didn't exit, this is real bad!");
             ch.kill().unwrap();
         }
         Ok(WaitIdDataOvertime::Exited{..}) => {
-            println!("HOST ch exited on time");
+            println!("H ch exited on time");
         }
         Ok(WaitIdDataOvertime::ExitedOvertime{..}) => {
-            println!("HOST ch ran over time and was successfully killed");
+            println!("H ch ran over time and was successfully killed");
         }
         Err(e) => {
-            println!("HOST warning ch ran into an error waiting {e:?}");
+            println!("H warning ch ran into an error waiting {e:?}");
         }
         // Some(status) => println!("exited with status {status:?}"),
         // None => println!("either didn't exit or got killed"),
@@ -246,7 +253,6 @@ fn main() {
     println!("== console ==");
     let _ = io::copy(&mut File::open(ch.console_file().unwrap()).unwrap(), &mut io::stdout());
 
-    println!("== archive out ==");
     {
         let io_filepath = ch.workdir().join("io");
         std::fs::copy(&io_filepath, "/tmp/pe-io").unwrap();
@@ -261,18 +267,18 @@ fn main() {
         //    .with_limit(response_size.into())
         //    .deserialize_from(&mut file)
         //    .unwrap();
-        println!("HOST archive size {archive_size} response_size {response_size}");
+        println!("H archive size {archive_size} response_size {response_size}");
         let response: Response = {
             let mut buf = vec![0; response_size.try_into().unwrap()];
             file.read_exact(buf.as_mut_slice()).unwrap();
 
             if true {
                 let hash_hex = sha2_hex(&buf);
-                println!("HOST response_bytes len {} {}", response_size, hash_hex);
+                println!("H response_bytes len {} {}", response_size, hash_hex);
             }
             bincode::deserialize(&buf).unwrap()
         };
-        println!("HOST got response {response:#?}");
+        println!("H got response {response:#?}");
         println!("== archvive raw ==");
         write_escaped(&mut file, archive_size, &mut io::stdout());
         println!("\n== /archvive raw ==");

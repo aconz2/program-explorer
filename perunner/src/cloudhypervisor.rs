@@ -21,6 +21,13 @@ pub enum Error {
     //Api,
 }
 
+pub enum ChLogLevel {
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
 pub struct CloudHypervisorConfig {
     pub workdir: OsString,
     pub bin: OsString,
@@ -28,6 +35,7 @@ pub struct CloudHypervisorConfig {
     pub initramfs: OsString,
     pub log: bool,
     pub console: bool,
+    pub log_level: Option<ChLogLevel>,
 }
 
 pub struct CloudHypervisor {
@@ -94,16 +102,15 @@ impl CloudHypervisor {
         let child = {
             let socket_fd = listener.as_raw_fd();
             let mut x = Command::new(config.bin);
-            // todo why is this being so weird
                 x.stdin(Stdio::null())
-                //.stdout(Stdio::null())
-                //.stderr(Stdio::null())
-                .arg("--kernel").arg(config.kernel)
-                .arg("--initramfs").arg(config.initramfs)
-                .arg("--cpus").arg("boot=1")
-                .arg("--memory").arg("size=1024M")
-                .arg("--cmdline").arg("console=hvc0")
-                .arg("--api-socket").arg(format!("fd={socket_fd}"));
+                 .stdout(Stdio::null())
+                 .stderr(Stdio::null())
+                 .arg("--kernel").arg(config.kernel)
+                 .arg("--initramfs").arg(config.initramfs)
+                 .arg("--cpus").arg("boot=1")
+                 .arg("--memory").arg("size=1024M")
+                 .arg("--cmdline").arg("console=hvc0")
+                 .arg("--api-socket").arg(format!("fd={socket_fd}"));
 
             if config.log {
                 x.arg("--log-file").arg(&log_file);
@@ -111,6 +118,14 @@ impl CloudHypervisor {
             if config.console {
                 let f = console_file.to_str().unwrap();
                 x.arg("--console").arg(format!("file={f}"));
+            }
+            if let Some(level) = config.log_level {
+                match level {
+                    ChLogLevel::Warn  => { }
+                    ChLogLevel::Info  => { x.arg("-v"); }
+                    ChLogLevel::Debug => { x.arg("-vv"); }
+                    ChLogLevel::Trace => { x.arg("-vvv"); }
+                }
             }
             println!("launchng with args {:?}", x.get_args().collect::<Vec<_>>());
             x.spawn().map_err(|_| Error::Spawn)?

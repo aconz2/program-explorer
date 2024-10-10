@@ -17,6 +17,8 @@ use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use libc;
 use bincode;
 
+const INOUT_DEVICE: &str = "/dev/pmem1";
+
 #[derive(Debug)]
 enum Error {
     OpenDev,
@@ -41,9 +43,49 @@ fn exit() {
     std::process::exit(1);
 }
 
+fn write_panic_response(message: &str) {
+    let response = Response {
+        status: ExitKind::Panic,
+        panic: Some(message.into()),
+        ..Default::default()
+    };
+
+    fn try_(result: io::Result<()>) {
+        if result.is_err() {
+            println!("V got an error {result:?}");
+        }
+    }
+    match bincode::serialize(&response) {
+        Ok(ser) => {
+            println!("V panic response bytes len {}", ser.len());
+            let f = File::create(INOUT_DEVICE);
+            if f.is_err() {
+                println!("V couldnt open inout device!");
+                return
+            }
+            let mut f = f.unwrap();
+            try_(f.write_u32::<LE>(0));
+            try_(f.write_u32::<LE>(ser.len().try_into().unwrap()));
+            try_(f.write_all(&ser));
+            try_(f.sync_data());
+            println!("V wrote panic response");
+        }
+        Err(e) => {
+            println!("V couldnt serialize panic response {e:?}");
+        }
+    }
+}
+
 fn setup_panic() {
     std::panic::set_hook(Box::new(|p| {
-        eprintln!("{p:}");
+        //if let Some(s) = p.payload().downcast_ref::<&str>() {
+        //    write_panic_response(s);
+        //} else if let Some(s) = p.payload().downcast_ref::<String>() {
+        //    write_panic_response(&s);
+        //} else {
+        //    write_panic_response("unknown panic");
+        //}
+        write_panic_response(&format!("{}", p));
         exit();
     }));
 }
@@ -162,7 +204,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     let archive_size = f.read_u32::<LE>().unwrap();
     let config_size = f.read_u32::<LE>().unwrap();
 
-    println!("VM   archive_size: {archive_size} config_size: {config_size}");
+    println!("V archive_size: {archive_size} config_size: {config_size}");
 
     let config_bytes = {
         // let mut buf: Vec::<u8> = Vec::with_capacity(config_size as usize); // todo uninit
@@ -175,7 +217,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 
     if true {
         let hash_hex = sha2_hex(&config_bytes);
-        println!("VM   config_bytes len {} {}", config_bytes.len(), hash_hex);
+        println!("V config_bytes len {} {}", config_bytes.len(), hash_hex);
     }
     let config: Config = bincode::deserialize(config_bytes.as_slice()).unwrap();
 
@@ -192,15 +234,15 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
         .arg(format!("{archive_size}"))
         .status()
         .unwrap()
-        .success();
-    assert!(ret);
+        .code()
+        .expect("pearchive unpackdev had no status");
+    assert!(ret == 0, "pearchive unpackdev failed with status {}", ret);
 
     config
 }
 
 fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archive: P) {
     use std::io::{Seek,SeekFrom};
-    // TODO this needs to write the <archive size> <config size> <config>, then do the pack
     let mut f = File::create(&archive).unwrap();
     let response_bytes = bincode::serialize(response).unwrap();
 
@@ -209,7 +251,7 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
         use base16ct;
         let hash = Sha256::digest(&response_bytes);
         let hash_hex = base16ct::lower::encode_string(&hash);
-        println!("VM   response_bytes len {} {}", response_bytes.len(), hash_hex);
+        println!("V  response_bytes len {} {}", response_bytes.len(), hash_hex);
     }
 
     let response_size: u32 = response_bytes.len().try_into().unwrap();
@@ -218,6 +260,7 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
     f.write_all(&response_bytes).unwrap();
     let offset = f.stream_position().unwrap();
 
+    //let ret = Command::new("strace").arg("/bin/pearchive")
     let ret = Command::new("/bin/pearchive")
         .arg("packdev")
         .arg(dir)
@@ -225,8 +268,9 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
         .arg(format!("{offset}"))
         .status()
         .unwrap()
-        .success();
-    assert!(ret);
+        .code()
+        .expect("pearchive packdev had no status");
+    assert!(ret == 0, "pearchive packdev failed with status {}", ret);
 }
 
 // fn wait4(pid: i32) -> Result<(libc::c_int, libc::rusage), Error> {
@@ -265,7 +309,7 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
         .wait()
         .unwrap();
     let elapsed = start.elapsed();
-    println!("VM   crun ran in {elapsed:?}");
+    println!("V crun ran in {elapsed:?}");
     // we wait on crun since it should run to completion and leave the pid in pidfd
 
     //Command::new("busybox").arg("ls").arg("/run").spawn().unwrap().wait().unwrap();
@@ -290,13 +334,14 @@ fn main() {
     setup_overlay();
     parent_rootfs();
 
-    let inout_device = "/dev/pmem1";
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    let config = unpack_input(inout_device, "/run/input/dir");
-    println!("VM   config is {config:?}");
+    let config = unpack_input(INOUT_DEVICE, "/run/input/dir");
+    println!("V config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
+
+    let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     let container_output = run_container(config.timeout);
     let response = match container_output {
@@ -305,6 +350,7 @@ fn main() {
                 status: ExitKind::Abnormal,
                 siginfo: None,
                 rusage: None,
+                panic: None,
             }
         }
         Ok(WaitIdDataOvertime::Exited{siginfo, rusage}) => {
@@ -312,6 +358,7 @@ fn main() {
                 status: ExitKind::Ok,
                 siginfo: Some(siginfo.into()),
                 rusage: Some(rusage.into()),
+                panic: None,
             }
         }
         Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, rusage}) => {
@@ -319,11 +366,12 @@ fn main() {
                 status: ExitKind::Overtime,
                 siginfo: Some(siginfo.into()),
                 rusage: Some(rusage.into()),
+                panic: None,
             }
         }
     };
 
-    pack_output(&response, "/run/output", inout_device);
+    pack_output(&response, "/run/output", INOUT_DEVICE);
 
     exit()
 }

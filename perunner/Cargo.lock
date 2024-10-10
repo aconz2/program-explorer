@@ -173,12 +173,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "escape-bytes"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bfcf67fea2815c2fc3b90873fae90957be12ff417335dfadc7f52927feb03b2"
-
-[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,7 +336,6 @@ dependencies = [
  "base16ct",
  "bincode",
  "byteorder",
- "escape-bytes",
  "libc",
  "oci-spec",
  "pearchive",
