@@ -138,20 +138,31 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2
     let _ = round_up_to_pmem_size(&f).unwrap();
 }
 
+fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+    for b in input {
+        if *b == b'\n' { output.push(*b) }
+        else {
+            for e in std::ascii::escape_default(*b) {
+                output.push(e);
+            }
+        }
+    }
+}
+
 fn write_escaped<W: Write, R: Read>(r: &mut R, size: u32, w: &mut W) {
+    let mut r = r.take(size as u64);
     let mut rem = size as usize;
     let mut buf = vec![0; 4096];
     let mut ebuf = vec![0; 8192];
     while rem > 0 {
         let read = r.read(&mut buf).unwrap();
         if read <= 0 { panic!("bad read"); }
-        // for an oversized file we might get back junk data
-        let i = std::cmp::min(read, rem);
-        let data = &buf[..i];
-        assert!(i <= rem);
-        rem -= i;
-        let n = escape_bytes::escape_into(&mut ebuf, data).unwrap();
-        w.write_all(&ebuf[..n]).unwrap();
+        let data = &buf[..read];
+        rem -= read;
+        //let n = escape_bytes::escape_into(&mut ebuf, data).unwrap();
+        escape_bytes(&data, &mut ebuf);
+        w.write_all(ebuf.as_slice()).unwrap();
     }
 }
 
