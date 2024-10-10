@@ -158,7 +158,7 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
     }
 
     let inotify_file: File = unsafe {
-        println!("using inotify");
+        println!("V using inotify");
         let fd = libc::inotify_init1(libc::IN_CLOEXEC);
         if fd < 0 {
             return Err(Error::InotifyInit);
@@ -251,7 +251,7 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
         use base16ct;
         let hash = Sha256::digest(&response_bytes);
         let hash_hex = base16ct::lower::encode_string(&hash);
-        println!("V  response_bytes len {} {}", response_bytes.len(), hash_hex);
+        println!("V response_bytes len {} {}", response_bytes.len(), hash_hex);
     }
 
     let response_size: u32 = response_bytes.len().try_into().unwrap();
@@ -280,14 +280,26 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
 //     if ret < 0 { return Err(Error::Wait4); }
 //     Ok((status, rusage))
 // }
+fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) -> String {
+    match File::open(&path) {
+        Err(e) => format!("error opening file {} {:?}", path, e),
+        Ok(f) => {
+            let mut buf = String::with_capacity(n);
+            match f.take(n as u64).read_to_string(&mut buf) {
+                Ok(_) => buf,
+                Err(e) => format!("error reading file {} {:?}", path, e)
+            }
+        }
+    }
+}
 
 fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
-    let outfile = File::create_new("/run/output/stdout").unwrap();
-    let errfile = File::create_new("/run/output/stderr").unwrap();
+    let mut outfile = File::create_new("/run/output/stdout").unwrap();
+    let mut errfile = File::create_new("/run/output/stderr").unwrap();
 
-    //let child = Command::new("strace").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
     let start = Instant::now();
-    let _ = Command::new("/bin/crun")
+    let exit_status = Command::new("/bin/crun")
+    //let exit_status = Command::new("strace").arg("-e").arg("mount").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
         // TODO can we get debug info on another fd?
         //.arg("--debug")
         .arg("run")
@@ -310,6 +322,17 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
         .unwrap();
     let elapsed = start.elapsed();
     println!("V crun ran in {elapsed:?}");
+
+    if !exit_status.success() {
+        // println!("V crun stdout");
+        // io::copy(&mut File::open("/run/output/stdout").unwrap(), &mut io::stdout());
+        // println!("V crun stderr");
+        // io::copy(&mut File::open("/run/output/stderr").unwrap(), &mut io::stdout());
+        //let stderr = fs::read_to_string("/run/output/stderr").unwrap();
+
+        let stderr = read_n_or_str_error("/run/output/stderr", 100);
+        panic!("crun unclean exit status {:?} {}", exit_status, stderr);
+    }
     // we wait on crun since it should run to completion and leave the pid in pidfd
 
     //Command::new("busybox").arg("ls").arg("/run").spawn().unwrap().wait().unwrap();
@@ -320,8 +343,6 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
     waiter.wait_timeout_or_kill(duration)
 }
 
-// TODO think about how to give a more bulletproof indication if we panic to our host
-// maybe something like reading in a challenge hash and writing out the hash of it
 fn main() {
     setup_panic();
 
@@ -341,7 +362,7 @@ fn main() {
     println!("V config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
-    let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
+    // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     let container_output = run_container(config.timeout);
     let response = match container_output {

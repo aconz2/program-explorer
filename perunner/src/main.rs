@@ -65,8 +65,42 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
     //      which is because our uid_map only maps 1000 to 0, but the podman map
     //      maps 65k uids from 1- (starting at host 52488, which is my host subuid)
 
-    // we "know" that a defaulted runtime spec has Some process
-    let process = spec.process_mut().as_mut().unwrap();
+    // we "know" that a defaulted runtime spec has Some mounts
+    {
+        let mounts = spec.mounts_mut().as_mut().unwrap();
+
+        // /tmp
+        mounts.push(oci_runtime::MountBuilder::default()
+            .destination("/tmp")
+            .typ("tmpfs")
+            .options(vec!["size=50%".into(), "mode=777".into()])
+            .build()
+            .unwrap()
+            );
+
+        // /run/pe/input
+        mounts.push(oci_runtime::MountBuilder::default()
+            .destination("/run/pe/input")
+            .typ("bind")
+            .source("/run/input/dir")
+            // idk should this be readonly?
+            // TODO I don't fully understand why this is rbind
+            .options(vec!["rw".into(), "rbind".into()])
+            .build()
+            .unwrap()
+            );
+
+        //// /run/pe/output
+        mounts.push(oci_runtime::MountBuilder::default()
+            .destination("/run/pe/output")
+            .typ("bind")
+            .source("/run/output/dir")
+            // idk should this be readonly?
+            .options(vec!["rw".into(), "rbind".into()])
+            .build()
+            .unwrap()
+            );
+    }
 
     if let Some(config) = image_config.config() {
         // TODO: handle user
@@ -79,6 +113,9 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
         //   groups of the given user/uid in /etc/passwd from
         //   the container are applied.
         // let _ = config.exposed_ports; // ignoring network for now
+
+        // we "know" that a defaulted runtime spec has Some process
+        let process = spec.process_mut().as_mut().unwrap();
 
         if let Some(env) = config.env() {
             *process.env_mut() = Some(env.clone());
@@ -252,6 +289,7 @@ fn main() {
     let _ = io::copy(&mut File::open(ch.log_file().unwrap()).unwrap(), &mut io::stdout());
     println!("== console ==");
     let _ = io::copy(&mut File::open(ch.console_file().unwrap()).unwrap(), &mut io::stdout());
+    println!("=============");
 
     {
         let io_filepath = ch.workdir().join("io");

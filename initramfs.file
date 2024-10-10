@@ -32,13 +32,15 @@ dir /sys           0755 0 0
 dir /sys/fs        0755 0 0
 dir /sys/fs/cgroup 0755 0 0
 
-dir /mnt               0755 0 0
-dir /mnt/work          0755 0 0
-dir /mnt/rootfs        0755 0 0
-dir /mnt/upper         0755 0 0
-dir /mnt/upper/scratch 0755 0 0
-dir /mnt/upper/input   0755 0 0
-dir /mnt/upper/output  0777 0 0
+dir /mnt                   0755 0 0
+dir /mnt/work              0755 0 0
+dir /mnt/rootfs            0755 0 0
+dir /mnt/upper             0755 0 0
+dir /mnt/upper/run         0777 0 0
+dir /mnt/upper/run/pe         0777 0 0
+#dir /mnt/upper/scratch 0755 0 0
+#dir /mnt/upper/run/input   0777 0 0
+#dir /mnt/upper/run/output  0777 0 0
 
 # we need crun to write into this and it runs as 1000
 dir /run               0777 0 0
@@ -46,9 +48,10 @@ dir /run               0777 0 0
 dir /run/bundle        0755 0 0
 dir /run/bundle/rootfs 0755 0 0
 
-dir /run/input  0755 0 0
+dir /run/input      0755 0 0
 dir /run/input/dir  0755 0 0
-dir /run/output 0777 0 0
+dir /run/output     0777 0 0
+# /run/output is a mount point for a tmpfs so we don't create /run/output/dir here
 
 dir /run/crun 0777 0 0
 
@@ -60,12 +63,12 @@ file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/PROFILE/pearchive
 file /bin/busybox busybox 0555 0 0
 slink /bin/sh /bin/busybox 0555 0 0
 #file /bin/vsockhello vsockhello 0555 0 0
-file /bin/pivot_rootfs pivot_rootfs 0555 0 0
+#file /bin/pivot_rootfs pivot_rootfs 0555 0 0
 file /bin/strace strace 0555 0 0
 #file /bin/crun crun-1.15-linux-amd64 0555 0 0
 file /bin/crun /home/andrew/Repos/crun/crun 0555 0 0
 #
-file /run/bundle/config.json config.json 0444 0 0
+#file /run/bundle/config.json config.json 0444 0 0
 
 #dir /etc 0755 0 0
 #file /etc/passwd /etc/passwd 0555 0 0
