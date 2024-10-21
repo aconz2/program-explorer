@@ -293,25 +293,27 @@ fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) ->
     }
 }
 
-fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
+fn run_container(uid_gid: u32, duration: Duration) -> io::Result<WaitIdDataOvertime> {
     let mut outfile = File::create_new("/run/output/stdout").unwrap();
     let mut errfile = File::create_new("/run/output/stderr").unwrap();
 
     let start = Instant::now();
-    let exit_status = Command::new("/bin/crun")
-    //let exit_status = Command::new("strace").arg("-e").arg("mount").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
+    //let exit_status = Command::new("/bin/crun")
+    let exit_status = Command::new("strace").arg("-e").arg("write,openat").arg("-f").arg("-o").arg("/run/strace.out").arg("--decode-pids=comm").arg("/bin/crun")
         // TODO can we get debug info on another fd?
         .arg("--debug")
+        .arg("--log=/run/crun.log")
         .arg("run")
         .arg("-b") // --bundle
         .arg("/run/bundle")
         .arg("-d") // --detach
         .arg("--pid-file=/run/pid")
         .arg("containerid-1234")
-        .uid(1000)
-        .gid(1000)
-        //.stdout(Stdio::from(outfile))
-        //.stderr(Stdio::from(errfile))
+        .uid(uid_gid)
+        .gid(uid_gid)
+        //.uid(1000).gid(1000)
+        .stdout(Stdio::from(outfile))
+        .stderr(Stdio::from(errfile))
         .stdin(match File::open("/run/input/stdin") {
             Ok(f) => { Stdio::from(f) }
             Err(_) => { Stdio::null() }
@@ -323,6 +325,8 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
     let elapsed = start.elapsed();
     println!("V crun ran in {elapsed:?}");
 
+        println!("{}", fs::read_to_string("/run/strace.out").unwrap());
+        println!("{}", fs::read_to_string("/run/crun.log").unwrap());
     if !exit_status.success() {
         // println!("V crun stdout");
         // io::copy(&mut File::open("/run/output/stdout").unwrap(), &mut io::stdout());
@@ -330,7 +334,7 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
         // io::copy(&mut File::open("/run/output/stderr").unwrap(), &mut io::stdout());
         //let stderr = fs::read_to_string("/run/output/stderr").unwrap();
 
-        let stderr = read_n_or_str_error("/run/output/stderr", 100);
+        let stderr = read_n_or_str_error("/run/output/stderr", 2000);
         panic!("crun unclean exit status {:?} {}", exit_status, stderr);
     }
     // we wait on crun since it should run to completion and leave the pid in pidfd
@@ -344,7 +348,6 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
 }
 
 fn main() {
-    println!("VVVVVVVVVVVVVVVVVVVV");
     setup_panic();
 
     init_mounts();
@@ -364,7 +367,7 @@ fn main() {
 
     // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    let container_output = run_container(config.timeout);
+    let container_output = run_container(config.uid_gid, config.timeout);
     let response = match container_output {
         Err(_) | Ok(WaitIdDataOvertime::NotExited) => {
             Response {

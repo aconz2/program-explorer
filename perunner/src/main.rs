@@ -6,7 +6,8 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use pearchive::pack_dir_to_file;
-use peinit::{Config,Response};
+use peinit;
+use peinit::{Response};
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 
 use oci_spec::runtime as oci_runtime;
@@ -19,6 +20,10 @@ mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,ChLogLevel};
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
+// NOTE: to use all NIDS, we have to run with host user id bigger than NIDS otherwise
+// the range will overlap. eg trying to use user id 1000 and nids=1000 will overlap
+const UID: u32 = 10_000;
+const NIDS: u32 = 1000; // size of uid_gid_map
 
 #[derive(Debug)]
 enum Error {
@@ -52,6 +57,23 @@ fn round_up_to_pmem_size(f: &File) -> io::Result<u64> {
 fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &[String]) -> Option<oci_runtime::Spec> {
     //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(1000, 1000);
+    // ugh this api is horrible
+    spec.set_hostname(Some("programexplorer".to_string()));
+
+
+    // doing spec.set_uid_mappings sets the volume mount idmap, not the user namespace idmap
+    if true {
+        let map = oci_runtime::LinuxIdMappingBuilder::default()
+            .host_id(UID)
+            .container_id(0u32)
+            .size(NIDS)
+            .build()
+            .unwrap();
+        let linux = spec.linux_mut().as_mut().unwrap();
+        linux
+            .set_uid_mappings(Some(vec![map]))
+            .set_gid_mappings(Some(vec![map]));
+    }
 
     // sanity checks
     if *image_config.architecture() != oci_image::Arch::Amd64 { return None; }
@@ -151,7 +173,7 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
 //     <archive size : u32le> [ <config size> <config> <archive> ] <padding>
 
 // how do you get away from this P1 P2 thing
-fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2, config: &Config) {
+fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2, config: &peinit::Config) {
     let mut f = File::create(file).unwrap();
     let config_bytes = bincode::serialize(&config).unwrap();
     if true {
@@ -240,13 +262,14 @@ fn main() {
     let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
     let runtime_spec = create_runtime_spec(&image_spec, run_args).unwrap();
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
-    //println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+    println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
     let timeout = Duration::from_millis(2000);
     let ch_timeout = timeout + Duration::from_millis(200);
-    let config = Config {
+    let config = peinit::Config {
         timeout: timeout,
-        oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap()
+        oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
+        uid_gid: UID,
     };
 
     { // pmem1
@@ -294,7 +317,7 @@ fn main() {
     println!("=============");
 
     if let Some(ch_siginfo) = ch_siginfo {
-        panic!("H ch exited badly {ch_siginfo:?}");
+        println!("H ch exited badly {ch_siginfo:?}");
     }
 
     {

@@ -3,7 +3,7 @@ qemu-system-x86_64 -smp 2 -enable-kvm -m 2048 -drive file=~/Downloads/Fedora-Clo
 
 taskset -c 0 hyperfine --shell=none --warmup=500 --runs=1000 'gcc --version'
 
-kata not supported with podman 
+kata not supported with podman
 
 
 # had to get the full to get runc. using containerd not from dnf because outside toolbox.
@@ -12,7 +12,7 @@ wget https://github.com/containerd/containerd/releases/download/v1.7.18/containe
 # tar -xf ...
 
 from inside toolbox wasn't working, was getting
-FATA[0009] failed to extract layer sha256:d3e8d42f967c9c00049f90237e1bf4a460d18c28895292d2bb4a0702f661a745: failed to mount /var/lib/containerd/tmpmounts/containerd-mount2679852185: invalid argument: unknown 
+FATA[0009] failed to extract layer sha256:d3e8d42f967c9c00049f90237e1bf4a460d18c28895292d2bb4a0702f661a745: failed to mount /var/lib/containerd/tmpmounts/containerd-mount2679852185: invalid argument: unknown
 
 outside toolbox
 sudo bin/containerd
@@ -30,10 +30,10 @@ tar -xf -C kata-static-3.6.0-amd64
 → sudo ln -s $(readlink -f kata-static-3.6.0-amd64/kata/share/kata-containers/kata-containers-initrd.img) /var/cache/kata-containers/kata-containers-initrd.img
 → sudo ln -s $(readlink -f kata-static-3.6.0-amd64/kata/share/kata-containers/vmlinuz.container) /var/cache/kata-containers/vmlinuz.container
 
-get vmlinuz and initramfs from image 
-→ virt-get-kernel -a ~/Downloads/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2 
+get vmlinuz and initramfs from image
+→ virt-get-kernel -a ~/Downloads/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
 vmlinuz is a compressed version of the whole linux kernel
-initramfs 
+initramfs
 
 https://mergeboard.com/blog/2-qemu-microvm-docker/
 https://gist.github.com/mikaelhg/7a67901affe56bdf22eb398606945a23
@@ -202,7 +202,7 @@ cargo clean && RUSTFLAGS='-C force-frame-pointers=y' cargo build --profile profi
 cargo clean && RUSTFLAGS='-C force-frame-pointers=y' cargo build --profile profiling --target x86_64-unknown-linux-musl
 cargo clean && cargo build --profile profiling --target x86_64-unknown-linux-musl --features tracing
 
-→ venv/bin/python -i analyzesqfs.py gcc-13.3.0.sqfs gcc-14.1.0.sqfs 
+→ venv/bin/python -i analyzesqfs.py gcc-13.3.0.sqfs gcc-14.1.0.sqfs
 gcc-13.3.0.sqfs     421.45 Mb (compressed)    1347.61 Mb (uncompressed)      22806 files       2850 dirs
 gcc-14.1.0.sqfs     432.04 Mb (compressed)    1381.28 Mb (uncompressed)      22894 files       2852 dirs
 20179     832.07 Mb shared 60.24%
@@ -211,7 +211,7 @@ under normal circumstances, the vmm unlinks /tmp/ch.sock BUT then what is that e
 
 trying to figure out why busybox doesn't have the uuid in blkid
 on my system doing
-sudo strace --trace=open,openat,read blkid --cache-file /dev/null |& less 
+sudo strace --trace=open,openat,read blkid --cache-file /dev/null |& less
 
 was trying to do this from within the toolbox container and blkid wasn't getting enough permissions
 solution was to
@@ -246,7 +246,7 @@ CONFIG_VGA_CONSOLE
 okay lots more now
 
 using --memory size=1024M,thp=on works bug ,hugpages=on doesn't because the host has thp enabled
-→ cat /sys/kernel/mm/transparent_hugepage/enabled 
+→ cat /sys/kernel/mm/transparent_hugepage/enabled
 always [madvise] never
 
 google/bloaty needs dwarf v4
@@ -259,7 +259,7 @@ when the guest is sleeping, doing a vm.shutdown or vm.delete does not cause the 
 overall getting very similar times for command line and api :(
 
 build cloud-hypervisor with --features tracing
-~/Repos/cloud-hypervisor/scripts/ch-trace-visualiser.py 
+~/Repos/cloud-hypervisor/scripts/ch-trace-visualiser.py
 not that informative
 okay can also build with --features dhat-heap to get heap tracing
 
@@ -279,7 +279,7 @@ then bash startchapi.sh
 
 getting a permission denied to clone something about console. was passing --console off in the command line but the json api payload had console=tty so duh
 
-sudo perf probe -x ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor --funcs 
+sudo perf probe -x ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor --funcs
 sudo perf probe -x ../cloud-hypervisor/target/x86_64-unknown-linux-musl/profiling/cloud-hypervisor --funcs --no-demangle --filter='*to_aml_bytes*'
 
 okay moved tracer::start() to start_vmm_thread and trace_scoped!("get_seccomp_filter"
@@ -288,7 +288,7 @@ vmm get_seccomp_filter                   0.05ms
 main get_seccomp_filter                  0.28ms
 
 so not much there
-and for acpi tables, I see: 
+and for acpi tables, I see:
 
 vmm create_facp_table                    0.00ms
 vmm create_dsdt_table                    0.47ms
@@ -306,7 +306,7 @@ so I'm getting a mkdir /output Read-only file system error when specifying /outp
 
 installed squashfs-tools-ng-devel
 
-→ (cd peinit && bash build.sh) && bash makeinitramfs.sh && bash cloudhypervisormyinit.sh 
+→ (cd peinit && bash build.sh) && bash makeinitramfs.sh && bash cloudhypervisormyinit.sh
 
 if i do rootless with uid 0/0 and no user namespace, it works
         rootless with uid 0/0 and a  user namespace, it doesn't work
@@ -319,3 +319,22 @@ okay Command::spawn creates a new socketpair itself...
 getting error from the ch http server that something is einval, traced to an accept (accept4) call that is einval.
 
 now trying with unixlistener and unixstream like fro the test, but maybe getting enotasock=88 b/c unixlistener uses cloexec
+
+crun seems to be messing up the id_map and I can't get the static build to work anymore so try to get that working and then use it to debug the mysterious thing, when it works without a linux.uidMapping in config.json, it does a
+
+512<3> openat(AT_FDCWD, "/proc/513/gid_map", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
+512<3> write(6, "0\0001000\0001\0", 9)  = -1 EINVAL (Invalid argument)
+512<3> openat(AT_FDCWD, "/proc/513/setgroups", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
+512<3> write(6, "deny", 4)              = 4
+512<3> openat(AT_FDCWD, "/proc/513/gid_map", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
+512<3> write(6, "0 1000 1\n", 9)        = 9
+515<3> +++ exited with 1 +++
+512<3> openat(AT_FDCWD, "/proc/513/uid_map", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
+512<3> write(6, "0\0001000\0001\0", 9)  = -1 EINVAL (Invalid argument)
+512<3> openat(AT_FDCWD, "/proc/513/uid_map", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
+512<3> write(6, "0 1000 1\n", 9)        = 9
+
+and when it fails it does
+
+512<3> openat(AT_FDCWD, "/proc/513/gid_map", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
+512<3> write(6, "0\00010000\0001000\0", 13) = -1 EINVAL (Invalid argument)
