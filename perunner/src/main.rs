@@ -85,6 +85,7 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
             .source("/run/input/dir")
             // idk should this be readonly?
             // TODO I don't fully understand why this is rbind
+            // https://docs.kernel.org/filesystems/sharedsubtree.html
             .options(vec!["rw".into(), "rbind".into()])
             .build()
             .unwrap()
@@ -95,7 +96,6 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
             .destination("/run/pe/output")
             .typ("bind")
             .source("/run/output/dir")
-            // idk should this be readonly?
             .options(vec!["rw".into(), "rbind".into()])
             .build()
             .unwrap()
@@ -135,10 +135,6 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
         }
 
         if let Some(cwd) = config.working_dir() { process.set_cwd(cwd.into()); }
-
-        // TODO will take args from user here as well
-        // what is with some things having set_ and some having _mut ??
-
     }
 
     Some(spec)
