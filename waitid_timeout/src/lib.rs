@@ -46,6 +46,32 @@ pub enum WaitIdDataOvertime {
     NotExited,
 }
 
+#[derive(Debug,PartialEq)]
+pub enum Siginfo {
+    Exited(i32),
+    Killed(i32),
+    Dumped(i32),
+    Trapped(i32),
+    Stopped(i32),
+    Continued(i32),
+    Unk,
+}
+
+impl From<&siginfo_t> for Siginfo {
+    fn from(x: &siginfo_t) -> Self {
+        let status = unsafe { x.si_status() };
+        match x.si_code {
+            libc::CLD_EXITED => Self::Exited(status),
+            libc::CLD_KILLED => Self::Killed(status),
+            libc::CLD_DUMPED => Self::Dumped(status),
+            libc::CLD_TRAPPED => Self::Trapped(status),
+            libc::CLD_STOPPED => Self::Stopped(status),
+            libc::CLD_CONTINUED => Self::Continued(status),
+            _ => Self::Unk,
+        }
+    }
+}
+
 fn waitid(idtype: idtype_t, id: id_t, options: c_int) -> io::Result<WaitIdData> {
     let mut siginfo: siginfo_t = unsafe { std::mem::zeroed() };
     let mut rusage:  rusage_t = unsafe { std::mem::zeroed() };
@@ -142,8 +168,8 @@ mod tests {
         match result {
             Ok(WaitIdData::Exited{siginfo, ..}) => {
                 assert_eq!(pid, unsafe { siginfo.si_pid().try_into().unwrap() });
-                assert_eq!(libc::CLD_EXITED, siginfo.si_code);
-                assert_eq!(status, unsafe { siginfo.si_status() });
+                let info: Siginfo = (&siginfo).into();
+                assert_eq!(info, Siginfo::Exited(status));
             },
             Ok(WaitIdData::NotExited) => { panic!("got NotExited and I shouldnt"); }
             Err(err)                  => { panic!("got err={err:?} and I shouldnt"); }
@@ -154,8 +180,8 @@ mod tests {
         match result {
             Ok(WaitIdData::Exited{siginfo, ..}) => {
                 assert_eq!(pid, unsafe { siginfo.si_pid().try_into().unwrap() });
-                assert_eq!(libc::CLD_KILLED, siginfo.si_code);
-                assert_eq!(signal, unsafe { siginfo.si_status() });
+                let info: Siginfo = (&siginfo).into();
+                assert_eq!(info, Siginfo::Killed(signal));
             }
             Ok(WaitIdData::NotExited) => { panic!("expected an exit"); }
             Err(err)                  => { panic!("got err={err:?} and I shouldnt"); }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use pearchive::pack_dir_to_file;
 use peinit::{Config,Response};
-use waitid_timeout::WaitIdDataOvertime;
+use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 
 use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
@@ -215,9 +215,11 @@ fn main() {
         kernel: kernel_path,
         initramfs: initramfs_path,
         log_level: Some(ChLogLevel::Warn),
-        log: true,
         console: true,
+        keep_args: true,
     }).unwrap();
+
+    println!("started ch with args {:?}", ch.args());
 
     // {
     //     let resp = ch.api("GET", "vm.info", None);
@@ -238,9 +240,9 @@ fn main() {
     let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
     let runtime_spec = create_runtime_spec(&image_spec, run_args).unwrap();
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
-    println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+    //println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
-    let timeout = Duration::from_millis(1000);
+    let timeout = Duration::from_millis(2000);
     let ch_timeout = timeout + Duration::from_millis(200);
     let config = Config {
         timeout: timeout,
@@ -257,35 +259,43 @@ fn main() {
         println!("{resp:?}");
     }
 
+    let mut ch_siginfo = None;
     match ch.wait_timeout_or_kill(ch_timeout) {
         Ok(WaitIdDataOvertime::NotExited) => {
             println!("H warning ch didn't exit, this is real bad!");
             ch.kill().unwrap();
         }
-        Ok(WaitIdDataOvertime::Exited{..}) => {
-            println!("H ch exited on time");
+        Ok(WaitIdDataOvertime::Exited{siginfo, ..}) => {
+            let info: Siginfo = (&siginfo).into();
+            match info {
+                Siginfo::Exited(0) => { }
+                s                  => { ch_siginfo = Some(s); }
+            }
         }
-        Ok(WaitIdDataOvertime::ExitedOvertime{..}) => {
-            println!("H ch ran over time and was successfully killed");
+        Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, ..}) => {
+            ch_siginfo = Some((&siginfo).into())
         }
         Err(e) => {
-            println!("H warning ch ran into an error waiting {e:?}");
+            panic!("H warning ch ran into an error waiting {e:?}");
         }
-        // Some(status) => println!("exited with status {status:?}"),
-        // None => println!("either didn't exit or got killed"),
     }
-    //let status = ch.status();
 
-    // okay so we also have to determine whether peinit exited okay
-    // b/c if not then the archive and possibly the Response is messed up
-    // and cloud-hypervisor will exit okay
-    //
+    println!("== ch.err ==");
+    let _ = io::copy(&mut File::open(ch.err_file()).unwrap(), &mut io::stdout());
 
-    println!("== log ==");
-    let _ = io::copy(&mut File::open(ch.log_file().unwrap()).unwrap(), &mut io::stdout());
-    println!("== console ==");
-    let _ = io::copy(&mut File::open(ch.console_file().unwrap()).unwrap(), &mut io::stdout());
+    if let Some(log_file) = ch.log_file() {
+        println!("== ch.log ==");
+        let _ = io::copy(&mut File::open(log_file).unwrap(), &mut io::stdout());
+    }
+    if let Some(console_file) = ch.console_file() {
+        println!("== ch.console ==");
+        let _ = io::copy(&mut File::open(console_file).unwrap(), &mut io::stdout());
+    }
     println!("=============");
+
+    if let Some(ch_siginfo) = ch_siginfo {
+        panic!("H ch exited badly {ch_siginfo:?}");
+    }
 
     {
         let io_filepath = ch.workdir().join("io");

@@ -197,7 +197,7 @@ fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
     Ok(())
 }
 
-// kinda intended to do this in process but learned you can't do unshare(CLONE_NEWUSER) in a
+// kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut f = File::open(&archive).unwrap();
@@ -301,7 +301,7 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
     let exit_status = Command::new("/bin/crun")
     //let exit_status = Command::new("strace").arg("-e").arg("mount").arg("-f").arg("--decode-pids=comm").arg("/bin/crun")
         // TODO can we get debug info on another fd?
-        //.arg("--debug")
+        .arg("--debug")
         .arg("run")
         .arg("-b") // --bundle
         .arg("/run/bundle")
@@ -310,8 +310,8 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
         .arg("containerid-1234")
         .uid(1000)
         .gid(1000)
-        .stdout(Stdio::from(outfile))
-        .stderr(Stdio::from(errfile))
+        //.stdout(Stdio::from(outfile))
+        //.stderr(Stdio::from(errfile))
         .stdin(match File::open("/run/input/stdin") {
             Ok(f) => { Stdio::from(f) }
             Err(_) => { Stdio::null() }
@@ -344,6 +344,7 @@ fn run_container(duration: Duration) -> io::Result<WaitIdDataOvertime> {
 }
 
 fn main() {
+    println!("VVVVVVVVVVVVVVVVVVVV");
     setup_panic();
 
     init_mounts();
@@ -354,7 +355,6 @@ fn main() {
     mount_pmems();
     setup_overlay();
     parent_rootfs();
-
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import tarfile
-import sys
 import json
 from pathlib import Path
 import argparse
@@ -10,8 +9,19 @@ types = {}
 for k in 'REGTYPE AREGTYPE LNKTYPE SYMTYPE DIRTYPE FIFOTYPE CONTTYPE CHRTYPE BLKTYPE GNUTYPE_SPARSE'.split():
     types[getattr(tarfile, k)] = k
 
+formats = {}
+for k in 'USTAR_FORMAT GNU_FORMAT PAX_FORMAT'.split():
+    formats[getattr(tarfile, k)] = k
+
 def print_tarfile(filename):
     tf = tarfile.open(filename)
+    print(dir(tf))
+    for k in dir(tf):
+        print(k, getattr(tf, k))
+    print(formats)
+    format_s = formats[tf.format]
+    print(f'{filename}: format={format_s}')
+    import sys; sys.exit()
 
     if tf.pax_headers:
         print('--- PAX ---')
@@ -20,7 +30,7 @@ def print_tarfile(filename):
 
     for x in tf:
         type_s = types[x.type]
-        print(f'size={x.size:10} mtime={x.mtime} mode={x.mode:o} type={type_s} uid/gid={x.uid}/{x.gid} uname/gname={x.uname}/{x.gname} dev={x.devmajor},{x.devminor} {x.pax_headers} {x.name} ')
+        print(f'size={x.size:10} mtime={x.mtime} mode={x.mode:06o} type={type_s} uid/gid={x.uid}/{x.gid} uname/gname={x.uname}/{x.gname} dev={x.devmajor},{x.devminor} {x.pax_headers} {x.name} ')
 
 # expects a manifest
 def main_json(index_filename):
@@ -43,7 +53,7 @@ def main_json(index_filename):
 
 
 def main(args):
-    if args.json:
+    if args.file.suffix == '.json':
         main_json(args.file)
     else:
         print_tarfile(args.file)
