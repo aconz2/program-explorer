@@ -8,6 +8,7 @@ pub struct Config {
     pub oci_runtime_config: String,
     pub uid_gid: u32,
     pub timeout: Duration,
+    pub nids: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

@@ -338,3 +338,15 @@ and when it fails it does
 
 512<3> openat(AT_FDCWD, "/proc/513/gid_map", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0700) = 6
 512<3> write(6, "0\00010000\0001000\0", 13) = -1 EINVAL (Invalid argument)
+
+yay this came from a bug! https://github.com/containers/crun/issues/1585
+
+okay crun building
+on f39 b/c f40 breaks something with pthread
+dnf install libseccomp-devel libcap-devel libseccomp-static libcap-static glibc-static
+./autogen.sh
+export CFLAGS='-static -static-libgcc -Wl,-static'
+./configure  --disable-systemd --enable-embedded-yajl
+make -j8
+
+crun can change the container process uid_map because it is in the parent user namespace

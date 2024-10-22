@@ -293,14 +293,16 @@ fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) ->
     }
 }
 
-fn run_container(uid_gid: u32, duration: Duration) -> io::Result<WaitIdDataOvertime> {
-    let mut outfile = File::create_new("/run/output/stdout").unwrap();
-    let mut errfile = File::create_new("/run/output/stderr").unwrap();
+fn run_container(uid_gid: u32, nids: u32, duration: Duration) -> io::Result<WaitIdDataOvertime> {
+    let outfile = File::create_new("/run/output/stdout").unwrap();
+    let errfile = File::create_new("/run/output/stderr").unwrap();
 
     let start = Instant::now();
-    //let exit_status = Command::new("/bin/crun")
-    let exit_status = Command::new("strace").arg("-e").arg("write,openat").arg("-f").arg("-o").arg("/run/strace.out").arg("--decode-pids=comm").arg("/bin/crun")
+    //let mut cmd = Command::new("/bin/crun");
+    let mut cmd = Command::new("strace"); cmd.arg("-e").arg("write,openat,unshare,clone,clone3").arg("-f").arg("-o").arg("/run/crun.strace").arg("--decode-pids=comm").arg("/bin/crun");
+    //let exit_status = Command::new("/bin/busybox").arg("unshare").arg("-r").arg("/bin/crun")
         // TODO can we get debug info on another fd?
+    cmd
         .arg("--debug")
         .arg("--log=/run/crun.log")
         .arg("run")
@@ -309,15 +311,17 @@ fn run_container(uid_gid: u32, duration: Duration) -> io::Result<WaitIdDataOvert
         .arg("-d") // --detach
         .arg("--pid-file=/run/pid")
         .arg("containerid-1234")
-        .uid(uid_gid)
-        .gid(uid_gid)
-        //.uid(1000).gid(1000)
+        // okay I think running crun as root is the right thing here, we still
+        // setup the uidmap but
+        //.uid(uid_gid)
+        //.gid(uid_gid)
         .stdout(Stdio::from(outfile))
         .stderr(Stdio::from(errfile))
         .stdin(match File::open("/run/input/stdin") {
             Ok(f) => { Stdio::from(f) }
             Err(_) => { Stdio::null() }
-        })
+        });
+    let exit_status = cmd
         .spawn()
         .unwrap()
         .wait()
@@ -325,8 +329,10 @@ fn run_container(uid_gid: u32, duration: Duration) -> io::Result<WaitIdDataOvert
     let elapsed = start.elapsed();
     println!("V crun ran in {elapsed:?}");
 
-        println!("{}", fs::read_to_string("/run/strace.out").unwrap());
-        println!("{}", fs::read_to_string("/run/crun.log").unwrap());
+    if Path::new("/run/crun.strace").exists() {
+        println!("== crun.strace ==\n{}\n====", fs::read_to_string("/run/crun.strace").unwrap());
+    }
+    println!("== crun.log ==\n{}\n====", fs::read_to_string("/run/crun.log").unwrap());
     if !exit_status.success() {
         // println!("V crun stdout");
         // io::copy(&mut File::open("/run/output/stdout").unwrap(), &mut io::stdout());
@@ -362,12 +368,12 @@ fn main() {
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     let config = unpack_input(INOUT_DEVICE, "/run/input/dir");
-    println!("V config is {config:?}");
+    // println!("V config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
     // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    let container_output = run_container(config.uid_gid, config.timeout);
+    let container_output = run_container(config.uid_gid, config.nids, config.timeout);
     let response = match container_output {
         Err(_) | Ok(WaitIdDataOvertime::NotExited) => {
             Response {

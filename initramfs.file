@@ -65,8 +65,8 @@ slink /bin/sh /bin/busybox 0555 0 0
 #file /bin/vsockhello vsockhello 0555 0 0
 #file /bin/pivot_rootfs pivot_rootfs 0555 0 0
 file /bin/strace strace 0555 0 0
-file /bin/crun crun-1.15-linux-amd64 0555 0 0
-#file /bin/crun /home/andrew/Repos/crun/crun 0555 0 0
+#file /bin/crun crun-1.15-linux-amd64 0555 0 0
+file /bin/crun /home/andrew/Repos/crun/crun 0555 0 0
 #
 #file /run/bundle/config.json config.json 0444 0 0
 

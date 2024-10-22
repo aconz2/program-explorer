@@ -20,9 +20,7 @@ mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,ChLogLevel};
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
-// NOTE: to use all NIDS, we have to run with host user id bigger than NIDS otherwise
-// the range will overlap. eg trying to use user id 1000 and nids=1000 will overlap
-const UID: u32 = 10_000;
+const UID: u32 = 1000;
 const NIDS: u32 = 1000; // size of uid_gid_map
 
 #[derive(Debug)]
@@ -270,6 +268,7 @@ fn main() {
         timeout: timeout,
         oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
         uid_gid: UID,
+        nids: NIDS,
     };
 
     { // pmem1
