@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rand::distributions::{Alphanumeric, DistString};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
+use serde::Serialize;
 use libc;
 
 #[derive(Debug)]
@@ -107,15 +108,15 @@ impl CloudHypervisor {
         let child = {
             let socket_fd = listener.as_raw_fd();
             let mut x = Command::new(config.bin);
-                x.stdin(Stdio::null())
-                 .stdout(Stdio::null())
-                 .stderr(Stdio::from(err_file_h))
-                 .arg("--kernel").arg(config.kernel)
-                 .arg("--initramfs").arg(config.initramfs)
-                 .arg("--cpus").arg("boot=1")
-                 .arg("--memory").arg("size=1024M")
-                 .arg("--cmdline").arg("console=hvc0")
-                 .arg("--api-socket").arg(format!("fd={socket_fd}"));
+            x.stdin(Stdio::null())
+             .stdout(Stdio::null())
+             .stderr(Stdio::from(err_file_h))
+             .arg("--kernel").arg(config.kernel)
+             .arg("--initramfs").arg(config.initramfs)
+             .arg("--cpus").arg("boot=1")
+             .arg("--memory").arg("size=1024M")
+             .arg("--cmdline").arg("console=hvc0")
+             .arg("--api-socket").arg(format!("fd={socket_fd}"));
 
             if config.console {
                 let f = console_file.to_str().unwrap();
@@ -151,6 +152,24 @@ impl CloudHypervisor {
 
     pub fn api(&mut self, method: &str, command: &str, data: Option<&str>) -> Result<Option<String>, api_client::Error> {
         api_client::simple_api_full_command_and_response(&mut self.socket_stream, method, command, data)
+    }
+
+    fn add_pmem<P: AsRef<Path>>(&mut self, file: P, discard_writes: bool) -> Result<Option<String>, api_client::Error> {
+        #[derive(Serialize)]
+        struct AddPmem<'a> {
+            file: &'a Path,
+            discard_writes: bool
+        }
+        let data = serde_json::to_string(&AddPmem { file: file.as_ref(), discard_writes }).unwrap();
+        self.api("PUT", "vm.add-pmem", Some(&data))
+    }
+
+    pub fn add_pmem_ro<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, api_client::Error> {
+        self.add_pmem(file, true)
+    }
+
+    pub fn add_pmem_rw<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, api_client::Error> {
+        self.add_pmem(file, false)
     }
 
     pub fn kill(&mut self) -> io::Result<()> {

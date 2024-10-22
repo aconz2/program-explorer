@@ -225,33 +225,11 @@ fn main() {
     // let ch_binpath:     OsString = "/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/debug/cloud-hypervisor".into();
     let kernel_path:    OsString = "/home/andrew/Repos/linux/vmlinux".into();
     let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramfs".into();
-    let rootfs:         OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs".into();
+    let rootfs                   = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs";
     let inputdir:       OsString = "/home/andrew/Repos/program-explorer/inputdir".into();
     let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
-
-    let mut ch = CloudHypervisor::start(CloudHypervisorConfig {
-        workdir: "/tmp".into(),
-        bin: ch_binpath,
-        kernel: kernel_path,
-        initramfs: initramfs_path,
-        log_level: Some(ChLogLevel::Warn),
-        console: true,
-        keep_args: true,
-    }).unwrap();
-
-    println!("started ch with args {:?}", ch.args());
-
-    // {
-    //     let resp = ch.api("GET", "vm.info", None);
-    //     println!("{resp:?}");
-    // }
-
-    { // pmem0
-        let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": true}}"#, rootfs);
-        println!("{}", pmemconfig);
-        let resp = ch.api("PUT", "vm.add-pmem", Some(&pmemconfig));
-        println!("{resp:?}");
-    }
+    let timeout = Duration::from_millis(2000);
+    let ch_timeout = timeout + Duration::from_millis(200);
 
     use std::env;
     let args: Vec<_> = env::args().collect();
@@ -262,8 +240,26 @@ fn main() {
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
     println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
-    let timeout = Duration::from_millis(2000);
-    let ch_timeout = timeout + Duration::from_millis(200);
+    let mut ch = CloudHypervisor::start(CloudHypervisorConfig {
+        workdir  : "/tmp".into(),
+        bin      : ch_binpath,
+        kernel   : kernel_path,
+        initramfs: initramfs_path,
+        log_level: Some(ChLogLevel::Warn),
+        console  : true,
+        keep_args: true,
+    }).unwrap();
+
+    println!("started ch with args {:?}", ch.args());
+
+    // {
+    //     let resp = ch.api("GET", "vm.info", None);
+    //     println!("{resp:?}");
+    // }
+
+    let resp = ch.add_pmem_ro(rootfs).unwrap();
+    println!("{resp:?}");
+
     let config = peinit::Config {
         timeout: timeout,
         oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
@@ -275,10 +271,7 @@ fn main() {
     { // pmem1
         let io_file = ch.workdir().join("io");
         create_pack_file_from_dir(&inputdir, &io_file, &config);
-        // { let len = File::open(&io_file).unwrap().metadata().unwrap().len(); println!("perunner file has len: {}", len); }
-        let pmemconfig = format!(r#"{{"file": {:?}, "discard_writes": false}}"#, io_file);
-        println!("{}", pmemconfig);
-        let resp = ch.api("PUT", "vm.add-pmem", Some(&pmemconfig));
+        let resp = ch.add_pmem_rw(io_file).unwrap();
         println!("{resp:?}");
     }
 
