@@ -102,7 +102,7 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
         mounts.push(oci_runtime::MountBuilder::default()
             .destination("/run/pe/input")
             .typ("bind")
-            .source("/run/input/dir")
+            .source("/run/input")
             // idk should this be readonly?
             // TODO I don't fully understand why this is rbind
             // https://docs.kernel.org/filesystems/sharedsubtree.html
@@ -111,7 +111,7 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
             .unwrap()
             );
 
-        //// /run/pe/output
+        // /run/pe/output
         mounts.push(oci_runtime::MountBuilder::default()
             .destination("/run/pe/output")
             .typ("bind")
@@ -269,6 +269,7 @@ fn main() {
         oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
         uid_gid: UID,
         nids: NIDS,
+        stdin: Some("foo".to_string()),
     };
 
     { // pmem1

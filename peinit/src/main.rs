@@ -1,13 +1,12 @@
 use std::fs;
 use std::fs::File;
 use std::process::{Stdio, Command};
-use std::io::{Seek,Read,Write};
+use std::io::{Seek,Read,Write,SeekFrom};
 use std::os::fd::{AsRawFd,FromRawFd};
-use std::os::unix::process::CommandExt;
+//use std::os::unix::process::CommandExt;
 use std::ffi::{CStr,OsStr};
 use std::path::Path;
 use std::io;
-use std::time::Duration;
 use std::time::Instant;
 
 use peinit::{Config,Response,ExitKind};
@@ -242,7 +241,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archive: P) {
-    use std::io::{Seek,SeekFrom};
+    Command::new("/bin/busybox").arg("ls").arg("-lh").arg("/run/output").spawn().unwrap().wait().unwrap();
     let mut f = File::create(&archive).unwrap();
     let response_bytes = bincode::serialize(response).unwrap();
 
@@ -273,13 +272,6 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
     assert!(ret == 0, "pearchive packdev failed with status {}", ret);
 }
 
-// fn wait4(pid: i32) -> Result<(libc::c_int, libc::rusage), Error> {
-//     let mut status: libc::c_int = 0;
-//     let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-//     let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
-//     if ret < 0 { return Err(Error::Wait4); }
-//     Ok((status, rusage))
-// }
 fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) -> String {
     match File::open(&path) {
         Err(e) => format!("error opening file {} {:?}", path, e),
@@ -293,13 +285,29 @@ fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) ->
     }
 }
 
-fn run_container(uid_gid: u32, nids: u32, duration: Duration) -> io::Result<WaitIdDataOvertime> {
+fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     let outfile = File::create_new("/run/output/stdout").unwrap();
     let errfile = File::create_new("/run/output/stderr").unwrap();
+    let run_input = Path::new("/run/input");
+    let stdin: Stdio = config.stdin.clone().map(|x| {
+        // TODO this is annoying
+        let p = match run_input.join(x).canonicalize() {
+            Ok(p) => { p },
+            Err(_) => { return None; },
+        };
+        if !p.starts_with(run_input) {
+            // println!("V warn stdin traversal avoided");
+            return None;
+        }
+        match File::open(p) {
+            Ok(f) => { Some(Stdio::from(f)) }
+            Err(_) => { None }
+        }
+    }).flatten().unwrap_or_else(|| Stdio::null());
 
     let start = Instant::now();
-    //let mut cmd = Command::new("/bin/crun");
-    let mut cmd = Command::new("strace"); cmd.arg("-e").arg("write,openat,unshare,clone,clone3").arg("-f").arg("-o").arg("/run/crun.strace").arg("--decode-pids=comm").arg("/bin/crun");
+    let mut cmd = Command::new("/bin/crun");
+    //let mut cmd = Command::new("strace"); cmd.arg("-e").arg("write,openat,unshare,clone,clone3").arg("-f").arg("-o").arg("/run/crun.strace").arg("--decode-pids=comm").arg("/bin/crun");
     //let exit_status = Command::new("/bin/busybox").arg("unshare").arg("-r").arg("/bin/crun")
         // TODO can we get debug info on another fd?
     cmd
@@ -310,22 +318,17 @@ fn run_container(uid_gid: u32, nids: u32, duration: Duration) -> io::Result<Wait
         .arg("/run/bundle")
         .arg("-d") // --detach
         .arg("--pid-file=/run/pid")
-        .arg("containerid-1234")
-        // okay I think running crun as root is the right thing here, we still
-        // setup the uidmap but
-        //.uid(uid_gid)
-        //.gid(uid_gid)
+        .arg("cid-1234")
         .stdout(Stdio::from(outfile))
         .stderr(Stdio::from(errfile))
-        .stdin(match File::open("/run/input/stdin") {
-            Ok(f) => { Stdio::from(f) }
-            Err(_) => { Stdio::null() }
-        });
+        .stdin(stdin);
+
     let exit_status = cmd
         .spawn()
         .unwrap()
         .wait()
         .unwrap();
+
     let elapsed = start.elapsed();
     println!("V crun ran in {elapsed:?}");
 
@@ -347,10 +350,14 @@ fn run_container(uid_gid: u32, nids: u32, duration: Duration) -> io::Result<Wait
 
     //Command::new("busybox").arg("ls").arg("/run").spawn().unwrap().wait().unwrap();
     let pid = fs::read_to_string("/run/pid").unwrap().parse::<i32>().unwrap();
+
+    // Command::new("/bin/busybox").arg("cat").arg("/run/crun/cid-1234/status").spawn().unwrap().wait().unwrap();
+    // this can verify the Uid/Gid is not 0 0 0 0 DOES NOT WORK WITH STRACE
+    // Command::new("/bin/busybox").arg("cat").arg(format!("/proc/{}/status", pid)).spawn().unwrap();
     let mut pidfd = PidFd::open(pid, 0).unwrap();
     let mut waiter = PidFdWaiter::new(&mut pidfd).unwrap();
 
-    waiter.wait_timeout_or_kill(duration)
+    waiter.wait_timeout_or_kill(config.timeout)
 }
 
 fn main() {
@@ -367,13 +374,13 @@ fn main() {
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    let config = unpack_input(INOUT_DEVICE, "/run/input/dir");
+    let config = unpack_input(INOUT_DEVICE, "/run/input");
     // println!("V config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
     // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    let container_output = run_container(config.uid_gid, config.nids, config.timeout);
+    let container_output = run_container(&config);
     let response = match container_output {
         Err(_) | Ok(WaitIdDataOvertime::NotExited) => {
             Response {

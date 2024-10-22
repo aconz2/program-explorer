@@ -45,7 +45,7 @@ pub enum Error {
     OnDir,
     OnPop,
     Write,
-    SendFile,
+    SendFile(i32),
     Flush,
     BadName,
     BadSize,
@@ -160,9 +160,9 @@ fn sendfile_all<Fd1: AsRawFd, Fd2: AsRawFd>(fd_in: &mut Fd1, fd_out: &mut Fd2, l
         let ret = unsafe {
             libc::sendfile(fd_out.as_raw_fd(), fd_in.as_raw_fd(), ptr::null_mut(), len as usize)
         };
-        if ret <= 0 { return Err(Error::SendFile); }
+        if ret <= 0 { return Err(Error::SendFile(unsafe { *libc::__errno_location() })); }
         let ret = ret as u64;
-        if ret > len { return Err(Error::SendFile); }
+        assert!(ret <= len);
         len -= ret;
     }
     Ok(())
@@ -209,7 +209,6 @@ impl Visitor for PackToFileVisitor {
 }
 
 // would love to know how this looks as an iterator at some point
-// and what the right error handling is, here I throw away the visitor's error
 fn visit_dirc_rec<V: Visitor>(curdir: &OwnedFd, v: &mut V, depth: usize) -> Result<(), Error> {
     if depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
 
@@ -223,7 +222,6 @@ fn visit_dirc_rec<V: Visitor>(curdir: &OwnedFd, v: &mut V, depth: usize) -> Resu
                 let name = entry.file_name();
                 let fd = openat(curdir, name)?;
                 let size = file_size(&fd)?;
-                //v.on_file(name, size, fd).map_err(|_| Error::OnFile)?;
                 v.on_file(name, size, fd)?;
             },
             FileType::Directory => {

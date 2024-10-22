@@ -49,7 +49,6 @@ dir /run/bundle        0755 0 0
 dir /run/bundle/rootfs 0755 0 0
 
 dir /run/input      0755 0 0
-dir /run/input/dir  0755 0 0
 dir /run/output     0777 0 0
 # /run/output is a mount point for a tmpfs so we don't create /run/output/dir here
 

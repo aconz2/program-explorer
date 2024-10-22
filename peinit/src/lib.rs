@@ -9,6 +9,7 @@ pub struct Config {
     pub uid_gid: u32,
     pub timeout: Duration,
     pub nids: u32,
+    pub stdin: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
