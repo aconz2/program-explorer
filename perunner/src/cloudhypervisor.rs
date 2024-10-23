@@ -14,8 +14,10 @@ use serde::Serialize;
 use libc;
 use api_client;
 
-#[derive(Debug)]
+#[derive(Debug,Default)]
 pub enum Error {
+    #[default]
+    Unk,
     WorkdirSetup,
     TempfileSetup,
     Spawn,
@@ -23,6 +25,7 @@ pub enum Error {
     Api(api_client::Error),
     Overtime,
     Wait,
+    BadExit,
 }
 
 impl From<api_client::Error> for Error {
@@ -51,7 +54,7 @@ pub struct CloudHypervisor {
     #[allow(dead_code)]
     workdir: TempDir,
     log_file: Option<NamedTempFile>,
-    console_file: Option<NamedTempFile>,
+    con_file: Option<NamedTempFile>,
     err_file: NamedTempFile,
     child: Child,
     #[allow(dead_code)]
@@ -62,14 +65,21 @@ pub struct CloudHypervisor {
 }
 
 // TODO kinda weird b/c if ch doesn't even start this is useless
-// pub struct CloudHypervisorPostMortem {
-//     pub error: Error,
-//     pub workdir: TempDir,
-//     pub log_file: Option<OsString>,
-//     pub console_file: Option<OsString>,
-//     pub err_file: OsString,
-//     pub args: Vec<OsString>,
-// }
+#[derive(Default)]
+pub struct CloudHypervisorPostMortem {
+    pub error: Error,
+    pub workdir: Option<TempDir>,
+    pub log_file: Option<NamedTempFile>,
+    pub con_file: Option<NamedTempFile>,
+    pub err_file: Option<NamedTempFile>,
+    pub args: Option<Vec<OsString>>,
+}
+
+impl From<Error> for CloudHypervisorPostMortem {
+    fn from(e: Error) -> Self {
+        Self { error: e, ..Default::default() }
+    }
+}
 
 // struct TempDir {
 //     name: OsString
@@ -160,8 +170,8 @@ impl CloudHypervisor {
         let ret = CloudHypervisor {
             workdir: workdir,
             err_file: err_file,
-            log_file:     if config.log_level.is_some() { Some(log_file) } else { None },
-            console_file: if config.console { Some(con_file) } else { None },
+            log_file: if config.log_level.is_some() { Some(log_file) } else { None },
+            con_file: if config.console { Some(con_file) } else { None },
             child: child,
             socket_listen: listener,
             socket_stream: stream,
@@ -201,7 +211,7 @@ impl CloudHypervisor {
     }
 
     pub fn console_file(&self) -> Option<&NamedTempFile> {
-        self.console_file.as_ref()
+        self.con_file.as_ref()
     }
 
     pub fn log_file(&self) -> Option<&NamedTempFile> {
@@ -220,23 +230,24 @@ impl CloudHypervisor {
         self.args.as_slice()
     }
 
-    // pub fn postmortem(self, e: Error) -> CloudHypervisorPostMortem {
-    //     CloudHypervisorPostMortem {
-    //         error: e,
-    //         workdir: self.workdir,
-    //         log_file: self.log_file,
-    //         console_file: self.console_file,
-    //         err_file: self.err_file,
-    //         args: self.args,
+    pub fn postmortem(mut self, e: Error) -> CloudHypervisorPostMortem {
+        let _ = self.kill();
+        CloudHypervisorPostMortem {
+            error: e,
+            workdir: Some(self.workdir),
+            log_file: self.log_file,
+            con_file: self.con_file,
+            err_file: Some(self.err_file),
+            args: Some(self.args),
 
-    //     }
-    // }
+        }
+    }
 }
 
 // TODO I don't really like this because we regrab the pidfd and might already be killed etc
-impl Drop for CloudHypervisor {
-    fn drop(&mut self) {
-        // TODO redo this
-        //let _ = self.wait_timeout_or_kill(Duration::from_millis(5));
-    }
-}
+// impl Drop for CloudHypervisor {
+//     fn drop(&mut self) {
+//         // TODO redo this
+//         //let _ = self.wait_timeout_or_kill(Duration::from_millis(5));
+//     }
+// }

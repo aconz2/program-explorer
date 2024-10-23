@@ -251,13 +251,18 @@ fn dump_archive(mut file: &File) {
     unpack_visitor(mapping.as_ref(), &mut visitor).unwrap();
 }
 
+fn dump_file<F: Read>(name: &str, file: &mut F) {
+    println!("=== {} ===", name);
+    let _ = io::copy(file, &mut io::stdout());
+}
+
 
 fn main() {
 
     let ch_binpath:     OsString = "/home/andrew/Repos/program-explorer/cloud-hypervisor-static".into();
     // let ch_binpath:     OsString = "/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/debug/cloud-hypervisor".into();
     let kernel_path:    OsString = "/home/andrew/Repos/linux/vmlinux".into();
-    let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramfs".into();
+    let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramf".into();
     let rootfs                   = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs";
     let inputdir:       OsString = "/home/andrew/Repos/program-explorer/inputdir".into();
     let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
@@ -309,7 +314,13 @@ fn main() {
             dump_archive(io_file.as_file_mut());
         }
         Err(e) => {
-            println!("oh no something went bad {e:?}");
+            println!("oh no something went bad {:?}", e.error);
+            if let Some(args) = e.args {
+                println!("launched ch with args {:?}", args);
+            }
+            if let Some(mut err_file) = e.err_file { dump_file("ch log", &mut err_file); }
+            if let Some(mut log_file) = e.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = e.con_file { dump_file("ch con", &mut con_file); }
         }
     }
 

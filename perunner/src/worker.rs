@@ -4,7 +4,7 @@ use std::thread::{spawn,JoinHandle};
 use crossbeam::channel as channel;
 use crossbeam::channel::{Receiver,Sender};
 use std::time::Duration;
-use waitid_timeout::{WaitIdDataOvertime};
+use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 use std::path::PathBuf;
 
 use nix;
@@ -12,7 +12,7 @@ use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
 use tempfile::NamedTempFile;
 
 use crate::cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig};
+use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem};
 use peinit;
 
 type JoinHandleT = JoinHandle<()>;
@@ -33,7 +33,7 @@ pub struct Output {
 
 // TODO I guess if we get an error, then we'll drop the CloudHypervisor thing
 // which holds the tempdir and console/log info, maybe extract these out?
-type OutputResult = Result<Output, cloudhypervisor::Error>;
+type OutputResult = Result<Output, CloudHypervisorPostMortem>;
 
 struct Pool {
     sender: Sender<Input>,
@@ -69,37 +69,52 @@ pub fn cpuset(core_offset: usize,
     if core_offset % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
     if n_cores_per_worker % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
     let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
-    let total_cores = n_workers * n_cores_per_worker;
-    for i in (core_offset-1)..total_cores {
-        if !all.is_set(i)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
-    }
-    let mut ret = vec![];
+    let mut ret = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
         let mut c = CpuSet::new();
         for j in 0..n_cores_per_worker {
-            c.set(core_offset + i*n_workers + j)?;
+            let k = core_offset + i*n_cores_per_worker + j;
+            if !all.is_set(k)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
+            c.set(k)?;
         }
         ret.push(c);
     }
     Ok(ret)
 }
 
-// so I was thinking we would always have a hot task running but then we can't even start without
-// which if we allow per request then we have to wait for the startup anyways and we could just put
-// this all in the config...
+// TODO another idea is to preboot a task and then wait for the input, but if we want to support
+// choosing kernel version, then doesn't really work
+// a bit ugly since we can't easily use ? to munge the errors
 pub fn run(input: Input) -> OutputResult {
-    let mut ch = CloudHypervisor::start(input.ch_config)?;
+    let mut ch = {
+        match CloudHypervisor::start(input.ch_config) {
+            Ok(ch) => ch,
+            Err(e) => { return Err(e.into()); }
+        }
+    };
     // order of calls is important here
-    ch.add_pmem_ro(input.rootfs)?;
-    ch.add_pmem_rw(&input.io_file)?;
-    match ch.wait_timeout_or_kill(input.ch_timeout).map_err(|_| cloudhypervisor::Error::Wait)? {
-        WaitIdDataOvertime::NotExited => {
+    match ch.add_pmem_ro(input.rootfs) {
+        Ok(_) => { },
+        Err(e) => { return Err(ch.postmortem(e)); }
+    }
+    match ch.add_pmem_rw(&input.io_file) {
+        Ok(_) => { },
+        Err(e) => { return Err(ch.postmortem(e)); }
+    }
+    match ch.wait_timeout_or_kill(input.ch_timeout).map_err(|_| cloudhypervisor::Error::Wait) {
+        Ok(WaitIdDataOvertime::NotExited) => {
             // TODO this is real bad
         },
-        WaitIdDataOvertime::Exited{..} => { },
-        WaitIdDataOvertime::ExitedOvertime{..} => {
-            return Err(cloudhypervisor::Error::Overtime);
+        Ok(WaitIdDataOvertime::Exited{siginfo, ..}) => {
+            let info: Siginfo = (&siginfo).into();
+            if info != Siginfo::Exited(0) {
+                return Err(ch.postmortem(cloudhypervisor::Error::BadExit));
+            }
         },
+        Ok(WaitIdDataOvertime::ExitedOvertime{..}) => {
+            return Err(ch.postmortem(cloudhypervisor::Error::Overtime));
+        },
+        Err(e) => { return Err(ch.postmortem(e)); }
     }
     Ok(Output{
         id: input.id,
@@ -124,4 +139,29 @@ fn spawn_worker(cpuset: CpuSet,
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpuset_good() {
+        // TODO bad test only works on this machine
+        const N: usize = 32;
+        let mut s = ['1'; N];
+        let set = cpuset(2, 15, 2).unwrap();
+        //println!("{:?}", set);
+        for x in set {
+            let s: String = (0..N).map(|i| if x.is_set(i).unwrap() { '1' } else { '_' }).collect();
+            println!("{:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_cpuset_bad() {
+        let _ = cpuset(1, 1, 2).unwrap_err();  // odd offset
+        let _ = cpuset(0, 1, 1).unwrap_err();  // odd cores per worker
+        let _ = cpuset(2, 16, 2).unwrap_err(); // too many cores
+    }
 }
