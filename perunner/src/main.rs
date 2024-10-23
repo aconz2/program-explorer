@@ -262,7 +262,7 @@ fn main() {
     let ch_binpath:     OsString = "/home/andrew/Repos/program-explorer/cloud-hypervisor-static".into();
     // let ch_binpath:     OsString = "/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/debug/cloud-hypervisor".into();
     let kernel_path:    OsString = "/home/andrew/Repos/linux/vmlinux".into();
-    let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramf".into();
+    let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramfs".into();
     let rootfs                   = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs";
     let inputdir:       OsString = "/home/andrew/Repos/program-explorer/inputdir".into();
     let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
