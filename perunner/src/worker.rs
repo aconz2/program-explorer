@@ -9,10 +9,10 @@ use std::path::PathBuf;
 
 use nix;
 use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
+use tempfile::NamedTempFile;
 
 use crate::cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig};
-
 use peinit;
 
 type JoinHandleT = JoinHandle<()>;
@@ -22,15 +22,17 @@ pub struct Input {
     pub ch_config: CloudHypervisorConfig,
     pub pe_config: peinit::Config,
     pub rootfs: PathBuf,
-    pub io_file: PathBuf,
+    pub io_file: NamedTempFile,
     pub ch_timeout: Duration,
 }
 
 pub struct Output {
     pub id: u64,
-    pub io_file: PathBuf,
+    pub io_file: NamedTempFile,
 }
 
+// TODO I guess if we get an error, then we'll drop the CloudHypervisor thing
+// which holds the tempdir and console/log info, maybe extract these out?
 type OutputResult = Result<Output, cloudhypervisor::Error>;
 
 struct Pool {

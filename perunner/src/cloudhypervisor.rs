@@ -9,6 +9,7 @@ use std::io;
 use std::ffi::OsString;
 use std::time::Duration;
 
+use tempfile::TempDir;
 use rand::distributions::{Alphanumeric, DistString};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
 use serde::Serialize;
@@ -29,6 +30,7 @@ impl From<api_client::Error> for Error {
     fn from(e: api_client::Error) -> Self { Error::Api(e) }
 }
 
+#[allow(dead_code)]
 pub enum ChLogLevel {
     Warn,
     Info,
@@ -60,32 +62,42 @@ pub struct CloudHypervisor {
     //pidfd:
 }
 
-struct TempDir {
-    name: OsString
-}
+// TODO kinda weird b/c if ch doesn't even start this is useless
+// pub struct CloudHypervisorPostMortem {
+//     pub error: Error,
+//     pub workdir: TempDir,
+//     pub log_file: Option<OsString>,
+//     pub console_file: Option<OsString>,
+//     pub err_file: OsString,
+//     pub args: Vec<OsString>,
+// }
 
-impl TempDir {
-    fn new<P: AsRef<Path>>(dir: P) -> Option<Self> {
-        let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
-        let ret = Self { name: dir.as_ref().join(format!("ch-{rng}")).into() };
-        std::fs::create_dir(&ret.name).ok()?;
-        Some(ret)
-    }
-
-    fn join<O: AsRef<Path>>(&self, other: O) -> PathBuf { self.as_ref().join(other) }
-}
-
-impl AsRef<Path> for TempDir {
-    fn as_ref(&self) -> &Path {
-        return Path::new(&self.name)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self);
-    }
-}
+// struct TempDir {
+//     name: OsString
+// }
+//
+// impl TempDir {
+//     fn new<P: AsRef<Path>>(dir: P) -> Option<Self> {
+//         let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
+//         let ret = Self { name: dir.as_ref().join(format!("ch-{rng}")).into() };
+//         std::fs::create_dir(&ret.name).ok()?;
+//         Some(ret)
+//     }
+//
+//     fn join<O: AsRef<Path>>(&self, other: O) -> PathBuf { self.as_ref().join(other) }
+// }
+//
+// impl AsRef<Path> for TempDir {
+//     fn as_ref(&self) -> &Path {
+//         return Path::new(&self.name)
+//     }
+// }
+//
+// impl Drop for TempDir {
+//     fn drop(&mut self) {
+//         let _ = std::fs::remove_dir_all(self);
+//     }
+// }
 
 fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
     let _ = fs::remove_file(&path);
@@ -103,13 +115,14 @@ impl CloudHypervisor {
 
     pub fn start(config: CloudHypervisorConfig) -> Result<Self, Error> {
         // go from /tmp -> /tmp/ch-abcd1234
-        let workdir = TempDir::new(config.workdir).ok_or(Error::WorkdirSetup)?;
+        let workdir = TempDir::with_prefix_in("ch-", config.workdir)
+            .map_err(|_| Error::WorkdirSetup)?;
 
-        let err_file     : OsString = workdir.join("err").into();
-        let log_file     : OsString = workdir.join("log").into();
-        let console_file : OsString = workdir.join("console").into();
+        let err_file     : OsString = workdir.path().join("err").into();
+        let log_file     : OsString = workdir.path().join("log").into();
+        let console_file : OsString = workdir.path().join("console").into();
 
-        let (listener, stream) = setup_socket(workdir.join("sock")).ok_or(Error::Socket)?;
+        let (listener, stream) = setup_socket(workdir.path().join("sock")).ok_or(Error::Socket)?;
         let err_file_h = File::create_new(&err_file).unwrap();
 
         let mut args = vec![];
@@ -207,11 +220,24 @@ impl CloudHypervisor {
     pub fn err_file(&self) -> &OsString {
         &self.err_file
     }
+
+    // pub fn postmortem(self, e: Error) -> CloudHypervisorPostMortem {
+    //     CloudHypervisorPostMortem {
+    //         error: e,
+    //         workdir: self.workdir,
+    //         log_file: self.log_file,
+    //         console_file: self.console_file,
+    //         err_file: self.err_file,
+    //         args: self.args,
+
+    //     }
+    // }
 }
 
 // TODO I don't really like this because we regrab the pidfd and might already be killed etc
 impl Drop for CloudHypervisor {
     fn drop(&mut self) {
-        let _ = self.wait_timeout_or_kill(Duration::from_millis(5));
+        // TODO redo this
+        //let _ = self.wait_timeout_or_kill(Duration::from_millis(5));
     }
 }

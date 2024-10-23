@@ -10,6 +10,7 @@ use peinit;
 use peinit::{Response};
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 
+use tempfile::NamedTempFile;
 use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
 use serde_json;
@@ -25,12 +26,6 @@ mod worker;
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 const UID: u32 = 1000;
 const NIDS: u32 = 1000; // size of uid_gid_map
-
-#[derive(Debug)]
-enum Error {
-    Stat,
-    Truncate,
-}
 
 fn sha2_hex(buf: &[u8]) -> String {
     use sha2::{Sha256,Digest};
@@ -222,6 +217,38 @@ fn write_escaped<W: Write, R: Read>(r: &mut R, size: u32, w: &mut W) {
     }
 }
 
+fn dump_archive(mut file: &File) {
+    //let io_filepath = ch.workdir().join("io");
+    //std::fs::copy(&io_filepath, "/tmp/pe-io").unwrap();
+    // let mut buf = Vec::with_capacity(4096);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let archive_size = file.read_u32::<LE>().unwrap();
+    let response_size = file.read_u32::<LE>().unwrap();
+    // todo wtf is going on with the options
+    //let response: Response = bincode::options()
+    //    .with_fixint_encoding()
+    //    .allow_trailing_bytes()
+    //    .with_limit(response_size.into())
+    //    .deserialize_from(&mut file)
+    //    .unwrap();
+    println!("H archive size {archive_size} response_size {response_size}");
+    let response: Response = {
+        let mut buf = vec![0; response_size.try_into().unwrap()];
+        file.read_exact(buf.as_mut_slice()).unwrap();
+
+        if true {
+            let hash_hex = sha2_hex(&buf);
+            println!("H response_bytes len {} {}", response_size, hash_hex);
+        }
+        bincode::deserialize(&buf).unwrap()
+    };
+    println!("H got response {response:#?}");
+    println!("== archvive raw ==");
+    write_escaped(&mut file, archive_size, &mut io::stdout());
+    println!("\n== /archvive raw ==");
+}
+
+
 fn main() {
 
     let ch_binpath:     OsString = "/home/andrew/Repos/program-explorer/cloud-hypervisor-static".into();
@@ -243,7 +270,7 @@ fn main() {
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
     println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
-    let mut ch = CloudHypervisor::start(CloudHypervisorConfig {
+    let ch_config = CloudHypervisorConfig {
         workdir  : "/tmp".into(),
         bin      : ch_binpath,
         kernel   : kernel_path,
@@ -251,19 +278,9 @@ fn main() {
         log_level: Some(ChLogLevel::Warn),
         console  : true,
         keep_args: true,
-    }).unwrap();
+    };
 
-    println!("started ch with args {:?}", ch.args());
-
-    // {
-    //     let resp = ch.api("GET", "vm.info", None);
-    //     println!("{resp:?}");
-    // }
-
-    let resp = ch.add_pmem_ro(rootfs).unwrap();
-    println!("{resp:?}");
-
-    let config = peinit::Config {
+    let pe_config = peinit::Config {
         timeout: timeout,
         oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
         uid_gid: UID,
@@ -271,81 +288,66 @@ fn main() {
         stdin: Some("foo".to_string()),
     };
 
-    { // pmem1
-        let io_file = ch.workdir().join("io");
-        create_pack_file_from_dir(&inputdir, &io_file, &config);
-        let resp = ch.add_pmem_rw(io_file).unwrap();
-        println!("{resp:?}");
-    }
+    let io_file = NamedTempFile::new().unwrap();
+    create_pack_file_from_dir(&inputdir, &io_file, &pe_config);
 
-    let mut ch_siginfo = None;
-    match ch.wait_timeout_or_kill(ch_timeout) {
-        Ok(WaitIdDataOvertime::NotExited) => {
-            println!("H warning ch didn't exit, this is real bad!");
-            ch.kill().unwrap();
-        }
-        Ok(WaitIdDataOvertime::Exited{siginfo, ..}) => {
-            let info: Siginfo = (&siginfo).into();
-            match info {
-                Siginfo::Exited(0) => { }
-                s                  => { ch_siginfo = Some(s); }
-            }
-        }
-        Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, ..}) => {
-            ch_siginfo = Some((&siginfo).into())
+    let worker_input = worker::Input {
+        id: 0,
+        ch_config: ch_config,
+        pe_config: pe_config,
+        rootfs: rootfs.into(),
+        io_file: io_file,
+        ch_timeout: ch_timeout,
+    };
+
+    match worker::run(worker_input) {
+        Ok(worker::Output{id, mut io_file}) => {
+            println!("id {id}");
+            dump_archive(io_file.as_file_mut());
         }
         Err(e) => {
-            panic!("H warning ch ran into an error waiting {e:?}");
+            println!("oh no something went bad {e:?}");
         }
     }
 
-    println!("== ch.err ==");
-    let _ = io::copy(&mut File::open(ch.err_file()).unwrap(), &mut io::stdout());
+    // let mut ch_siginfo = None;
+    // match ch.wait_timeout_or_kill(ch_timeout) {
+    //     Ok(WaitIdDataOvertime::NotExited) => {
+    //         println!("H warning ch didn't exit, this is real bad!");
+    //         ch.kill().unwrap();
+    //     }
+    //     Ok(WaitIdDataOvertime::Exited{siginfo, ..}) => {
+    //         let info: Siginfo = (&siginfo).into();
+    //         match info {
+    //             Siginfo::Exited(0) => { }
+    //             s                  => { ch_siginfo = Some(s); }
+    //         }
+    //     }
+    //     Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, ..}) => {
+    //         ch_siginfo = Some((&siginfo).into())
+    //     }
+    //     Err(e) => {
+    //         panic!("H warning ch ran into an error waiting {e:?}");
+    //     }
+    // }
 
-    if let Some(log_file) = ch.log_file() {
-        println!("== ch.log ==");
-        let _ = io::copy(&mut File::open(log_file).unwrap(), &mut io::stdout());
-    }
-    if let Some(console_file) = ch.console_file() {
-        println!("== ch.console ==");
-        let _ = io::copy(&mut File::open(console_file).unwrap(), &mut io::stdout());
-    }
-    println!("=============");
+    // println!("== ch.err ==");
+    // let _ = io::copy(&mut File::open(ch.err_file()).unwrap(), &mut io::stdout());
 
-    if let Some(ch_siginfo) = ch_siginfo {
-        println!("H ch exited badly {ch_siginfo:?}");
-    }
+    // if let Some(log_file) = ch.log_file() {
+    //     println!("== ch.log ==");
+    //     let _ = io::copy(&mut File::open(log_file).unwrap(), &mut io::stdout());
+    // }
+    // if let Some(console_file) = ch.console_file() {
+    //     println!("== ch.console ==");
+    //     let _ = io::copy(&mut File::open(console_file).unwrap(), &mut io::stdout());
+    // }
+    // println!("=============");
 
-    {
-        let io_filepath = ch.workdir().join("io");
-        std::fs::copy(&io_filepath, "/tmp/pe-io").unwrap();
-        // let mut buf = Vec::with_capacity(4096);
-        let mut file = File::open(io_filepath).unwrap();
-        let archive_size = file.read_u32::<LE>().unwrap();
-        let response_size = file.read_u32::<LE>().unwrap();
-        // todo wtf is going on with the options
-        //let response: Response = bincode::options()
-        //    .with_fixint_encoding()
-        //    .allow_trailing_bytes()
-        //    .with_limit(response_size.into())
-        //    .deserialize_from(&mut file)
-        //    .unwrap();
-        println!("H archive size {archive_size} response_size {response_size}");
-        let response: Response = {
-            let mut buf = vec![0; response_size.try_into().unwrap()];
-            file.read_exact(buf.as_mut_slice()).unwrap();
+    // if let Some(ch_siginfo) = ch_siginfo {
+    //     println!("H ch exited badly {ch_siginfo:?}");
+    // }
 
-            if true {
-                let hash_hex = sha2_hex(&buf);
-                println!("H response_bytes len {} {}", response_size, hash_hex);
-            }
-            bincode::deserialize(&buf).unwrap()
-        };
-        println!("H got response {response:#?}");
-        println!("== archvive raw ==");
-        write_escaped(&mut file, archive_size, &mut io::stdout());
-        println!("\n== /archvive raw ==");
-    }
 
     // use std::process::Command;
     // use peinit::Rusage;
