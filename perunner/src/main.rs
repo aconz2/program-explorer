@@ -3,9 +3,9 @@ use std::fs::File;
 use std::io;
 use std::io::{Write,Seek,SeekFrom,Read};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path,PathBuf};
 
-use pearchive::pack_dir_to_file;
+use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
 use peinit::{Response};
 //use waitid_timeout::{WaitIdDataOvertime,Siginfo};
@@ -16,6 +16,7 @@ use oci_spec::image as oci_image;
 use serde_json;
 use bincode;
 use byteorder::{WriteBytesExt,ReadBytesExt,LE};
+use memmap2::MmapOptions;
 
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
@@ -201,36 +202,31 @@ fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
     }
 }
 
-fn write_escaped<W: Write, R: Read>(r: &mut R, size: u32, w: &mut W) {
-    let mut r = r.take(size as u64);
-    let mut rem = size as usize;
-    let mut buf = vec![0; 4096];
+fn write_escaped<W: Write>(r: &[u8], w: &mut W) {
+    let mut cur = &r[..];
     let mut ebuf = vec![0; 8192];
-    while rem > 0 {
-        let read = r.read(&mut buf).unwrap();
-        if read <= 0 { panic!("bad read"); }
-        let data = &buf[..read];
-        rem -= read;
-        //let n = escape_bytes::escape_into(&mut ebuf, data).unwrap();
-        escape_bytes(&data, &mut ebuf);
+    while !cur.is_empty() {
+        let (l, r) = cur.split_at(std::cmp::min(cur.len(), 4096));
+        escape_bytes(&l, &mut ebuf);
         w.write_all(ebuf.as_slice()).unwrap();
+        cur = r;
+    }
+}
+
+struct UnpackVisitorPrinter { }
+impl UnpackVisitor for UnpackVisitorPrinter {
+    fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
+        println!("=== {:?} ===", name);
+        write_escaped(&data, &mut io::stdout());
+        true
     }
 }
 
 fn dump_archive(mut file: &File) {
-    //let io_filepath = ch.workdir().join("io");
-    //std::fs::copy(&io_filepath, "/tmp/pe-io").unwrap();
-    // let mut buf = Vec::with_capacity(4096);
     file.seek(SeekFrom::Start(0)).unwrap();
     let archive_size = file.read_u32::<LE>().unwrap();
     let response_size = file.read_u32::<LE>().unwrap();
-    // todo wtf is going on with the options
-    //let response: Response = bincode::options()
-    //    .with_fixint_encoding()
-    //    .allow_trailing_bytes()
-    //    .with_limit(response_size.into())
-    //    .deserialize_from(&mut file)
-    //    .unwrap();
+
     println!("H archive size {archive_size} response_size {response_size}");
     let response: Response = {
         let mut buf = vec![0; response_size.try_into().unwrap()];
@@ -242,10 +238,17 @@ fn dump_archive(mut file: &File) {
         }
         bincode::deserialize(&buf).unwrap()
     };
+
+    let mapping = unsafe {
+        MmapOptions::new()
+        .offset((4 + 4 + response_size).into())
+        .len(archive_size.try_into().unwrap())
+        .map(file)
+        .unwrap()
+    };
+    let mut visitor = UnpackVisitorPrinter{};
     println!("H got response {response:#?}");
-    println!("== archvive raw ==");
-    write_escaped(&mut file, archive_size, &mut io::stdout());
-    println!("\n== /archvive raw ==");
+    unpack_visitor(mapping.as_ref(), &mut visitor).unwrap();
 }
 
 
