@@ -1,7 +1,6 @@
 use std::os::fd::AsRawFd;
 use std::fs;
-use std::fs::File;
-use std::path::{Path,PathBuf};
+use std::path::{Path};
 use std::process::{Command,Stdio,Child};
 use std::os::unix::net::{UnixListener,UnixStream};
 use std::io;
@@ -9,8 +8,7 @@ use std::io;
 use std::ffi::OsString;
 use std::time::Duration;
 
-use tempfile::TempDir;
-use rand::distributions::{Alphanumeric, DistString};
+use tempfile::{TempDir,NamedTempFile};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
 use serde::Serialize;
 use libc;
@@ -19,6 +17,7 @@ use api_client;
 #[derive(Debug)]
 pub enum Error {
     WorkdirSetup,
+    TempfileSetup,
     Spawn,
     Socket,
     Api(api_client::Error),
@@ -51,9 +50,9 @@ pub struct CloudHypervisorConfig {
 pub struct CloudHypervisor {
     #[allow(dead_code)]
     workdir: TempDir,
-    log_file: Option<OsString>,
-    console_file: Option<OsString>,
-    err_file: OsString,
+    log_file: Option<NamedTempFile>,
+    console_file: Option<NamedTempFile>,
+    err_file: NamedTempFile,
     child: Child,
     #[allow(dead_code)]
     socket_listen: UnixListener,
@@ -114,16 +113,17 @@ fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
 impl CloudHypervisor {
 
     pub fn start(config: CloudHypervisorConfig) -> Result<Self, Error> {
-        // go from /tmp -> /tmp/ch-abcd1234
         let workdir = TempDir::with_prefix_in("ch-", config.workdir)
             .map_err(|_| Error::WorkdirSetup)?;
 
-        let err_file     : OsString = workdir.path().join("err").into();
-        let log_file     : OsString = workdir.path().join("log").into();
-        let console_file : OsString = workdir.path().join("console").into();
+        let err_file = NamedTempFile::with_prefix_in("err", &workdir)
+            .map_err(|_| Error::TempfileSetup)?;
+        let log_file = NamedTempFile::with_prefix_in("log", &workdir)
+            .map_err(|_| Error::TempfileSetup)?;
+        let con_file = NamedTempFile::with_prefix_in("con", &workdir)
+            .map_err(|_| Error::TempfileSetup)?;
 
         let (listener, stream) = setup_socket(workdir.path().join("sock")).ok_or(Error::Socket)?;
-        let err_file_h = File::create_new(&err_file).unwrap();
 
         let mut args = vec![];
         let child = {
@@ -131,7 +131,7 @@ impl CloudHypervisor {
             let mut x = Command::new(config.bin);
             x.stdin(Stdio::null())
              .stdout(Stdio::null())
-             .stderr(Stdio::from(err_file_h))
+             .stderr(Stdio::from(err_file.reopen().unwrap()))
              .arg("--kernel").arg(config.kernel)
              .arg("--initramfs").arg(config.initramfs)
              .arg("--cpus").arg("boot=1")
@@ -140,11 +140,10 @@ impl CloudHypervisor {
              .arg("--api-socket").arg(format!("fd={socket_fd}"));
 
             if config.console {
-                let f = console_file.to_str().unwrap();
-                x.arg("--console").arg(format!("file={f}"));
+                x.arg("--console").arg(format!("file={:?}", con_file.path()));
             }
             if let Some(ref level) = config.log_level {
-                x.arg("--log-file").arg(&log_file);
+                x.arg("--log-file").arg(log_file.path());
                 match level {
                     ChLogLevel::Warn  => { }
                     ChLogLevel::Info  => { x.arg("-v"); }
@@ -162,13 +161,13 @@ impl CloudHypervisor {
             workdir: workdir,
             err_file: err_file,
             log_file:     if config.log_level.is_some() { Some(log_file) } else { None },
-            console_file: if config.console { Some(console_file) } else { None },
+            console_file: if config.console { Some(con_file) } else { None },
             child: child,
             socket_listen: listener,
             socket_stream: stream,
             args: args,
         };
-        return Ok(ret);
+        Ok(ret)
     }
 
     pub fn api(&mut self, method: &str, command: &str, data: Option<&str>) -> Result<Option<String>, Error> {
@@ -201,12 +200,16 @@ impl CloudHypervisor {
         self.child.wait_timeout_or_kill(duration)
     }
 
-    pub fn console_file(&self) -> Option<&OsString> {
+    pub fn console_file(&self) -> Option<&NamedTempFile> {
         self.console_file.as_ref()
     }
 
-    pub fn log_file(&self) -> Option<&OsString> {
+    pub fn log_file(&self) -> Option<&NamedTempFile> {
         self.log_file.as_ref()
+    }
+
+    pub fn err_file(&self) -> &NamedTempFile {
+        &self.err_file
     }
 
     pub fn workdir(&self) -> &Path {
@@ -215,10 +218,6 @@ impl CloudHypervisor {
 
     pub fn args(&self) -> &[OsString] {
         self.args.as_slice()
-    }
-
-    pub fn err_file(&self) -> &OsString {
-        &self.err_file
     }
 
     // pub fn postmortem(self, e: Error) -> CloudHypervisorPostMortem {

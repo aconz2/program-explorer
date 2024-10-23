@@ -1,9 +1,11 @@
 use std::os::fd::{AsRawFd,OwnedFd};
 use std::fs;
 use std::fs::File;
-use std::path::Path;
-use std::ffi::{CStr,CString};
+use std::path::{Path,PathBuf};
+use std::collections::HashMap;
+use std::ffi::{CStr,CString,OsStr};
 use std::io::{Write,BufWriter};
+use std::os::unix::ffi::OsStrExt;
 
 use rustix::fs::{RawDir,FileType};
 use memmap2::MmapOptions;
@@ -33,7 +35,7 @@ const MAX_NAME_LEN: usize = 255; // max len on tmpfs
 ///   | pop:  <tag>
 ///
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 pub enum Error {
     Create,
     OpenAt,
@@ -64,10 +66,14 @@ pub enum ArchiveFormat1Tag {
     Pop = 3,
 }
 
-pub trait Visitor {
+pub trait PackVisitor {
     fn on_file(&mut self, name: &CStr, size: u64, fd: OwnedFd) -> Result<(), Error>;
     fn on_dir(&mut self, name: &CStr) -> Result<(), Error>;
     fn leave_dir(&mut self) -> Result<(), Error>;
+}
+
+pub trait UnpackVisitor {
+    fn on_file(&mut self, path: &PathBuf, data: &[u8]) -> bool;
 }
 
 fn unshare_user() -> Result<(), Error> {
@@ -120,22 +126,19 @@ fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
     Ok(u32::from_le_bytes(int_bytes.try_into().map_err(|_| Error::BadSize)?))
 }
 
-fn munch_cstr(input: &mut &[u8]) -> Result<(), Error> {
+fn read_cstr<'a>(input: &mut &'a[u8]) -> Result<&'a CStr, Error> {
     // memchr ...
-    // we don't care about an empty name, will fail on open
-    for i in 0..=MAX_NAME_LEN {
+    if input.len() == 0 { return Err(Error::BadName); }
+    if input.len() == 1 && input[0] == 0 { return Err(Error::BadName); }
+
+    for i in 1..std::cmp::min(input.len(), MAX_NAME_LEN + 1) {
         if input[i] == 0 {
-            *input = &input[i+1..];
-            return Ok(());
+            let (l, r) = input.split_at(i+1);
+            *input = r;
+            return Ok(unsafe { CStr::from_bytes_with_nul_unchecked(l) });
         }
     }
     return Err(Error::BadName);
-}
-
-fn read_cstr<'a>(input: &mut &'a [u8]) -> Result<&'a CStr, Error> {
-    let ret = unsafe { CStr::from_bytes_with_nul_unchecked(input) };
-    munch_cstr(input)?;
-    Ok(ret)
 }
 
 fn file_size<Fd: AsRawFd>(fd: &Fd) -> Result<u64, Error> {
@@ -182,7 +185,7 @@ impl PackToFileVisitor {
     }
 }
 
-impl Visitor for PackToFileVisitor {
+impl PackVisitor for PackToFileVisitor {
     fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), Error> {
         // println!("UNPACK file {name:?} {size}");
         let size_u32: u32 = size.try_into().map_err(|_| Error::Write)?;
@@ -209,7 +212,7 @@ impl Visitor for PackToFileVisitor {
 }
 
 // would love to know how this looks as an iterator at some point
-fn visit_dirc_rec<V: Visitor>(curdir: &OwnedFd, v: &mut V, depth: usize) -> Result<(), Error> {
+fn visit_dirc_rec<V: PackVisitor>(curdir: &OwnedFd, v: &mut V, depth: usize) -> Result<(), Error> {
     if depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
 
     let mut buf = Vec::with_capacity(DIRENT_BUF_SIZE);
@@ -242,13 +245,13 @@ fn visit_dirc_rec<V: Visitor>(curdir: &OwnedFd, v: &mut V, depth: usize) -> Resu
     Ok(())
 }
 
-fn visit_dirc<V: Visitor>(dir: &CStr, v: &mut V) -> Result<(), Error> {
+fn visit_dirc<V: PackVisitor>(dir: &CStr, v: &mut V) -> Result<(), Error> {
     let dirfd = opendirat_cwd(dir)?;
     visit_dirc_rec(&dirfd, v, 0)?;
     Ok(())
 }
 
-pub fn visit_dir<V: Visitor>(dir: &Path, v: &mut V) -> Result<(), Error> {
+pub fn visit_dir<V: PackVisitor>(dir: &Path, v: &mut V) -> Result<(), Error> {
     let cstr = CString::new(dir.as_os_str().as_encoded_bytes()).unwrap();
     visit_dirc(&cstr, v)
 }
@@ -261,7 +264,7 @@ pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
 
 /// deemed unsafe because we unpack to cwd with no path traversal protection, caller should ensure
 /// we are in a chroot or otherwise protected
-unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error> {
+unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error> {
     let mut stack: Vec<OwnedFd> = Vec::with_capacity(32);  // always non-empty
     stack.push(starting_dir);
 
@@ -286,8 +289,7 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                 match cur.get(0).map(|x| x.try_into()) {
                     Some(Ok(ArchiveFormat1Tag::Pop)) => {
                         // fast path for empty dir, never open the dir or push it
-                        // advance past Pop
-                        cur = &cur[1..];
+                        cur = &cur[1..]; // advance past Pop
                     },
                     Some(Ok(_)) => {
                         stack.push(openpathat(parent, name)?);
@@ -305,16 +307,83 @@ unsafe fn unpack_to_cwd(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                 return Err(Error::BadTag);
             },
             None => {
-                // idk if I like this
                 return (stack.len() == 1).then_some(()).ok_or(Error::ArchiveTruncated);
-                // if stack.len() != 1 {
-                //     return Err(Error::ArchiveTruncated);
-                // } else {
-                //     return Ok(())
-                // }
             }
         }
     }
+}
+
+
+// duplicated but w/e
+pub fn unpack_visitor<V: UnpackVisitor>(data: &[u8], v: &mut V) -> Result<(), Error> {
+    let mut path = PathBuf::new();
+    let mut depth = 0;
+    let mut cur = data;
+    loop {
+        match cur.get(0).map(|x| x.try_into()) {
+            Some(Ok(ArchiveFormat1Tag::File)) => {
+                cur = &cur[1..];
+                let name = read_cstr(&mut cur)?;
+                let len = read_le_u32(&mut cur)? as usize;
+                if len > cur.len() { return Err(Error::ArchiveTruncated); }
+                let data = &cur[..len];
+                path.push(OsStr::from_bytes(name.to_bytes()));
+                if !v.on_file(&path, data) { return Ok(()); }
+                path.pop();
+                cur = &cur[len..];
+            },
+            Some(Ok(ArchiveFormat1Tag::Dir)) => {
+                cur = &cur[1..];
+                let name = read_cstr(&mut cur)?;
+                path.push(OsStr::from_bytes(name.to_bytes()));
+                depth += 1;
+            },
+            Some(Ok(ArchiveFormat1Tag::Pop)) => {
+                cur = &cur[1..];
+                if depth == 0 { return Err(Error::EmptyStack); }
+                depth -= 1;
+                path.pop();
+            },
+            Some(Err(_)) => {
+                return Err(Error::BadTag);
+            },
+            None => {
+                return (depth == 0).then_some(()).ok_or(Error::ArchiveTruncated);
+            }
+        }
+    }
+}
+
+struct UnpackToHashmap {
+    map: HashMap<PathBuf, Vec<u8>>,
+}
+
+impl UnpackToHashmap {
+    fn new() -> Self {
+        Self {map: HashMap::new()}
+    }
+
+    fn into_hashmap(self) -> HashMap<PathBuf, Vec<u8>> {
+        self.map
+    }
+}
+
+impl UnpackVisitor for UnpackToHashmap {
+    fn on_file(&mut self, path: &PathBuf, data: &[u8]) -> bool {
+        self.map.insert(path.clone(), data.to_vec());
+        true
+    }
+}
+
+pub fn unpack_to_hashmap(data: &[u8]) -> Result<HashMap<PathBuf, Vec<u8>>, Error> {
+    let mut visitor = UnpackToHashmap::new();
+    unpack_visitor(data, &mut visitor)?;
+    Ok(visitor.into_hashmap())
+}
+
+pub fn unpack_file_to_hashmap(file: File) -> Result<HashMap<PathBuf, Vec<u8>>, Error> {
+    let mmap = unsafe { MmapOptions::new().map(&file).map_err(|_| Error::Mmap)? };
+    unpack_to_hashmap(mmap.as_ref())
 }
 
 pub fn unpack_file_to_dir_with_unshare_chroot(file: File, dir: &Path) -> Result<(), Error> {
@@ -328,7 +397,7 @@ pub fn unpack_data_to_dir_with_unshare_chroot(data: &[u8], dir: &Path) -> Result
 
     let starting_dir = opendirat_cwd(c".")?;
 
-    unsafe { unpack_to_cwd(data, starting_dir) }
+    unsafe { unpack_to_dir(data, starting_dir) }
 }
 
 #[cfg(test)]
@@ -340,6 +409,7 @@ mod tests {
     use std::fs;
     //use std::thread;
     use std::process::Command;
+    use std::io::{Seek,SeekFrom};
 
     use rand;
     use rand::distributions::DistString;
@@ -389,6 +459,42 @@ mod tests {
     }
 
     #[test]
+    fn read_cstr_good() {
+        {
+            let mut buf = b"foo\0".as_slice();
+            assert_eq!(c"foo", read_cstr(&mut buf).unwrap());
+            assert_eq!(b"", buf);
+        }
+        {
+            let mut buf = b"foo\0more".as_slice();
+            assert_eq!(c"foo", read_cstr(&mut buf).unwrap());
+            assert_eq!(b"more", buf);
+        }
+        {
+            let mut buf = [97u8; MAX_NAME_LEN + 1];
+            buf[buf.len() - 1] = 0;
+            read_cstr(&mut buf.as_slice()).unwrap();
+        }
+    }
+
+    #[test]
+    fn read_cstr_bad() {
+        {
+            let mut buf = b"\0foo".as_slice();
+            assert_eq!(Error::BadName, read_cstr(&mut buf).unwrap_err());
+        }
+        {
+            let mut buf = b"foo".as_slice();
+            assert_eq!(Error::BadName, read_cstr(&mut buf).unwrap_err());
+        }
+        {
+            let mut buf = [97u8; MAX_NAME_LEN + 2];
+            buf[buf.len() - 1] = 0;
+            assert_eq!(Error::BadName, read_cstr(&mut buf.as_slice()).unwrap_err());
+        }
+    }
+
+    #[test]
     fn basic_pack() {
         let td1 = TempDir::new()
             .file("file-1", b"hello world")
@@ -397,9 +503,15 @@ mod tests {
             .file("adir/another-file", b"some data");
         // let td2 = TempDir::new().unwrap();
 
-        let f = pack_dir_to_file(td1.as_ref(), tempfile()).unwrap();
+        let mut f = pack_dir_to_file(td1.as_ref(), tempfile()).unwrap();
         assert!(f.metadata().unwrap().len() > 0);
 
+        f.seek(SeekFrom::Start(0)).unwrap();
+        let hm = unpack_file_to_hashmap(f).unwrap();
+        assert_eq!(hm.len(), 3);
+        assert_eq!(hm.get(Path::new("file-1")).unwrap(), b"hello world");
+        assert_eq!(hm.get(Path::new("file-2")).unwrap(), b"yooo");
+        assert_eq!(hm.get(Path::new("adir/another-file")).unwrap(), b"some data");
         // can shell out to actual program
         // but then annoyingly we have to link the tempfile
         // println!("{}", std::env::current_exe().unwrap().display());

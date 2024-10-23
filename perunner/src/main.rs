@@ -8,7 +8,7 @@ use std::path::Path;
 use pearchive::pack_dir_to_file;
 use peinit;
 use peinit::{Response};
-use waitid_timeout::{WaitIdDataOvertime,Siginfo};
+//use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 
 use tempfile::NamedTempFile;
 use oci_spec::runtime as oci_runtime;
@@ -18,7 +18,7 @@ use bincode;
 use byteorder::{WriteBytesExt,ReadBytesExt,LE};
 
 mod cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,ChLogLevel};
+use crate::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
 
 mod worker;
 // use crate::worker;
