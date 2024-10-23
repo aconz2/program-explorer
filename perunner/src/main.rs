@@ -19,6 +19,9 @@ use byteorder::{WriteBytesExt,ReadBytesExt,LE};
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,ChLogLevel};
 
+mod worker;
+// use crate::worker;
+
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 const UID: u32 = 1000;
 const NIDS: u32 = 1000; // size of uid_gid_map

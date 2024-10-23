@@ -13,13 +13,20 @@ use rand::distributions::{Alphanumeric, DistString};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
 use serde::Serialize;
 use libc;
+use api_client;
 
 #[derive(Debug)]
 pub enum Error {
     WorkdirSetup,
     Spawn,
     Socket,
-    //Api,
+    Api(api_client::Error),
+    Overtime,
+    Wait,
+}
+
+impl From<api_client::Error> for Error {
+    fn from(e: api_client::Error) -> Self { Error::Api(e) }
 }
 
 pub enum ChLogLevel {
@@ -50,6 +57,7 @@ pub struct CloudHypervisor {
     socket_listen: UnixListener,
     socket_stream: UnixStream,
     args: Vec<OsString>,
+    //pidfd:
 }
 
 struct TempDir {
@@ -150,11 +158,11 @@ impl CloudHypervisor {
         return Ok(ret);
     }
 
-    pub fn api(&mut self, method: &str, command: &str, data: Option<&str>) -> Result<Option<String>, api_client::Error> {
-        api_client::simple_api_full_command_and_response(&mut self.socket_stream, method, command, data)
+    pub fn api(&mut self, method: &str, command: &str, data: Option<&str>) -> Result<Option<String>, Error> {
+        Ok(api_client::simple_api_full_command_and_response(&mut self.socket_stream, method, command, data)?)
     }
 
-    fn add_pmem<P: AsRef<Path>>(&mut self, file: P, discard_writes: bool) -> Result<Option<String>, api_client::Error> {
+    fn add_pmem<P: AsRef<Path>>(&mut self, file: P, discard_writes: bool) -> Result<Option<String>, Error> {
         #[derive(Serialize)]
         struct AddPmem<'a> {
             file: &'a Path,
@@ -164,11 +172,11 @@ impl CloudHypervisor {
         self.api("PUT", "vm.add-pmem", Some(&data))
     }
 
-    pub fn add_pmem_ro<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, api_client::Error> {
+    pub fn add_pmem_ro<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, Error> {
         self.add_pmem(file, true)
     }
 
-    pub fn add_pmem_rw<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, api_client::Error> {
+    pub fn add_pmem_rw<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, Error> {
         self.add_pmem(file, false)
     }
 
