@@ -10,6 +10,8 @@ pub struct Config {
     pub timeout: Duration,
     pub nids: u32,
     pub stdin: Option<String>,
+    pub strace: bool,
+    pub crun_debug: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

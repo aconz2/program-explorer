@@ -1,6 +1,6 @@
 use std::os::fd::AsRawFd;
 use std::fs;
-use std::path::{Path};
+use std::path::{Path,PathBuf};
 use std::process::{Command,Stdio,Child};
 use std::os::unix::net::{UnixListener,UnixStream};
 use std::io;
@@ -8,7 +8,7 @@ use std::io;
 use std::ffi::OsString;
 use std::time::Duration;
 
-use tempfile::{TempDir,NamedTempFile};
+use tempfile::{NamedTempFile};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
 use serde::Serialize;
 use libc;
@@ -41,7 +41,6 @@ pub enum ChLogLevel {
 }
 
 pub struct CloudHypervisorConfig {
-    pub workdir: OsString,
     pub bin: OsString,
     pub kernel: OsString,
     pub initramfs: OsString,
@@ -51,8 +50,6 @@ pub struct CloudHypervisorConfig {
 }
 
 pub struct CloudHypervisor {
-    #[allow(dead_code)]
-    workdir: TempDir,
     log_file: Option<NamedTempFile>,
     con_file: Option<NamedTempFile>,
     err_file: NamedTempFile,
@@ -64,23 +61,37 @@ pub struct CloudHypervisor {
     //pidfd:
 }
 
-// TODO kinda weird b/c if ch doesn't even start this is useless
-#[derive(Default)]
-pub struct CloudHypervisorPostMortem {
-    pub error: Error,
-    pub workdir: Option<TempDir>,
+pub struct CloudHypervisorLogs {
     pub log_file: Option<NamedTempFile>,
     pub con_file: Option<NamedTempFile>,
     pub err_file: Option<NamedTempFile>,
+}
+
+pub struct CloudHypervisorPostMortem {
+    pub error: Error,
+    pub logs: CloudHypervisorLogs,
     pub args: Option<Vec<OsString>>,
 }
 
 impl From<Error> for CloudHypervisorPostMortem {
     fn from(e: Error) -> Self {
-        Self { error: e, ..Default::default() }
+        Self {
+            error: e,
+            args: None,
+            logs: CloudHypervisorLogs {
+                log_file: None,
+                con_file: None,
+                err_file: None,
+            }
+        }
     }
 }
 
+fn rand_path_prefix(prefix: &str) -> PathBuf {
+    use rand::distributions::{Alphanumeric,DistString};
+    let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
+    std::env::temp_dir().join(format!("{}{}", prefix, rng))
+}
 // struct TempDir {
 //     name: OsString
 // }
@@ -117,23 +128,22 @@ fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
         let ret = libc::fcntl(listener.as_raw_fd(), libc::F_SETFD, 0);
         if ret < 0 { return None; }
     }
-    return Some((listener, stream));
+    let _ = fs::remove_file(&path); // unlink since we've already connected
+    Some((listener, stream))
 }
 
 impl CloudHypervisor {
 
     pub fn start(config: CloudHypervisorConfig) -> Result<Self, Error> {
-        let workdir = TempDir::with_prefix_in("ch-", config.workdir)
-            .map_err(|_| Error::WorkdirSetup)?;
-
-        let err_file = NamedTempFile::with_prefix_in("err", &workdir)
+        let err_file = NamedTempFile::with_prefix("err-")
             .map_err(|_| Error::TempfileSetup)?;
-        let log_file = NamedTempFile::with_prefix_in("log", &workdir)
+        let log_file = NamedTempFile::with_prefix("log-")
             .map_err(|_| Error::TempfileSetup)?;
-        let con_file = NamedTempFile::with_prefix_in("con", &workdir)
+        let con_file = NamedTempFile::with_prefix("con-")
             .map_err(|_| Error::TempfileSetup)?;
 
-        let (listener, stream) = setup_socket(workdir.path().join("sock")).ok_or(Error::Socket)?;
+        let (listener, stream) = setup_socket(rand_path_prefix("sock-"))
+            .ok_or(Error::Socket)?;
 
         let mut args = vec![];
         let child = {
@@ -168,7 +178,6 @@ impl CloudHypervisor {
         };
 
         let ret = CloudHypervisor {
-            workdir: workdir,
             err_file: err_file,
             log_file: if config.log_level.is_some() { Some(log_file) } else { None },
             con_file: if config.console { Some(con_file) } else { None },
@@ -222,10 +231,6 @@ impl CloudHypervisor {
         &self.err_file
     }
 
-    pub fn workdir(&self) -> &Path {
-        self.workdir.as_ref()
-    }
-
     pub fn args(&self) -> &[OsString] {
         self.args.as_slice()
     }
@@ -234,12 +239,22 @@ impl CloudHypervisor {
         let _ = self.kill();
         CloudHypervisorPostMortem {
             error: e,
-            workdir: Some(self.workdir),
+            args: Some(self.args),
+            logs: CloudHypervisorLogs {
+                log_file: self.log_file,
+                con_file: self.con_file,
+                err_file: Some(self.err_file),
+            },
+
+        }
+    }
+
+    pub fn into_logs(mut self) -> CloudHypervisorLogs {
+        let _ = self.kill();
+        CloudHypervisorLogs {
             log_file: self.log_file,
             con_file: self.con_file,
             err_file: Some(self.err_file),
-            args: Some(self.args),
-
         }
     }
 }

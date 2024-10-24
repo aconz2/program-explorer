@@ -12,7 +12,7 @@ use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
 use tempfile::NamedTempFile;
 
 use crate::cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem};
+use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem,CloudHypervisorLogs};
 use peinit;
 
 type JoinHandleT = JoinHandle<()>;
@@ -29,6 +29,7 @@ pub struct Input {
 pub struct Output {
     pub id: u64,
     pub io_file: NamedTempFile,
+    pub ch_logs: CloudHypervisorLogs,
 }
 
 // TODO I guess if we get an error, then we'll drop the CloudHypervisor thing
@@ -119,6 +120,7 @@ pub fn run(input: Input) -> OutputResult {
     Ok(Output{
         id: input.id,
         io_file: input.io_file,
+        ch_logs: ch.into_logs(),
     })
 }
 

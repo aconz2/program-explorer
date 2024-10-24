@@ -5,18 +5,18 @@ use std::io::{Write,Seek,SeekFrom,Read};
 use std::ffi::OsString;
 use std::path::{Path,PathBuf};
 
-use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
-use peinit;
-use peinit::{Response};
-//use waitid_timeout::{WaitIdDataOvertime,Siginfo};
-
 use tempfile::NamedTempFile;
 use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
 use serde_json;
 use bincode;
 use byteorder::{WriteBytesExt,ReadBytesExt,LE};
-use memmap2::MmapOptions;
+use memmap2::{Mmap,MmapOptions};
+use clap::{Parser};
+
+use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
+use peinit;
+use peinit::{Response};
 
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
@@ -170,7 +170,7 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
 //     <archive size : u32le> [ <config size> <config> <archive> ] <padding>
 
 // how do you get away from this P1 P2 thing
-fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2, config: &peinit::Config) {
+fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: Option<P1>, file: P2, config: &peinit::Config) {
     let mut f = File::create(file).unwrap();
     let config_bytes = bincode::serialize(&config).unwrap();
     if true {
@@ -182,7 +182,11 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: P1, file: P2
     f.write_u32::<LE>(config_size).unwrap();
     f.write_all(config_bytes.as_slice()).unwrap();
     let archive_start_pos = f.stream_position().unwrap();
-    let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
+    let mut f = if let Some(dir) = dir {
+        pack_dir_to_file(dir.as_ref(), f).unwrap()
+    } else {
+        f
+    };
     let archive_end_pos = f.stream_position().unwrap();
     let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
     f.seek(SeekFrom::Start(0)).unwrap();
@@ -222,12 +226,11 @@ impl UnpackVisitor for UnpackVisitorPrinter {
     }
 }
 
-fn dump_archive(mut file: &File) {
+fn parse_response(mut file: &NamedTempFile) -> (Response, Mmap) {
     file.seek(SeekFrom::Start(0)).unwrap();
     let archive_size = file.read_u32::<LE>().unwrap();
     let response_size = file.read_u32::<LE>().unwrap();
 
-    println!("H archive size {archive_size} response_size {response_size}");
     let response: Response = {
         let mut buf = vec![0; response_size.try_into().unwrap()];
         file.read_exact(buf.as_mut_slice()).unwrap();
@@ -246,45 +249,88 @@ fn dump_archive(mut file: &File) {
         .map(file)
         .unwrap()
     };
+
+    (response, mapping)
+}
+
+fn dump_archive(mmap: &Mmap) {
     let mut visitor = UnpackVisitorPrinter{};
-    println!("H got response {response:#?}");
-    unpack_visitor(mapping.as_ref(), &mut visitor).unwrap();
+    unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
 }
 
 fn dump_file<F: Read>(name: &str, file: &mut F) {
     println!("=== {} ===", name);
     let _ = io::copy(file, &mut io::stdout());
 }
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    // ugh where should things get stored
+    #[arg(long, default_value = "../cloud-hypervisor-static")]
+    ch: OsString,
 
+    #[arg(long, default_value = "../vmlinux")]
+    kernel: OsString,
+
+    #[arg(long, default_value = "../initramfs")]
+    initramfs: OsString,
+
+    #[arg(long, default_value = "../gcc-14.1.0.sqfs")]
+    rootfs: OsString,
+
+    #[arg(long, help = "name of dir to use as input dir")]
+    input: Option<PathBuf>,
+
+    #[arg(long, help = "name of file in input dir to use as stdin")]
+    stdin: Option<String>,
+
+    #[arg(long, default_value_t = 1000, help = "timeout (ms) crun waits for the container")]
+    timeout: u64,
+
+    #[arg(long, default_value_t = 200, help = "timeout (ms) the host waits in addition to timeout")]
+    ch_timeout: u64,
+
+    #[arg(long, help = "enable ch console")]
+    console: bool,
+
+    #[arg(long, help = "strace the crun")]
+    strace: bool,
+
+    #[arg(long, help = "pass --debug to crun")]
+    crun_debug: bool,
+
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
 
 fn main() {
+    let args = {
+        let mut args = Args::parse();
+        if args.strace || args.crun_debug {
+            args.console = true;
+        }
+        args
+    };
+    let cwd = std::env::current_dir().unwrap();
 
-    let ch_binpath:     OsString = "/home/andrew/Repos/program-explorer/cloud-hypervisor-static".into();
-    // let ch_binpath:     OsString = "/home/andrew/Repos/cloud-hypervisor/target/x86_64-unknown-linux-musl/debug/cloud-hypervisor".into();
-    let kernel_path:    OsString = "/home/andrew/Repos/linux/vmlinux".into();
-    let initramfs_path: OsString = "/home/andrew/Repos/program-explorer/initramfs".into();
-    let rootfs                   = "/home/andrew/Repos/program-explorer/gcc-14.1.0.sqfs";
-    let inputdir:       OsString = "/home/andrew/Repos/program-explorer/inputdir".into();
+    // TODO This will disappear when we grab the image spec from the sqfs
+    // I think we should do that now
     let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
-    let timeout = Duration::from_millis(2000);
-    let ch_timeout = timeout + Duration::from_millis(200);
 
-    use std::env;
-    let args: Vec<_> = env::args().collect();
-    let run_args = &args[1..];
+    let timeout = Duration::from_millis(args.timeout);
+    let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
     let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
-    let runtime_spec = create_runtime_spec(&image_spec, run_args).unwrap();
+    let runtime_spec = create_runtime_spec(&image_spec, &args.args).unwrap();
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
     println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
     let ch_config = CloudHypervisorConfig {
-        workdir  : "/tmp".into(),
-        bin      : ch_binpath,
-        kernel   : kernel_path,
-        initramfs: initramfs_path,
+        bin      : cwd.join(args.ch).into(),
+        kernel   : cwd.join(args.kernel).into(),
+        initramfs: cwd.join(args.initramfs).into(),
         log_level: Some(ChLogLevel::Warn),
-        console  : true,
+        console  : args.console,
         keep_args: true,
     };
 
@@ -293,34 +339,44 @@ fn main() {
         oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
         uid_gid: UID,
         nids: NIDS,
-        stdin: Some("foo".to_string()),
+        stdin: args.stdin,
+        strace: args.strace,
+        crun_debug: args.crun_debug,
     };
 
     let io_file = NamedTempFile::new().unwrap();
-    create_pack_file_from_dir(&inputdir, &io_file, &pe_config);
+    create_pack_file_from_dir(args.input, &io_file, &pe_config);
 
     let worker_input = worker::Input {
         id: 0,
-        ch_config: ch_config,
         pe_config: pe_config,
-        rootfs: rootfs.into(),
-        io_file: io_file,
+        ch_config: ch_config,
         ch_timeout: ch_timeout,
+        io_file: io_file,
+        rootfs: cwd.join(args.rootfs).into(),
     };
 
     match worker::run(worker_input) {
-        Ok(worker::Output{id, mut io_file}) => {
-            println!("id {id}");
-            dump_archive(io_file.as_file_mut());
+        Ok(worker::Output{mut io_file, ch_logs, id}) => {
+            let _ = id;
+            if let Some(mut err_file) = ch_logs.err_file { dump_file("ch err", &mut err_file); }
+            if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
+
+            let (response, archive_map) = parse_response(&mut io_file);
+            println!("response {:#?}", response);
+
+            dump_archive(&archive_map);
+
         }
         Err(e) => {
             println!("oh no something went bad {:?}", e.error);
             if let Some(args) = e.args {
                 println!("launched ch with args {:?}", args);
             }
-            if let Some(mut err_file) = e.err_file { dump_file("ch log", &mut err_file); }
-            if let Some(mut log_file) = e.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = e.con_file { dump_file("ch con", &mut con_file); }
+            if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
+            if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = e.logs.con_file { dump_file("ch con", &mut con_file); }
         }
     }
 

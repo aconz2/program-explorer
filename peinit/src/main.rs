@@ -285,6 +285,14 @@ fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) ->
     }
 }
 
+fn cat_file_if_exists<P: AsRef<Path>>(name: &str, file: P) {
+    if let Ok(mut f ) = File::open(file) {
+        println!("=== {name} ===");
+        let _ = io::copy(&mut f, &mut io::stdout());
+        println!("======");
+    }
+}
+
 fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     let outfile = File::create_new("/run/output/stdout").unwrap();
     let errfile = File::create_new("/run/output/stderr").unwrap();
@@ -306,13 +314,18 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     }).flatten().unwrap_or_else(|| Stdio::null());
 
     let start = Instant::now();
-    let mut cmd = Command::new("/bin/crun");
-    //let mut cmd = Command::new("strace"); cmd.arg("-e").arg("write,openat,unshare,clone,clone3").arg("-f").arg("-o").arg("/run/crun.strace").arg("--decode-pids=comm").arg("/bin/crun");
-    //let exit_status = Command::new("/bin/busybox").arg("unshare").arg("-r").arg("/bin/crun")
-        // TODO can we get debug info on another fd?
+    let mut cmd = if config.strace {
+        Command::new("/bin/strace")
+    } else {
+        Command::new("/bin/crun")
+    };
+    if config.strace {
+        cmd.arg("-e").arg("write,openat,unshare,clone,clone3").arg("-f").arg("-o").arg("/run/crun.strace").arg("--decode-pids=comm").arg("/bin/crun");
+    }
+    if config.crun_debug {
+        cmd.arg("--debug").arg("--log=/run/crun.log");
+    }
     cmd
-        .arg("--debug")
-        .arg("--log=/run/crun.log")
         .arg("run")
         .arg("-b") // --bundle
         .arg("/run/bundle")
@@ -332,10 +345,9 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     let elapsed = start.elapsed();
     println!("V crun ran in {elapsed:?}");
 
-    if Path::new("/run/crun.strace").exists() {
-        println!("== crun.strace ==\n{}\n====", fs::read_to_string("/run/crun.strace").unwrap());
-    }
-    println!("== crun.log ==\n{}\n====", fs::read_to_string("/run/crun.log").unwrap());
+    if config.strace { cat_file_if_exists("crun.strace", "/run/crun.strace"); }
+    if config.crun_debug {cat_file_if_exists("crun.log", "/run/crun.log"); }
+
     if !exit_status.success() {
         // println!("V crun stdout");
         // io::copy(&mut File::open("/run/output/stdout").unwrap(), &mut io::stdout());

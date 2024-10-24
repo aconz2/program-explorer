@@ -350,3 +350,7 @@ export CFLAGS='-static -static-libgcc -Wl,-static'
 make -j8
 
 crun can change the container process uid_map because it is in the parent user namespace
+
+using umoci: pretty slow to do the unpacking...
+skopeo copy docker://library/gcc:14.1.0 oci:/tmp/gcc14:14.1.0
+./umoci unpack --rootless --uid-map 0:1000:1000 --gid-map 0:1000:1000 --image /tmp/gcc14:14.1.0 /tmp/rootfs

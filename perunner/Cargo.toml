@@ -22,3 +22,4 @@ crossbeam = {version = "0.8.4", features = ["crossbeam-channel"] }
 nix = { version = "0.29.0", features = ["sched"] }
 tempfile = "3.13.0"
 memmap2 = "0.9.5"
+clap = { version = "4.5.20", features = ["derive"] }
