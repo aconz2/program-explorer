@@ -353,4 +353,38 @@ crun can change the container process uid_map because it is in the parent user n
 
 using umoci: pretty slow to do the unpacking...
 skopeo copy docker://library/gcc:14.1.0 oci:/tmp/gcc14:14.1.0
+skopeo inspect containers-storage:localhost/maggie-rstudio | less
 ./umoci unpack --rootless --uid-map 0:1000:1000 --gid-map 0:1000:1000 --image /tmp/gcc14:14.1.0 /tmp/rootfs
+
+okay trying crane
+→ wget https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz
+https://github.com/google/go-containerregistry
+crane config docker.io/library/gcc:14.1.0
+# pulls and saves single layer tar
+crane export docker.io/library/gcc:14.1.0 exportgcc14.1.0.tar
+# pulls and saves single tar
+crane pull docker.io/library/gcc:14.1.0 gcc14.1.0.tar
+# pulls and saves in oci format
+crane pull --format=oci docker.io/library/gcc:14.1.0 gcc14.1.0.tar
+# flatten saved image
+# but I guess it can't do so for an oci folder with layer sharing??
+crane export - gcc-flattened.14.1.0.tar < gcc14.1.0.tar
+when doing crane pull --format=oci it defaults to pulling all architectures!
+okay still can I do a pull with layer caching without duplicating?
+crane pull --format=oci --platform linux/amd64 --cache_path layers docker.io/library/gcc:14.1.0 gcc14again
+this at least uses copy_file_range so btrfs should not actually copy
+
+created a service account with "Artifact Registry Writer"
+downloaded key, then
+→ cat ~/Downloads/compute-247219-1b24685cd41f.json | podman login -u _json_key --password-stdin https://us-central1-docker.pkg.dev
+# podman build -f whiteouttest.Containerfile -t whiteouttest:001
+→ podman push whiteouttest:001 us-central1-docker.pkg.dev/compute-247219/testingrepo/whiteouttest:001
+
+okay so on gcr if we push a layer with an opaque whiteout it actually does run correctly
+
+→ skopeo copy containers-storage:localhost/whiteouttest:001 docker-archive:whiteout.tar
+→ crane export - - < whiteout.tar | tar tvf -
+
+crane confirmed does not support opaque whiteouts
+
+okay so https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go#L297 has what I need, lets write a cmdline tool to use that

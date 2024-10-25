@@ -110,7 +110,9 @@ dependencies = [
 
 [[package]]
 name = "mio-pidfd"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bc09c1b60bbc6fcec345a6bfac1223a9268ae1f7ceeeda1fb71b84fe167e638"
 dependencies = [
  "libc",
  "mio",
