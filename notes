@@ -388,3 +388,6 @@ okay so on gcr if we push a layer with an opaque whiteout it actually does run c
 crane confirmed does not support opaque whiteouts
 
 okay so https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go#L297 has what I need, lets write a cmdline tool to use that
+
+go mod init peimage
+add deps in import, then go mod tidy
