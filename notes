@@ -391,3 +391,6 @@ okay so https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go#L297 
 
 go mod init peimage
 add deps in import, then go mod tidy
+
+→ crane pull gcc:14.1.0 --platform linux/amd64 --format oci --annotate-ref oci
+
