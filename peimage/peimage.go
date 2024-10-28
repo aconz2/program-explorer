@@ -4,23 +4,37 @@ package main
 import (
 	"archive/tar"
     "fmt"
+    "bytes"
     "os"
 	"errors"
     "io"
+    "strings"
 	"path/filepath"
+    "encoding/json"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	//"github.com/google/go-containerregistry/pkg/v1/mutate"
 
-    "github.com/sylabs/oci-tools/pkg/mutate"
+    sylabsmutate "github.com/sylabs/oci-tools/pkg/mutate"
 )
 
 const ImageRefName = "org.opencontainers.image.ref.name"
 
 type HeaderXform func(*tar.Header) (error)
+
+type PEImageIndexEntry struct {
+    Rootfs string         `json:"rootfs"`
+    Config *v1.ConfigFile `json:"config"`
+}
+
+// only fields with capital/exported are put in JSON
+type PEImageIndex struct {
+    Entries []PEImageIndexEntry `json:"entries"`
+}
 
 func OffsetUidGid(offset int) HeaderXform {
     return func(header *tar.Header) error {
@@ -38,7 +52,7 @@ func PrependPath(s string) HeaderXform {
 }
 
 func flatten(writer *tar.Writer, img v1.Image, fs ...HeaderXform) (error) {
-    simg, err := mutate.Squash(img)
+    simg, err := sylabsmutate.Squash(img)
     if err != nil {
         return fmt.Errorf("squashing img %w", err)
     }
@@ -88,6 +102,63 @@ func flatten(writer *tar.Writer, img v1.Image, fs ...HeaderXform) (error) {
     return nil
 }
 
+func tryShortenDigest(l int, digests []string) bool {
+    acc := make(map[string]bool)
+    for _, digest := range digests {
+        x := digest[:l]
+        if _, ok := acc[x]; ok {
+            return false
+        }
+        acc[x] = true
+    }
+    return true
+}
+
+func shortenDigest(hashes map[string]v1.Hash) map[v1.Hash]string {
+    ret := make(map[v1.Hash]string)
+    if len(hashes) == 0 {
+        return ret
+    }
+    digests := make([]string, 0, len(hashes))
+    hashes_arr := make([]v1.Hash, 0, len(hashes))
+    length := 0
+    for _, hash := range hashes {
+        x := hash.String()
+        if !strings.HasPrefix(x, "sha256:") {
+            panic(x)
+        }
+        x = x[len("sha256:"):]
+        digests = append(digests, x)
+        hashes_arr = append(hashes_arr, hash)
+        length = max(length, len(x))
+    }
+    shortLen := 0
+    for i := 1; i < length; i += 1 {
+        if tryShortenDigest(i, digests) {
+            shortLen = i
+            break
+        }
+    }
+    if shortLen == 0 {
+        panic("should have succeeded")
+    }
+    fmt.Fprintf(os.Stderr, "shortened to %d chars\n", shortLen)
+    for i, hash := range hashes_arr {
+        ret[hash] = digests[i][:shortLen]
+    }
+    return ret
+}
+
+type ExportData struct {
+    arg string // name passed by user
+    ref name.Reference // parsed name
+    refName string // ImageRefName ie org.opencontainers.image.ref.name like index.docker.io/library/gcc:13.2.0
+    digest v1.Hash // image digest
+    image v1.Image
+    config *v1.ConfigFile
+    rootfs string // shortened digest without sha256 that is the rootfs in the tar stream
+}
+
 func mainExport(args []string) (error) {
     if len(args) < 2 {
         return fmt.Errorf("expected <oci dir> <names...>")
@@ -101,40 +172,98 @@ func mainExport(args []string) (error) {
     if err != nil {
         return fmt.Errorf("getting image index %w", err)
     }
-    mapping, err := makeImageIndexRefName(idx)
+    mapping, err := makeImageIndexRefName(idx) // index.docker.io/library/gcc:14.1.0 -> v1.Hash
     if err != nil {
         return fmt.Errorf("making image index map %w", err)
     }
-    // TODO we need to get the config from the index too
-    imgs := make(map[string]v1.Image)
-    for _, ref := range args[1:] {
-        parsed, err := name.ParseReference(ref)
+    shortMapping := shortenDigest(mapping)    // v1.Hash -> "abcdefg"
+
+    entries := make([]PEImageIndexEntry, 0, len(args) - 1)
+    data := make([]ExportData, 0, len(args) - 1)
+    seen := make(map[string]bool)
+
+    for _, arg := range args[1:] {
+        parsed, err := name.ParseReference(arg)
         if err != nil {
             return fmt.Errorf("parsing ref %w", err)
         }
-        digest, ok := mapping[parsed.Name()]
-        if !ok {
-            return fmt.Errorf("missing %s: %s", ref, parsed.Name())
+        refName := parsed.Name()
+        if parsed.Identifier() == "latest" {
+            return fmt.Errorf("latest tag is not allowed %s: %s", arg, refName)
         }
+        digest, ok := mapping[refName]
+        if !ok {
+            return fmt.Errorf("missing %s: %s", arg, refName)
+        }
+        if _, ok := seen[refName]; ok {
+            return fmt.Errorf("duplicate name %s: %s", arg, refName)
+        }
+        seen[refName] = true
         img, err := idx.Image(digest)
         if err != nil {
-            return fmt.Errorf("getting img %s %w", ref, err)
+            return fmt.Errorf("getting img %s %w", arg, err)
         }
-        fmt.Fprintf(os.Stderr, "will write %s: %s %v\n", ref, parsed.Name(), digest)
-        imgs[parsed.Name()] = img
+        fmt.Fprintf(os.Stderr, "will write %s: %s %v\n", arg, refName, digest)
+        //imgs[refName] = img
+        config, err := img.ConfigFile()
+        if err != nil {
+            return fmt.Errorf("getting config %s %w", arg, err)
+        }
+        rootfs, ok := shortMapping[digest]
+        if !ok {
+            panic("should have gotten a short mapping")
+        }
+        entries = append(entries, PEImageIndexEntry {
+            Rootfs: rootfs,
+            Config: config,
+        })
+        data = append(data, ExportData {
+            arg: arg,
+            ref: parsed,
+            refName: refName,
+            digest: digest,
+            image: img,
+            config: config,
+            rootfs: rootfs,
+        })
     }
 
     tarWriter := tar.NewWriter(os.Stdout)
     defer tarWriter.Close()
 
-    for refName, img := range imgs {
-        digest, err := img.Digest()
+    peidx := PEImageIndex { Entries: entries }
+    peidxBuf, err := json.Marshal(&peidx)
+    if err != nil {
+        return fmt.Errorf("error writing index.json")
+    }
+    fmt.Fprintf(os.Stderr, "index.json is %s\n", peidxBuf)
+
+    indexHeader := &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "index.json",
+		Mode:     0o400,
+		Size:     int64(len(peidxBuf)),
+		Format:   tar.FormatPAX,
+        Uid:      1000,
+        Gid:      1000,
+	}
+
+    if err := tarWriter.WriteHeader(indexHeader); err != nil {
+        return fmt.Errorf("writing tar index.json header: %w", err)
+    }
+    if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
+        return fmt.Errorf("writing tar index.json file: %w", err)
+    }
+
+    // TODO we have a bug when the different tags map to the same digest
+    // it should be fine to share rootfs
+    // we just need to dedup and handle that before calling shortenDigest
+    // except we can't really do that because we aren't actually checking the layer identities
+    // before squashing them
+    for _, item := range data {
+        err = flatten(tarWriter, item.image, OffsetUidGid(1000), PrependPath(item.rootfs))
         if err != nil {
-            return fmt.Errorf("img digest %s %w", refName, err)
-        }
-        err = flatten(tarWriter, img, OffsetUidGid(1000), PrependPath(digest.String()))
-        if err != nil {
-            return fmt.Errorf("flattening %s %w", refName, err)
+            return fmt.Errorf("flattening %s %w", item.refName, err)
         }
     }
     return nil
