@@ -2,9 +2,12 @@ package main
 
 // v1 "github.com/google/go-containerregistry/pkg/v1"
 import (
+	"archive/tar"
     "fmt"
     "os"
+	"errors"
     "io"
+	"path/filepath"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
@@ -17,62 +20,123 @@ import (
 
 const ImageRefName = "org.opencontainers.image.ref.name"
 
-func squash(src, dst string) (error) {
-    dstFile, err := openFile(dst)
-    if err != nil {
-        return fmt.Errorf("opening dst file %s: %w", dst, err)
-    }
+type HeaderXform func(*tar.Header) (error)
 
-    l, err := layout.ImageIndexFromPath(src)
-    if err != nil {
-        return fmt.Errorf("loading %s as OCI layout: %w", src, err)
+func OffsetUidGid(offset int) HeaderXform {
+    return func(header *tar.Header) error {
+        header.Uid += offset
+        header.Gid += offset
+        return nil
     }
+}
 
-    m, err := l.IndexManifest()
-    if err != nil {
-        return fmt.Errorf("reading index manifest %s %w", src, err)
+func PrependPath(s string) HeaderXform {
+    return func(header *tar.Header) error {
+        header.Name = filepath.Join(s, header.Name)
+        return nil
     }
-    if len(m.Manifests) != 1 {
-        return fmt.Errorf("layout contains %d entries", len(m.Manifests))
-    }
+}
 
-    desc := m.Manifests[0]
-    if !desc.MediaType.IsImage() {
-        return fmt.Errorf("not an image %s %w", src, err)
-    }
-
-    img, err := l.Image(desc.Digest)
-    if err != nil {
-        return fmt.Errorf("reading image %s %w", src, err)
-    }
-
+func flatten(writer *tar.Writer, img v1.Image, fs ...HeaderXform) (error) {
     simg, err := mutate.Squash(img)
     if err != nil {
-        return fmt.Errorf("squashing image %s %w", src, err)
+        return fmt.Errorf("squashing img %w", err)
     }
-
-	layers, err := simg.Layers()
-	if err != nil {
-		return fmt.Errorf("retrieving image layers: %w", err)
-	}
-
-    if len(layers) != 1 {
-		return fmt.Errorf("exepcted 1 layer, got %d", len(layers))
-    }
-
-    reader, err := layers[0].Uncompressed()
-	if err != nil {
-		return fmt.Errorf("getting image layer[0] reader: %w", err)
-	}
-
-    _, err = io.Copy(dstFile, reader)
+    layers, err := simg.Layers()
     if err != nil {
-		return fmt.Errorf("writing output: %w", err)
+        return fmt.Errorf("retrieving image layers: %w", err)
+    }
+    if len(layers) != 1 {
+        return fmt.Errorf("exepcted 1 layer, got %d", len(layers))
+    }
+    layerReader, err := layers[0].Uncompressed()
+    if err != nil {
+        return fmt.Errorf("getting image layer[0] reader: %w", err)
+    }
+    defer layerReader.Close()
+    tarReader := tar.NewReader(layerReader)
+    for {
+        header, err := tarReader.Next()
+        if errors.Is(err, io.EOF) {
+            break
+        }
+        if err != nil {
+            return fmt.Errorf("reading tar: %w", err)
+        }
+        header.Format = tar.FormatPAX
+        if header.Uname != "" {
+            fmt.Fprintf(os.Stderr, "warn: got nonempty uname %s\n", header.Uname)
+        }
+        if header.Gname != "" {
+            fmt.Fprintf(os.Stderr, "warn: got nonempty gname %s\n", header.Gname)
+        }
+        for _, f := range fs {
+            err := f(header)
+            if err != nil {
+                return fmt.Errorf("transforming header: %w", err)
+            }
+        }
+        if err := writer.WriteHeader(header); err != nil {
+            return fmt.Errorf("writing tar header: %w", err)
+        }
+        if header.Size > 0 {
+            if _, err := io.CopyN(writer, tarReader, header.Size); err != nil {
+                return fmt.Errorf("writing tar file: %w", err)
+            }
+        }
     }
     return nil
 }
 
 func mainExport(args []string) (error) {
+    if len(args) < 2 {
+        return fmt.Errorf("expected <oci dir> <names...>")
+    }
+    srcDir := args[0]
+    l, err := layout.FromPath(srcDir)
+    if err != nil {
+        return fmt.Errorf("getting oci layout %w", err)
+    }
+    idx, err := l.ImageIndex()
+    if err != nil {
+        return fmt.Errorf("getting image index %w", err)
+    }
+    mapping, err := makeImageIndexRefName(idx)
+    if err != nil {
+        return fmt.Errorf("making image index map %w", err)
+    }
+    // TODO we need to get the config from the index too
+    imgs := make(map[string]v1.Image)
+    for _, ref := range args[1:] {
+        parsed, err := name.ParseReference(ref)
+        if err != nil {
+            return fmt.Errorf("parsing ref %w", err)
+        }
+        digest, ok := mapping[parsed.Name()]
+        if !ok {
+            return fmt.Errorf("missing %s: %s", ref, parsed.Name())
+        }
+        img, err := idx.Image(digest)
+        if err != nil {
+            return fmt.Errorf("getting img %s %w", ref, err)
+        }
+        fmt.Fprintf(os.Stderr, "will write %s: %s %v\n", ref, parsed.Name(), digest)
+        imgs[parsed.Name()] = img
+    }
+
+    tarWriter := tar.NewWriter(os.Stdout)
+    defer tarWriter.Close()
+
+    for refName, img := range imgs {
+        digest, err := img.Digest()
+        if err != nil {
+            return fmt.Errorf("img digest %s %w", refName, err)
+        }
+        err = flatten(tarWriter, img, OffsetUidGid(1000), PrependPath(digest.String()))
+        if err != nil {
+            return fmt.Errorf("flattening %s %w", refName, err)
+        }
+    }
     return nil
 }
 
