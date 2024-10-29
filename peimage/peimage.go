@@ -1,6 +1,5 @@
 package main
 
-// v1 "github.com/google/go-containerregistry/pkg/v1"
 import (
 	"archive/tar"
 	"crypto/sha256"
@@ -22,7 +21,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	//"github.com/google/go-containerregistry/pkg/v1/mutate"
 
     sylabsmutate "github.com/sylabs/oci-tools/pkg/mutate"
 )
