@@ -29,6 +29,8 @@ type HeaderXform func(*tar.Header) (error)
 type PEImageIndexEntry struct {
     Rootfs string         `json:"rootfs"`
     Config *v1.ConfigFile `json:"config"`
+    ImageRefName string   `json:"org.opencontainers.image.ref.name"`
+    Digest       string   `json:"digest"`
 }
 
 // only fields with capital/exported are put in JSON
@@ -47,6 +49,9 @@ func OffsetUidGid(offset int) HeaderXform {
 func PrependPath(s string) HeaderXform {
     return func(header *tar.Header) error {
         header.Name = filepath.Join(s, header.Name)
+        if header.Typeflag == tar.TypeLink || header.Typeflag == tar.TypeSymlink {
+            header.Linkname = filepath.Join(s, header.Linkname)
+        }
         return nil
     }
 }
@@ -216,6 +221,8 @@ func mainExport(args []string) (error) {
         entries = append(entries, PEImageIndexEntry {
             Rootfs: rootfs,
             Config: config,
+            ImageRefName: refName,
+            Digest: digest.String(),
         })
         data = append(data, ExportData {
             arg: arg,
@@ -236,7 +243,13 @@ func mainExport(args []string) (error) {
     if err != nil {
         return fmt.Errorf("error writing index.json")
     }
-    fmt.Fprintf(os.Stderr, "index.json is %s\n", peidxBuf)
+    {
+        peidxBuf, err := json.MarshalIndent(&peidx, "", "  ")
+        if err != nil {
+            return fmt.Errorf("error writing index.json")
+        }
+        fmt.Fprintf(os.Stderr, "index.json is\n%s\n", peidxBuf)
+    }
 
     indexHeader := &tar.Header{
 		Typeflag: tar.TypeReg,
@@ -409,7 +422,7 @@ func makeImageIndexRefName(idx v1.ImageIndex) (map[string]v1.Hash, error) {
     for _, manifest := range idxManifest.Manifests {
         if imageRefName, ok := manifest.Annotations[ImageRefName]; ok {
             if otherDigest, ok := ret[imageRefName]; ok && manifest.Digest != otherDigest {
-                return nil, fmt.Errorf("Got two different digests for same %s %v != %v", ImageRefName, otherDigest, manifest.Digest)
+                return nil, fmt.Errorf("Got two different digests for same %s %v != %v", imageRefName, otherDigest, manifest.Digest)
             }
             ret[imageRefName] = manifest.Digest
         }
