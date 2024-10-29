@@ -4,6 +4,7 @@ use std::io;
 use std::io::{Write,Seek,SeekFrom,Read};
 use std::ffi::OsString;
 use std::path::{Path,PathBuf};
+use std::process::Command;
 
 use tempfile::NamedTempFile;
 use oci_spec::runtime as oci_runtime;
@@ -17,6 +18,7 @@ use clap::{Parser};
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
 use peinit::{Response};
+use peimage::PEImageIndex;
 
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
@@ -316,6 +318,12 @@ fn main() {
     // TODO This will disappear when we grab the image spec from the sqfs
     // I think we should do that now
     let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
+
+    let sqfs = "/tmp/peimage/ocismall.sqfs";
+    let output = Command::new("sqfscat").arg(sqfs).arg("index.json").output().unwrap();
+    let output_s = String::from_utf8(output.stdout).unwrap();
+    let pe_image_index: PEImageIndex = serde_json::from_str(&output_s).unwrap();
+    println!("index is {:#?}", pe_image_index);
 
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);

@@ -3,7 +3,6 @@ package main
 import (
 	"archive/tar"
 	"crypto/sha256"
-	"errors"
 	"path/filepath"
     "bytes"
     "encoding/json"
@@ -35,14 +34,24 @@ const UidGidOffset = 1000
 
 type HeaderXform func(*tar.Header) (error)
 
+type PEImageId struct {
+    Digest v1.Hash       `json:"digest"`
+    Repository string    `json:"repository"` // library/gcc
+    Registry string      `json:"registry"`   // index.docker.io
+    Tag string           `json:"tag"`        // 14.1.0
+}
+
 // only fields with capital/exported are put in JSON
 type PEImageIndexEntry struct {
     // [a-f0-9]+ that we have unpacked the flattened rootfs under
-    Rootfs string         `json:"rootfs"`
-    Config *v1.ConfigFile `json:"config"`
-    // we guarantee that manfiest.annotations["org.opencontainers.image.ref.name"] exists
+    Rootfs string            `json:"rootfs"`
+    Config *v1.ConfigFile    `json:"config"`
+    // we guarantee that descriptor.annotations["org.opencontainers.image.ref.name"] exists
     // and looks like index.docker.io/library/gcc:14.1.0
-    Manifest v1.Descriptor `json:"manifest"`
+    Manifest v1.Manifest     `json:"manifest"`
+    Descriptor v1.Descriptor `json:"descriptor"`
+    // looks like index.docker.io/library/gcc:14.1.0
+    Id PEImageId             `json:"id"` // idk this name is terrible
 }
 
 type PEImageIndex struct {
@@ -51,7 +60,9 @@ type PEImageIndex struct {
 
 type OCIIndexEntry struct {
     img            v1.Image
-    manifest       v1.Descriptor // the Descriptor type is very confusing
+    ref            name.Reference
+    descriptor     v1.Descriptor
+    manifest       v1.Manifest
     rootfsDigest   v1.Hash  // combined hash of each layer
     configDigest   v1.Hash
     config         *v1.ConfigFile
@@ -165,9 +176,16 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
             panic("should be present")
         }
         images = append(images, PEImageIndexEntry {
+            Id: PEImageId {
+                Digest       : v.descriptor.Digest,
+                Repository   : v.ref.Context().RepositoryStr(),
+                Registry     : v.ref.Context().RegistryStr(),
+                Tag          : v.ref.Identifier(),
+            },
             Rootfs: prefix,
             Config: v.config,
             Manifest: v.manifest,
+            Descriptor: v.descriptor,
         })
     }
 
@@ -176,7 +194,7 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
 
 func mainExport(args []string) (error) {
     if len(args) < 2 {
-        return fmt.Error("expected <oci dir> <names...>")
+        return fmt.Errorf("expected <oci dir> <names...>")
     }
     srcDir := args[0]
     l, err := layout.FromPath(srcDir)
@@ -203,7 +221,8 @@ func mainExport(args []string) (error) {
     fmt.Fprintf(os.Stderr, "selected \n")
     for k, v := range selected {
         fmt.Fprintf(os.Stderr, "  %s\n", k)
-        fmt.Fprintf(os.Stderr, "    manifest %v\n", v.manifest.Digest)
+        fmt.Fprintf(os.Stderr, "    descriptor %v\n", v.descriptor.Digest)
+        fmt.Fprintf(os.Stderr, "      schemaVersion %v\n", v.manifest.SchemaVersion)
         fmt.Fprintf(os.Stderr, "    config   %v\n", v.configDigest)
         fmt.Fprintf(os.Stderr, "    rootfs   %v\n", v.rootfsDigest)
     }
@@ -283,7 +302,7 @@ func mainPull(args []string) (error) {
     }
     seen := make(map[string]v1.Hash)
     for k, v := range mapping {
-        seen[k] = v.manifest.Digest
+        seen[k] = v.descriptor.Digest
     }
 
     platform, err := v1.ParsePlatform("linux/amd64")  // is the default but good to be specific
@@ -353,7 +372,7 @@ func mainList(args []string) (error) {
     for k, v := range mapping {
         fmt.Printf("%s\n", k)
         fmt.Printf("  manifest %v\n", v.manifest.MediaType)
-        fmt.Printf("             %v\n", v.manifest.Digest)
+        fmt.Printf("           %v\n", v.descriptor.Digest)
         fmt.Printf("  config   %v\n", v.configDigest)
         fmt.Printf("  rootfs   %v\n", v.rootfsDigest)
         layers, err := v.img.Layers()
@@ -382,7 +401,10 @@ func mainParse(args []string) (error) {
         if err != nil {
             return fmt.Errorf("error parsing %w", err)
         }
-        fmt.Printf("%s\tName=%s\tContext=%s\tIdentifier=%s\n", ref, parsed.Name(), parsed.Context(), parsed.Identifier())
+        fmt.Printf("%s\tName=%s\tContext=%s\tIdentifier=%s\tContext.RepositorStr=%s\tContext.RegistryStr=%s\n",
+                    ref, parsed.Name(), parsed.Context(), parsed.Identifier(),
+                    parsed.Context().RepositoryStr(), parsed.Context().RegistryStr(),
+                )
     }
     return nil
 }
@@ -466,45 +488,55 @@ func loadOCIIndex(idx v1.ImageIndex) (map[string]OCIIndexEntry, error) {
     seen := make(map[v1.Hash]bool)
     ret := make(map[string]OCIIndexEntry)
 
-    // manifest is type v1.Descriptor
-    for _, manifest := range idxManifest.Manifests {
-        if manifest.MediaType != types.OCIManifestSchema1 &&
-           manifest.MediaType != types.DockerManifestSchema2 {
-            fmt.Fprintf(os.Stderr, "skipping manifest %v because is mediatype %v\n", manifest.Digest, manifest.MediaType)
+    // manifest is type v1.Descriptor (the naming is crazy!)
+    for _, descriptor := range idxManifest.Manifests {
+        if descriptor.MediaType != types.OCIManifestSchema1 &&
+           descriptor.MediaType != types.DockerManifestSchema2 {
+            fmt.Fprintf(os.Stderr, "skipping manifest %v because is mediatype %v\n", descriptor.Digest, descriptor.MediaType)
             continue
         }
-        imageRefName, ok := manifest.Annotations[ImageRefName]
+        imageRefName, ok := descriptor.Annotations[ImageRefName]
         if !ok {
-            fmt.Fprintf(os.Stderr, "skipping manifest %v because missing annotation %s\n", manifest.Digest, ImageRefName)
+            fmt.Fprintf(os.Stderr, "skipping manifest %v because missing annotation %s\n", descriptor.Digest, ImageRefName)
             continue
+        }
+        ref, err := name.ParseReference(imageRefName)
+        if err != nil {
+            return nil, fmt.Errorf("parsing ref %s %v", imageRefName, err)
         }
         if otherDigest, ok := ret[imageRefName]; ok {
-            return nil, fmt.Errorf("Duplicate ref.name for %s %v and %v", imageRefName, otherDigest, manifest.Digest)
+            return nil, fmt.Errorf("Duplicate ref.name for %s %v and %v", imageRefName, otherDigest, descriptor.Digest)
         }
-        if _, ok := seen[manifest.Digest]; ok {
-            return nil, fmt.Errorf("Duplicate image stored under two ref.name %s %v", imageRefName, manifest.Digest)
+        if _, ok := seen[descriptor.Digest]; ok {
+            return nil, fmt.Errorf("Duplicate image stored under two ref.name %s %v", imageRefName, descriptor.Digest)
         }
-        img, err := idx.Image(manifest.Digest)
+        img, err := idx.Image(descriptor.Digest)
         if err != nil {
-            return nil, fmt.Errorf("getting img %s %w", manifest.Digest, err)
+            return nil, fmt.Errorf("getting img %s %w", descriptor.Digest, err)
         }
         configDigest, err := img.ConfigName()
         if err != nil {
-            return nil, fmt.Errorf("getting config digest %s %w", manifest.Digest, err)
+            return nil, fmt.Errorf("getting config digest %s %w", descriptor.Digest, err)
         }
         config, err := img.ConfigFile()
         if err != nil {
-            return nil, fmt.Errorf("getting config %s %w", manifest.Digest, err)
+            return nil, fmt.Errorf("getting config %s %w", descriptor.Digest, err)
+        }
+        manifest, err := img.Manifest()
+        if err != nil {
+            return nil, fmt.Errorf("getting manifest %s %w", descriptor.Digest, err)
         }
         rootfsDigest, err := layersDigest(img)
         if err != nil {
-            return nil, fmt.Errorf("computing layers digest %s %w", manifest.Digest, err)
+            return nil, fmt.Errorf("computing layers digest %s %w", descriptor.Digest, err)
         }
 
-        seen[manifest.Digest] = true
+        seen[descriptor.Digest] = true
         ret[imageRefName] = OCIIndexEntry {
             img: img,
-            manifest: manifest,
+            ref: ref,
+            descriptor: descriptor,
+            manifest: *manifest,
             rootfsDigest: *rootfsDigest,
             configDigest: configDigest,
             config: config,
