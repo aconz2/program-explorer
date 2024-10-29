@@ -2,7 +2,7 @@ use std::time::Duration;
 use std::fs::File;
 use std::io;
 use std::io::{Write,Seek,SeekFrom,Read};
-use std::ffi::OsString;
+use std::ffi::{OsStr,OsString};
 use std::path::{Path,PathBuf};
 use std::process::Command;
 
@@ -42,11 +42,18 @@ fn round_up_to<const N: u64>(x: u64) -> u64 {
     ((x + (N - 1)) / N) * N
 }
 
-fn round_up_to_pmem_size(f: &File) -> io::Result<u64> {
+fn round_up_file_to_pmem_size(f: &File) -> io::Result<u64> {
     let cur = f.metadata()?.len();
     let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
-    let _ = f.set_len(newlen)?;
+    if cur != newlen {
+        let _ = f.set_len(newlen)?;
+    }
     Ok(newlen)
+}
+
+fn round_up_path_to_pmem_size<P: AsRef<Path>>(p: P) -> io::Result<u64> {
+    let f = File::options().write(true).open(p)?;
+    round_up_file_to_pmem_size(&f)
 }
 
 // ImageConfiguration: {created, architecture, os, config: {Env, User, Entrypoint, Cmd, WorkingDir}, rootfs, ...}
@@ -193,7 +200,7 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: Option<P1>, 
     let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
     f.seek(SeekFrom::Start(0)).unwrap();
     f.write_u32::<LE>(size).unwrap();
-    let _ = round_up_to_pmem_size(&f).unwrap();
+    let _ = round_up_file_to_pmem_size(&f).unwrap();
 }
 
 fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
@@ -277,8 +284,15 @@ struct Args {
     #[arg(long, default_value = "../initramfs")]
     initramfs: OsString,
 
-    #[arg(long, default_value = "../gcc-14.1.0.sqfs")]
-    rootfs: OsString,
+    // #[arg(long, default_value = "../gcc-14.1.0.sqfs")]
+    // rootfs: OsString,
+
+    #[arg(long, default_value = "../ocismall.sqfs")]
+    index: OsString,
+
+    // TODO
+    // #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]
+    // container: OsString,
 
     #[arg(long, help = "name of dir to use as input dir")]
     input: Option<PathBuf>,
@@ -305,6 +319,14 @@ struct Args {
     args: Vec<String>,
 }
 
+fn load_index_from_file<P: AsRef<OsStr>>(p: P) -> io::Result<PEImageIndex> {
+    let output = Command::new("sqfscat").arg(p).arg("index.json").output()?;
+    let output_s = String::from_utf8(output.stdout)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "index.json not utf8"))?;
+    serde_json::from_str::<PEImageIndex>(&output_s)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "index.json not valid PEImageIndex"))
+}
+
 fn main() {
     let args = {
         let mut args = Args::parse();
@@ -317,19 +339,17 @@ fn main() {
 
     // TODO This will disappear when we grab the image spec from the sqfs
     // I think we should do that now
-    let image_spec:     OsString = "/home/andrew/Repos/program-explorer/gcc-14.1.0-image-spec.json".into();
 
-    let sqfs = "/tmp/peimage/ocismall.sqfs";
-    let output = Command::new("sqfscat").arg(sqfs).arg("index.json").output().unwrap();
-    let output_s = String::from_utf8(output.stdout).unwrap();
-    let pe_image_index: PEImageIndex = serde_json::from_str(&output_s).unwrap();
+    round_up_path_to_pmem_size(&args.index);  // maybe hacky
+    let pe_image_index = load_index_from_file(&args.index).unwrap();
     println!("index is {:#?}", pe_image_index);
+
+    let image_index_entry = &pe_image_index.images[0];
 
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
-    let image_spec = oci_image::ImageConfiguration::from_file(image_spec).unwrap();
-    let runtime_spec = create_runtime_spec(&image_spec, &args.args).unwrap();
+    let runtime_spec = create_runtime_spec(&image_index_entry.config, &args.args).unwrap();
     //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
     println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
@@ -350,6 +370,7 @@ fn main() {
         stdin: args.stdin,
         strace: args.strace,
         crun_debug: args.crun_debug,
+        rootfs_dir: image_index_entry.rootfs.clone(),
     };
 
     let io_file = NamedTempFile::new().unwrap();
@@ -361,7 +382,7 @@ fn main() {
         ch_config: ch_config,
         ch_timeout: ch_timeout,
         io_file: io_file,
-        rootfs: cwd.join(args.rootfs).into(),
+        rootfs: cwd.join(args.index).into(),
     };
 
     match worker::run(worker_input) {

@@ -34,10 +34,11 @@ dir /sys/fs/cgroup 0755 0 0
 
 dir /mnt                   0755 0 0
 dir /mnt/work              0755 0 0
+dir /mnt/index             0755 0 0
 dir /mnt/rootfs            0755 0 0
-dir /mnt/upper             0755 0 0
-dir /mnt/upper/run         0777 0 0
-dir /mnt/upper/run/pe         0777 0 0
+dir /mnt/upper             0777 1000 1000
+dir /mnt/upper/run         0777 1000 1000
+dir /mnt/upper/run/pe      0777 1000 1000
 #dir /mnt/upper/scratch 0755 0 0
 #dir /mnt/upper/run/input   0777 0 0
 #dir /mnt/upper/run/output  0777 0 0

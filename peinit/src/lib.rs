@@ -12,6 +12,7 @@ pub struct Config {
     pub stdin: Option<String>,
     pub strace: bool,
     pub crun_debug: bool,
+    pub rootfs_dir: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

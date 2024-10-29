@@ -79,7 +79,9 @@ func OffsetUidGid(offset int) HeaderXform {
 func PrependPath(s string) HeaderXform {
     return func(header *tar.Header) error {
         header.Name = filepath.Join(s, header.Name)
-        if header.Typeflag == tar.TypeLink || header.Typeflag == tar.TypeSymlink {
+        // NOTE: symlinks do NOT get prefixed, they look broken in a tar dump
+        // but resolve correctly once inside a container
+        if header.Typeflag == tar.TypeLink {
             header.Linkname = filepath.Join(s, header.Linkname)
         }
         return nil

@@ -4,7 +4,7 @@ use std::process::{Stdio, Command};
 use std::io::{Seek,Read,Write,SeekFrom};
 use std::os::fd::{AsRawFd,FromRawFd};
 //use std::os::unix::process::CommandExt;
-use std::ffi::{CStr,OsStr};
+use std::ffi::{CStr,OsStr,CString};
 use std::path::Path;
 use std::io;
 use std::time::Instant;
@@ -89,52 +89,33 @@ fn setup_panic() {
     }));
 }
 
-fn check_libc(ret: i32) {
+fn check_libc(ret: i32) -> io::Result<()> {
     if ret < 0 {
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        panic!("fail with error {errno}");
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(())
 }
 
-fn mount(source: &CStr, target: &CStr, filesystem: Option<&CStr>, flags: libc::c_ulong, data: Option<&CStr>) {
+fn mount(source: &CStr, target: &CStr, filesystem: Option<&CStr>, flags: libc::c_ulong, data: Option<&CStr>) -> io::Result<()> {
     let filesystem = filesystem.map_or(std::ptr::null(), |x| x.as_ptr());
     let data = data.map_or(std::ptr::null(), |x| x.as_ptr() as *const libc::c_void);
-    check_libc(unsafe { libc::mount(source.as_ptr(), target.as_ptr(), filesystem, flags, data) });
+    check_libc(unsafe { libc::mount(source.as_ptr(), target.as_ptr(), filesystem, flags, data) })
 }
 
-fn unshare(flags: libc::c_int) { check_libc(unsafe { libc::unshare(flags) }); }
-fn chdir(dir: &CStr) { check_libc(unsafe { libc::chdir(dir.as_ptr()) }); }
-fn chroot(dir: &CStr) { check_libc(unsafe { libc::chroot(dir.as_ptr()) }); }
-fn mkdir(dir: &CStr, mode: libc::mode_t) { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }); }
-fn chmod(path: &CStr, mode: libc::mode_t) { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }); }
+fn unshare(flags: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::unshare(flags) }) }
+fn chdir(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chdir(dir.as_ptr()) }) }
+fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.as_ptr()) }) }
+fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
+fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
 
-fn parent_rootfs() {
+fn parent_rootfs() -> io::Result<()> {
     let pivot_dir = c"/abc";
-    unshare(libc::CLONE_NEWNS);
-    mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None);
-    chdir(pivot_dir);
-    mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None);
-    chroot(c".");
-}
-
-fn init_mounts() {
-    mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None);
-    mount(c"none", c"/sys/fs/cgroup", Some(c"cgroup2"),  libc::MS_SILENT, None);
-    mount(c"none", c"/dev",           Some(c"devtmpfs"), libc::MS_SILENT, None);
-    mount(c"none", c"/run/output",    Some(c"tmpfs"),    libc::MS_SILENT, Some(c"size=2M,mode=777"));
-
-    // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
-    // have set umask
-    mkdir(c"/run/output/dir", 0o777);
-    chmod(c"/run/output/dir", 0o777);
-}
-
-fn mount_pmems() {
-    mount(c"/dev/pmem0", c"/mnt/rootfs", Some(c"squashfs"), libc::MS_SILENT, None);
-}
-
-fn setup_overlay() {
-    mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT, Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"));
+    unshare(libc::CLONE_NEWNS)?;
+    mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
+    chdir(pivot_dir)?;
+    mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None)?;
+    chroot(c".")?;
+    Ok(())
 }
 
 fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
@@ -375,18 +356,37 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
 fn main() {
     setup_panic();
 
-    init_mounts();
+    parent_rootfs();
+
+    { // initial mounts
+        mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
+        mount(c"none", c"/sys/fs/cgroup", Some(c"cgroup2"),  libc::MS_SILENT, None).unwrap();
+        mount(c"none", c"/dev",           Some(c"devtmpfs"), libc::MS_SILENT, None).unwrap();
+        mount(c"none", c"/run/output",    Some(c"tmpfs"),    libc::MS_SILENT, Some(c"size=2M,mode=777")).unwrap();
+
+        // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
+        // have set umask
+        mkdir(c"/run/output/dir", 0o777).unwrap();
+        chmod(c"/run/output/dir", 0o777).unwrap();
+    }
 
     //              rootfs    input/output
     wait_for_pmem(&[c"pmem0", c"pmem1"]).unwrap();
 
-    mount_pmems();
-    setup_overlay();
-    parent_rootfs();
+    // mount index
+    mount(c"/dev/pmem0", c"/mnt/index", Some(c"squashfs"), libc::MS_SILENT, None).unwrap();
+
+    let config = unpack_input(INOUT_DEVICE, "/run/input");
+
+    let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
+    let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
+    mount(&rootfs_dir, c"/mnt/rootfs", None, libc::MS_SILENT | libc::MS_BIND, None).unwrap();
+    let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
+
+    mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT, Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"));
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    let config = unpack_input(INOUT_DEVICE, "/run/input");
     // println!("V config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
