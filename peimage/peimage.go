@@ -3,17 +3,17 @@ package main
 import (
 	"archive/tar"
 	"crypto/sha256"
-    "fmt"
-    "bytes"
-    "os"
 	"errors"
-    "io"
-    "strings"
 	"path/filepath"
+    "bytes"
     "encoding/json"
-
-    "slices"
+    "errors"
+    "fmt"
+    "io"
     "maps"
+    "os"
+    "slices"
+    "strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
@@ -24,6 +24,11 @@ import (
 
     sylabsmutate "github.com/sylabs/oci-tools/pkg/mutate"
 )
+
+// I use Errorf a lot of places without a %w and get a %!w(MISSING) warning at runtime so maybe that is wrong
+// but it doesn't really look like it from the docs?
+// grep Errorf peimage.go | grep -v '%w'
+// I guess the replacement is errors.New(fmt.Sprintf("...", ...))
 
 const ImageRefName = "org.opencontainers.image.ref.name"
 const UidGidOffset = 1000
@@ -171,7 +176,7 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
 
 func mainExport(args []string) (error) {
     if len(args) < 2 {
-        return fmt.Errorf("expected <oci dir> <names...>")
+        return fmt.Error("expected <oci dir> <names...>")
     }
     srcDir := args[0]
     l, err := layout.FromPath(srcDir)
