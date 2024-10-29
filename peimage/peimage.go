@@ -121,63 +121,6 @@ func flatten(writer *tar.Writer, img v1.Image, fs ...HeaderXform) (error) {
     return nil
 }
 
-func tryShortenDigest(digests []string, l int) bool {
-    acc := make(map[string]bool)
-    for _, digest := range digests {
-        x := digest[:l]
-        if _, ok := acc[x]; ok {
-            return false
-        }
-        acc[x] = true
-    }
-    return true
-}
-
-// we take in a map so that we are guaranteed the hashes are unique
-func makeRootfsShortMap(hashesM map[v1.Hash]v1.Image) map[v1.Hash]string {
-    if len(hashesM) == 0 {
-        panic("shouldn't be empty")
-    }
-    hashes := slices.Collect(maps.Keys(hashesM))
-    digests := make([]string, 0, len(hashes))
-    length := 0
-    for _, hash := range hashes {
-        x := hash.String()
-        if !strings.HasPrefix(x, "sha256:") {
-            panic(x)
-        }
-        x = x[len("sha256:"):]
-        digests = append(digests, x)
-        length = max(length, len(x))
-    }
-    shortLen := 0
-    for i := 1; i < length; i += 1 {
-        if tryShortenDigest(digests, i) {
-            shortLen = i
-            break
-        }
-    }
-    if shortLen == 0 {
-        panic("should have succeeded")
-    }
-    fmt.Fprintf(os.Stderr, "shortened to %d chars\n", shortLen)
-    ret := make(map[v1.Hash]string)
-    for i, hash := range hashes {
-        ret[hash] = digests[i][:shortLen]
-    }
-    return ret
-}
-
-// type ExportData struct {
-//     arg string // name passed by user
-//     ref name.Reference // parsed name
-//     refName string // ImageRefName ie org.opencontainers.image.ref.name like index.docker.io/library/gcc:13.2.0
-//     digest v1.Hash // image digest
-//     image v1.Image
-//     config *v1.ConfigFile
-//     rootfs string // shortened digest without sha256 that is the rootfs in the tar stream
-// }
-
 func subsetIndex(mapping map[string]OCIIndexEntry, args []string) (map[string]OCIIndexEntry, error) {
     ret := make(map[string]OCIIndexEntry)
     for _, arg := range args {
@@ -563,6 +506,53 @@ func loadOCIIndex(idx v1.ImageIndex) (map[string]OCIIndexEntry, error) {
         }
     }
     return ret, nil
+}
+
+func tryShortenDigest(digests []string, l int) bool {
+    acc := make(map[string]bool)
+    for _, digest := range digests {
+        x := digest[:l]
+        if _, ok := acc[x]; ok {
+            return false
+        }
+        acc[x] = true
+    }
+    return true
+}
+
+// we take in a map so that we are guaranteed the hashes are unique
+func makeRootfsShortMap(hashesM map[v1.Hash]v1.Image) map[v1.Hash]string {
+    if len(hashesM) == 0 {
+        panic("shouldn't be empty")
+    }
+    hashes := slices.Collect(maps.Keys(hashesM))
+    digests := make([]string, 0, len(hashes))
+    length := 0
+    for _, hash := range hashes {
+        x := hash.String()
+        if !strings.HasPrefix(x, "sha256:") {
+            panic(x)
+        }
+        x = x[len("sha256:"):]
+        digests = append(digests, x)
+        length = max(length, len(x))
+    }
+    shortLen := 0
+    for i := 1; i < length; i += 1 {
+        if tryShortenDigest(digests, i) {
+            shortLen = i
+            break
+        }
+    }
+    if shortLen == 0 {
+        panic("should have succeeded")
+    }
+    fmt.Fprintf(os.Stderr, "shortened to %d chars\n", shortLen)
+    ret := make(map[v1.Hash]string)
+    for i, hash := range hashes {
+        ret[hash] = digests[i][:shortLen]
+    }
+    return ret
 }
 
 func openFile(s string) (*os.File, error) {
