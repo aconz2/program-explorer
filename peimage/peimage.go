@@ -32,10 +32,12 @@ type HeaderXform func(*tar.Header) (error)
 
 // only fields with capital/exported are put in JSON
 type PEImageIndexEntry struct {
+    // [a-f0-9]+ that we have unpacked the flattened rootfs under
     Rootfs string         `json:"rootfs"`
     Config *v1.ConfigFile `json:"config"`
-    ImageRefName string   `json:"org.opencontainers.image.ref.name"`
-    Digest       string   `json:"digest"`
+    // we guarantee that manfiest.annotations["org.opencontainers.image.ref.name"] exists
+    // and looks like index.docker.io/library/gcc:14.1.0
+    Manifest v1.Descriptor `json:"manifest"`
 }
 
 type PEImageIndex struct {
@@ -44,7 +46,7 @@ type PEImageIndex struct {
 
 type OCIIndexEntry struct {
     img            v1.Image
-    manifestDigest v1.Hash
+    manifest       v1.Descriptor // the Descriptor type is very confusing
     rootfsDigest   v1.Hash  // combined hash of each layer
     configDigest   v1.Hash
     config         *v1.ConfigFile
@@ -209,7 +211,7 @@ func makeRootfsMap(mapping map[string]OCIIndexEntry) (map[v1.Hash]v1.Image) {
 
 func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Hash]string) PEImageIndex {
     images := make([]PEImageIndexEntry, 0, len(selected))
-    for refName, v := range selected {
+    for _, v := range selected {
         prefix, ok := rootfsPrefix[v.rootfsDigest]
         if !ok {
             panic("should be present")
@@ -217,8 +219,7 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
         images = append(images, PEImageIndexEntry {
             Rootfs: prefix,
             Config: v.config,
-            ImageRefName: refName,
-            Digest: v.manifestDigest.String(),
+            Manifest: v.manifest,
         })
     }
 
@@ -254,7 +255,7 @@ func mainExport(args []string) (error) {
     fmt.Fprintf(os.Stderr, "selected \n")
     for k, v := range selected {
         fmt.Fprintf(os.Stderr, "  %s\n", k)
-        fmt.Fprintf(os.Stderr, "    manifest %v\n", v.manifestDigest)
+        fmt.Fprintf(os.Stderr, "    manifest %v\n", v.manifest.Digest)
         fmt.Fprintf(os.Stderr, "    config   %v\n", v.configDigest)
         fmt.Fprintf(os.Stderr, "    rootfs   %v\n", v.rootfsDigest)
     }
@@ -334,7 +335,7 @@ func mainPull(args []string) (error) {
     }
     seen := make(map[string]v1.Hash)
     for k, v := range mapping {
-        seen[k] = v.manifestDigest
+        seen[k] = v.manifest.Digest
     }
 
     platform, err := v1.ParsePlatform("linux/amd64")  // is the default but good to be specific
@@ -402,10 +403,27 @@ func mainList(args []string) (error) {
     }
     fmt.Printf("oci dir %s\n", srcDir)
     for k, v := range mapping {
-        fmt.Printf("  %s\n", k)
-        fmt.Printf("    manifest %v\n", v.manifestDigest)
-        fmt.Printf("    rootfs   %v\n", v.rootfsDigest)
-        fmt.Printf("    config   %v\n", v.configDigest)
+        fmt.Printf("%s\n", k)
+        fmt.Printf("  manifest %v\n", v.manifest.MediaType)
+        fmt.Printf("             %v\n", v.manifest.Digest)
+        fmt.Printf("  config   %v\n", v.configDigest)
+        fmt.Printf("  rootfs   %v\n", v.rootfsDigest)
+        layers, err := v.img.Layers()
+        if err != nil {
+            return fmt.Errorf("getting layers %s", k)
+        }
+        for i, layer := range layers {
+            digest, err := layer.Digest()
+            if err != nil {
+                return fmt.Errorf("getting layer digest %s %d", k, i)
+            }
+            m, err := layer.MediaType()
+            if err != nil {
+                return fmt.Errorf("getting media type %s %d", k, i)
+            }
+            fmt.Printf("  %3d      %v\n", i, m)
+            fmt.Printf("           %v\n", digest)
+        }
     }
     return nil
 }
@@ -470,11 +488,15 @@ func layersDigest(img v1.Image) (*v1.Hash, error) {
         if err != nil {
             return nil, fmt.Errorf("getting layer digest %w", err)
         }
-        m, err := layer.MediaType()
-        if err != nil {
-            return nil, fmt.Errorf("getting layer media type %w", err)
-        }
-        h.Write([]byte(m))
+        // https://github.com/opencontainers/image-spec/blob/main/media-types.md
+        // reports application/vnd.docker.image.rootfs.diff.tar.gzip and
+        //         application/vnd.oci.image.layer.v1.tar+gzip
+        // as being fully compatible
+        // m, err := layer.MediaType()
+        // if err != nil {
+        //     return nil, fmt.Errorf("getting layer media type %w", err)
+        // }
+        // h.Write([]byte(m))
         h.Write([]byte(d.String()))
     }
     digest := h.Sum(nil)
@@ -498,7 +520,8 @@ func loadOCIIndex(idx v1.ImageIndex) (map[string]OCIIndexEntry, error) {
 
     // manifest is type v1.Descriptor
     for _, manifest := range idxManifest.Manifests {
-        if manifest.MediaType != types.OCIManifestSchema1 {
+        if manifest.MediaType != types.OCIManifestSchema1 &&
+           manifest.MediaType != types.DockerManifestSchema2 {
             fmt.Fprintf(os.Stderr, "skipping manifest %v because is mediatype %v\n", manifest.Digest, manifest.MediaType)
             continue
         }
@@ -533,41 +556,11 @@ func loadOCIIndex(idx v1.ImageIndex) (map[string]OCIIndexEntry, error) {
         seen[manifest.Digest] = true
         ret[imageRefName] = OCIIndexEntry {
             img: img,
-            manifestDigest: manifest.Digest,
+            manifest: manifest,
             rootfsDigest: *rootfsDigest,
             configDigest: configDigest,
             config: config,
         }
-    }
-    return ret, nil
-}
-
-func makeImageIndexRefName(idx v1.ImageIndex) (map[string]v1.Hash, error) {
-    idxManifest, err := idx.IndexManifest()
-    if err != nil {
-        return nil, fmt.Errorf("getting indexManifest %w", err)
-    }
-    seen := make(map[v1.Hash]bool)
-    ret := make(map[string]v1.Hash)
-    // manifest is type v1.Descriptor
-    for _, manifest := range idxManifest.Manifests {
-        if manifest.MediaType != types.OCIManifestSchema1 {
-            fmt.Fprintf(os.Stderr, "skipping manifest %v because is mediatype %v\n", manifest.Digest, manifest.MediaType)
-            continue
-        }
-        imageRefName, ok := manifest.Annotations[ImageRefName]
-        if !ok {
-            fmt.Fprintf(os.Stderr, "skipping manifest %v because missing annotation %s\n", manifest.Digest, ImageRefName)
-            continue
-        }
-        if otherDigest, ok := ret[imageRefName]; ok {
-            return nil, fmt.Errorf("Duplicate for %s %v and %v", imageRefName, otherDigest, manifest.Digest)
-        }
-        if _, ok := seen[manifest.Digest]; ok {
-            return nil, fmt.Errorf("Duplicate image stored under two ref.name %s %v", imageRefName, manifest.Digest)
-        }
-        seen[manifest.Digest] = true
-        ret[imageRefName] = manifest.Digest
     }
     return ret, nil
 }
