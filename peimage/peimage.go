@@ -3,6 +3,7 @@ package main
 // v1 "github.com/google/go-containerregistry/pkg/v1"
 import (
 	"archive/tar"
+	"crypto/sha256"
     "fmt"
     "bytes"
     "os"
@@ -12,20 +13,26 @@ import (
 	"path/filepath"
     "encoding/json"
 
+    "slices"
+    "maps"
+
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	//"github.com/google/go-containerregistry/pkg/v1/mutate"
 
     sylabsmutate "github.com/sylabs/oci-tools/pkg/mutate"
 )
 
 const ImageRefName = "org.opencontainers.image.ref.name"
+const UidGidOffset = 1000
 
 type HeaderXform func(*tar.Header) (error)
 
+// only fields with capital/exported are put in JSON
 type PEImageIndexEntry struct {
     Rootfs string         `json:"rootfs"`
     Config *v1.ConfigFile `json:"config"`
@@ -33,9 +40,16 @@ type PEImageIndexEntry struct {
     Digest       string   `json:"digest"`
 }
 
-// only fields with capital/exported are put in JSON
 type PEImageIndex struct {
-    Entries []PEImageIndexEntry `json:"entries"`
+    Images []PEImageIndexEntry `json:"images"`
+}
+
+type OCIIndexEntry struct {
+    img            v1.Image
+    manifestDigest v1.Hash
+    rootfsDigest   v1.Hash  // combined hash of each layer
+    configDigest   v1.Hash
+    config         *v1.ConfigFile
 }
 
 func OffsetUidGid(offset int) HeaderXform {
@@ -107,7 +121,7 @@ func flatten(writer *tar.Writer, img v1.Image, fs ...HeaderXform) (error) {
     return nil
 }
 
-func tryShortenDigest(l int, digests []string) bool {
+func tryShortenDigest(digests []string, l int) bool {
     acc := make(map[string]bool)
     for _, digest := range digests {
         x := digest[:l]
@@ -119,13 +133,13 @@ func tryShortenDigest(l int, digests []string) bool {
     return true
 }
 
-func shortenDigest(hashes map[string]v1.Hash) map[v1.Hash]string {
-    ret := make(map[v1.Hash]string)
-    if len(hashes) == 0 {
-        return ret
+// we take in a map so that we are guaranteed the hashes are unique
+func makeRootfsShortMap(hashesM map[v1.Hash]v1.Image) map[v1.Hash]string {
+    if len(hashesM) == 0 {
+        panic("shouldn't be empty")
     }
+    hashes := slices.Collect(maps.Keys(hashesM))
     digests := make([]string, 0, len(hashes))
-    hashes_arr := make([]v1.Hash, 0, len(hashes))
     length := 0
     for _, hash := range hashes {
         x := hash.String()
@@ -134,12 +148,11 @@ func shortenDigest(hashes map[string]v1.Hash) map[v1.Hash]string {
         }
         x = x[len("sha256:"):]
         digests = append(digests, x)
-        hashes_arr = append(hashes_arr, hash)
         length = max(length, len(x))
     }
     shortLen := 0
     for i := 1; i < length; i += 1 {
-        if tryShortenDigest(i, digests) {
+        if tryShortenDigest(digests, i) {
             shortLen = i
             break
         }
@@ -148,20 +161,70 @@ func shortenDigest(hashes map[string]v1.Hash) map[v1.Hash]string {
         panic("should have succeeded")
     }
     fmt.Fprintf(os.Stderr, "shortened to %d chars\n", shortLen)
-    for i, hash := range hashes_arr {
+    ret := make(map[v1.Hash]string)
+    for i, hash := range hashes {
         ret[hash] = digests[i][:shortLen]
     }
     return ret
 }
 
-type ExportData struct {
-    arg string // name passed by user
-    ref name.Reference // parsed name
-    refName string // ImageRefName ie org.opencontainers.image.ref.name like index.docker.io/library/gcc:13.2.0
-    digest v1.Hash // image digest
-    image v1.Image
-    config *v1.ConfigFile
-    rootfs string // shortened digest without sha256 that is the rootfs in the tar stream
+// type ExportData struct {
+//     arg string // name passed by user
+//     ref name.Reference // parsed name
+//     refName string // ImageRefName ie org.opencontainers.image.ref.name like index.docker.io/library/gcc:13.2.0
+//     digest v1.Hash // image digest
+//     image v1.Image
+//     config *v1.ConfigFile
+//     rootfs string // shortened digest without sha256 that is the rootfs in the tar stream
+// }
+
+func subsetIndex(mapping map[string]OCIIndexEntry, args []string) (map[string]OCIIndexEntry, error) {
+    ret := make(map[string]OCIIndexEntry)
+    for _, arg := range args {
+        parsed, err := name.ParseReference(arg)
+        if err != nil {
+            return nil, fmt.Errorf("parsing ref %w", err)
+        }
+        refName := parsed.Name()
+        if parsed.Identifier() == "latest" {
+            return nil, fmt.Errorf("latest tag is not allowed %s: %s", arg, refName)
+        }
+        v, ok := mapping[refName]
+        if !ok {
+            return nil, fmt.Errorf("missing %s: %s", arg, refName)
+        }
+        if _, ok := ret[refName]; ok {
+            return nil, fmt.Errorf("duplicate %s: %s", arg, refName)
+        }
+        ret[refName] = v
+    }
+    return ret, nil
+}
+
+func makeRootfsMap(mapping map[string]OCIIndexEntry) (map[v1.Hash]v1.Image) {
+    ret := make(map[v1.Hash]v1.Image)
+    for _, v := range mapping {
+        ret[v.rootfsDigest] = v.img
+    }
+    return ret
+}
+
+func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Hash]string) PEImageIndex {
+    images := make([]PEImageIndexEntry, 0, len(selected))
+    for refName, v := range selected {
+        prefix, ok := rootfsPrefix[v.rootfsDigest]
+        if !ok {
+            panic("should be present")
+        }
+        images = append(images, PEImageIndexEntry {
+            Rootfs: prefix,
+            Config: v.config,
+            ImageRefName: refName,
+            Digest: v.manifestDigest.String(),
+        })
+    }
+
+    return PEImageIndex { Images: images }
 }
 
 func mainExport(args []string) (error) {
@@ -177,108 +240,80 @@ func mainExport(args []string) (error) {
     if err != nil {
         return fmt.Errorf("getting image index %w", err)
     }
-    mapping, err := makeImageIndexRefName(idx) // index.docker.io/library/gcc:14.1.0 -> v1.Hash
+    mapping, err := loadOCIIndex(idx)
     if err != nil {
         return fmt.Errorf("making image index map %w", err)
     }
-    shortMapping := shortenDigest(mapping)    // v1.Hash -> "abcdefg"
 
-    entries := make([]PEImageIndexEntry, 0, len(args) - 1)
-    data := make([]ExportData, 0, len(args) - 1)
-    seen := make(map[string]bool)
-
-    for _, arg := range args[1:] {
-        parsed, err := name.ParseReference(arg)
-        if err != nil {
-            return fmt.Errorf("parsing ref %w", err)
-        }
-        refName := parsed.Name()
-        if parsed.Identifier() == "latest" {
-            return fmt.Errorf("latest tag is not allowed %s: %s", arg, refName)
-        }
-        digest, ok := mapping[refName]
-        if !ok {
-            return fmt.Errorf("missing %s: %s", arg, refName)
-        }
-        if _, ok := seen[refName]; ok {
-            return fmt.Errorf("duplicate name %s: %s", arg, refName)
-        }
-        seen[refName] = true
-        img, err := idx.Image(digest)
-        if err != nil {
-            return fmt.Errorf("getting img %s %w", arg, err)
-        }
-        fmt.Fprintf(os.Stderr, "will write %s: %s %v\n", arg, refName, digest)
-        //imgs[refName] = img
-        config, err := img.ConfigFile()
-        if err != nil {
-            return fmt.Errorf("getting config %s %w", arg, err)
-        }
-        rootfs, ok := shortMapping[digest]
-        if !ok {
-            panic("should have gotten a short mapping")
-        }
-        entries = append(entries, PEImageIndexEntry {
-            Rootfs: rootfs,
-            Config: config,
-            ImageRefName: refName,
-            Digest: digest.String(),
-        })
-        data = append(data, ExportData {
-            arg: arg,
-            ref: parsed,
-            refName: refName,
-            digest: digest,
-            image: img,
-            config: config,
-            rootfs: rootfs,
-        })
-    }
-
-    tarWriter := tar.NewWriter(os.Stdout)
-    defer tarWriter.Close()
-
-    peidx := PEImageIndex { Entries: entries }
-    peidxBuf, err := json.Marshal(&peidx)
+    selected, err := subsetIndex(mapping, args[1:])
     if err != nil {
-        return fmt.Errorf("error writing index.json")
+        return fmt.Errorf("choosing images %w", err)
+    }
+    rootfsMap := makeRootfsMap(selected)
+    rootfsShortMap := makeRootfsShortMap(rootfsMap)
+    peIdx := makePEImageIndex(selected, rootfsShortMap)
+
+    fmt.Fprintf(os.Stderr, "selected \n")
+    for k, v := range selected {
+        fmt.Fprintf(os.Stderr, "  %s\n", k)
+        fmt.Fprintf(os.Stderr, "    manifest %v\n", v.manifestDigest)
+        fmt.Fprintf(os.Stderr, "    config   %v\n", v.configDigest)
+        fmt.Fprintf(os.Stderr, "    rootfs   %v\n", v.rootfsDigest)
+    }
+    fmt.Fprintf(os.Stderr, "rootfs \n")
+    for k, _ := range rootfsMap {
+        prefix, ok := rootfsShortMap[k]
+        if !ok {
+            panic("should be present")
+        }
+        fmt.Fprintf(os.Stderr, "  %s: %v\n", prefix, k)
     }
     {
-        peidxBuf, err := json.MarshalIndent(&peidx, "", "  ")
+        peidxBuf, err := json.MarshalIndent(&peIdx, "", "  ")
         if err != nil {
             return fmt.Errorf("error writing index.json")
         }
         fmt.Fprintf(os.Stderr, "index.json is\n%s\n", peidxBuf)
     }
 
-    indexHeader := &tar.Header{
-		Typeflag: tar.TypeReg,
-		Name:     "index.json",
-		Mode:     0o400,
-		Size:     int64(len(peidxBuf)),
-		Format:   tar.FormatPAX,
-        Uid:      1000,
-        Gid:      1000,
-	}
+    tarWriter := tar.NewWriter(os.Stdout)
+    defer tarWriter.Close()
 
-    if err := tarWriter.WriteHeader(indexHeader); err != nil {
-        return fmt.Errorf("writing tar index.json header: %w", err)
-    }
-    if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
-        return fmt.Errorf("writing tar index.json file: %w", err)
-    }
-
-    // TODO we have a bug when the different tags map to the same digest
-    // it should be fine to share rootfs
-    // we just need to dedup and handle that before calling shortenDigest
-    // except we can't really do that because we aren't actually checking the layer identities
-    // before squashing them
-    for _, item := range data {
-        err = flatten(tarWriter, item.image, OffsetUidGid(1000), PrependPath(item.rootfs))
+    // write index.json
+    {
+        peidxBuf, err := json.Marshal(&peIdx)
         if err != nil {
-            return fmt.Errorf("flattening %s %w", item.refName, err)
+            return fmt.Errorf("error writing index.json")
+        }
+        indexHeader := &tar.Header{
+            Typeflag: tar.TypeReg,
+            Name:     "index.json",
+            Mode:     0o400,
+            Size:     int64(len(peidxBuf)),
+            Format:   tar.FormatPAX,
+            Uid:      0,
+            Gid:      0,
+        }
+
+        if err := tarWriter.WriteHeader(indexHeader); err != nil {
+            return fmt.Errorf("writing tar index.json header: %w", err)
+        }
+        if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
+            return fmt.Errorf("writing tar index.json file: %w", err)
         }
     }
+
+    for rootfsDigest, img := range rootfsMap {
+        prefix, ok := rootfsShortMap[rootfsDigest]
+        if !ok {
+            panic("should be present")
+        }
+        err = flatten(tarWriter, img, OffsetUidGid(UidGidOffset), PrependPath(prefix))
+        if err != nil {
+            return fmt.Errorf("flattening rootfs %v %w", rootfsDigest, err)
+        }
+    }
+
     return nil
 }
 
@@ -295,10 +330,15 @@ func mainPull(args []string) (error) {
     if err != nil {
         return fmt.Errorf("getting image index %w", err)
     }
-    mapping, err := makeImageIndexRefName(idx)
+    mapping, err := loadOCIIndex(idx)
     if err != nil {
         return fmt.Errorf("making image index map %w", err)
     }
+    seen := make(map[string]v1.Hash)
+    for k, v := range mapping {
+        seen[k] = v.manifestDigest
+    }
+
     platform, err := v1.ParsePlatform("linux/amd64")  // is the default but good to be specific
     if err != nil {
         return fmt.Errorf("parsing platform %w", err)
@@ -311,9 +351,12 @@ func mainPull(args []string) (error) {
         if err != nil {
             return fmt.Errorf("parsing ref %w", err)
         }
-        if digest, ok := mapping[parsed.Name()]; ok {
+        if digest, ok := seen[parsed.Name()]; ok {
             fmt.Printf("already have %s: %s = %v, skipping\n", ref, parsed.Name(), digest)
             continue
+        }
+        if parsed.Identifier() == "latest" {
+            return fmt.Errorf("latest tag is not allowed %s: %s", ref, parsed.Name())
         }
         // based on go-containerregistry/cmd/crane/cmd/pull.go
         opts := []layout.Option{}
@@ -337,12 +380,12 @@ func mainPull(args []string) (error) {
             return err
         }
         fmt.Printf("pulled %s: %s = %v\n", ref, parsed.Name(), digest)
-        mapping[parsed.Name()] = digest
+        seen[parsed.Name()] = digest
     }
     return nil
 }
 
-func mainInfo(args []string) (error) {
+func mainList(args []string) (error) {
     if len(args) != 1 {
         return fmt.Errorf("expected <oci dir>")
     }
@@ -355,13 +398,16 @@ func mainInfo(args []string) (error) {
     if err != nil {
         return fmt.Errorf("getting image index %w", err)
     }
-    mapping, err := makeImageIndexRefName(idx)
+    mapping, err := loadOCIIndex(idx)
     if err != nil {
-        return fmt.Errorf("making image index map %w", err)
+        return fmt.Errorf("loading oci index %w", err)
     }
     fmt.Printf("oci dir %s\n", srcDir)
     for k, v := range mapping {
-        fmt.Printf("  %s = %s\n", k, v)
+        fmt.Printf("  %s\n", k)
+        fmt.Printf("    manifest %v\n", v.manifestDigest)
+        fmt.Printf("    rootfs   %v\n", v.rootfsDigest)
+        fmt.Printf("    config   %v\n", v.configDigest)
     }
     return nil
 }
@@ -388,10 +434,12 @@ func main() {
         err = mainExport(os.Args[2:])
     case "pull":
         err = mainPull(os.Args[2:])
-    case "info":
-        err = mainInfo(os.Args[2:])
+    case "list":
+        err = mainList(os.Args[2:])
     case "parse":
         err = mainParse(os.Args[2:])
+    default:
+        err = fmt.Errorf("command export|pull|list|parse")
     }
 
     if err != nil {
@@ -413,19 +461,115 @@ func getOrCreateOciLayout(dir string) (*layout.Path, error) {
     return ret, nil
 }
 
+func layersDigest(img v1.Image) (*v1.Hash, error) {
+    layers, err := img.Layers()
+    if err != nil {
+        return nil, fmt.Errorf("getting layers %w", err)
+    }
+    h := sha256.New()
+    for _, layer := range layers {
+        d, err := layer.Digest()
+        if err != nil {
+            return nil, fmt.Errorf("getting layer digest %w", err)
+        }
+        m, err := layer.MediaType()
+        if err != nil {
+            return nil, fmt.Errorf("getting layer media type %w", err)
+        }
+        h.Write([]byte(m))
+        h.Write([]byte(d.String()))
+    }
+    digest := h.Sum(nil)
+    s := fmt.Sprintf("sha256:%x", digest)
+    v1h, err := v1.NewHash(s)
+    if err != nil {
+        return nil, fmt.Errorf("bad hash %w", err)
+    }
+    ret := new(v1.Hash)
+    *ret = v1h
+    return ret, nil
+}
+
+func loadOCIIndex(idx v1.ImageIndex) (map[string]OCIIndexEntry, error) {
+    idxManifest, err := idx.IndexManifest()
+    if err != nil {
+        return nil, fmt.Errorf("getting indexManifest %w", err)
+    }
+    seen := make(map[v1.Hash]bool)
+    ret := make(map[string]OCIIndexEntry)
+
+    // manifest is type v1.Descriptor
+    for _, manifest := range idxManifest.Manifests {
+        if manifest.MediaType != types.OCIManifestSchema1 {
+            fmt.Fprintf(os.Stderr, "skipping manifest %v because is mediatype %v\n", manifest.Digest, manifest.MediaType)
+            continue
+        }
+        imageRefName, ok := manifest.Annotations[ImageRefName]
+        if !ok {
+            fmt.Fprintf(os.Stderr, "skipping manifest %v because missing annotation %s\n", manifest.Digest, ImageRefName)
+            continue
+        }
+        if otherDigest, ok := ret[imageRefName]; ok {
+            return nil, fmt.Errorf("Duplicate ref.name for %s %v and %v", imageRefName, otherDigest, manifest.Digest)
+        }
+        if _, ok := seen[manifest.Digest]; ok {
+            return nil, fmt.Errorf("Duplicate image stored under two ref.name %s %v", imageRefName, manifest.Digest)
+        }
+        img, err := idx.Image(manifest.Digest)
+        if err != nil {
+            return nil, fmt.Errorf("getting img %s %w", manifest.Digest, err)
+        }
+        configDigest, err := img.ConfigName()
+        if err != nil {
+            return nil, fmt.Errorf("getting config digest %s %w", manifest.Digest, err)
+        }
+        config, err := img.ConfigFile()
+        if err != nil {
+            return nil, fmt.Errorf("getting config %s %w", manifest.Digest, err)
+        }
+        rootfsDigest, err := layersDigest(img)
+        if err != nil {
+            return nil, fmt.Errorf("computing layers digest %s %w", manifest.Digest, err)
+        }
+
+        seen[manifest.Digest] = true
+        ret[imageRefName] = OCIIndexEntry {
+            img: img,
+            manifestDigest: manifest.Digest,
+            rootfsDigest: *rootfsDigest,
+            configDigest: configDigest,
+            config: config,
+        }
+    }
+    return ret, nil
+}
+
 func makeImageIndexRefName(idx v1.ImageIndex) (map[string]v1.Hash, error) {
     idxManifest, err := idx.IndexManifest()
     if err != nil {
         return nil, fmt.Errorf("getting indexManifest %w", err)
     }
+    seen := make(map[v1.Hash]bool)
     ret := make(map[string]v1.Hash)
+    // manifest is type v1.Descriptor
     for _, manifest := range idxManifest.Manifests {
-        if imageRefName, ok := manifest.Annotations[ImageRefName]; ok {
-            if otherDigest, ok := ret[imageRefName]; ok && manifest.Digest != otherDigest {
-                return nil, fmt.Errorf("Got two different digests for same %s %v != %v", imageRefName, otherDigest, manifest.Digest)
-            }
-            ret[imageRefName] = manifest.Digest
+        if manifest.MediaType != types.OCIManifestSchema1 {
+            fmt.Fprintf(os.Stderr, "skipping manifest %v because is mediatype %v\n", manifest.Digest, manifest.MediaType)
+            continue
         }
+        imageRefName, ok := manifest.Annotations[ImageRefName]
+        if !ok {
+            fmt.Fprintf(os.Stderr, "skipping manifest %v because missing annotation %s\n", manifest.Digest, ImageRefName)
+            continue
+        }
+        if otherDigest, ok := ret[imageRefName]; ok {
+            return nil, fmt.Errorf("Duplicate for %s %v and %v", imageRefName, otherDigest, manifest.Digest)
+        }
+        if _, ok := seen[manifest.Digest]; ok {
+            return nil, fmt.Errorf("Duplicate image stored under two ref.name %s %v", imageRefName, manifest.Digest)
+        }
+        seen[manifest.Digest] = true
+        ret[imageRefName] = manifest.Digest
     }
     return ret, nil
 }
