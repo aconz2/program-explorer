@@ -394,3 +394,6 @@ add deps in import, then go mod tidy
 
 → crane pull gcc:14.1.0 --platform linux/amd64 --format oci --annotate-ref oci
 
+go run peimage.go export /tmp/peimage/ocismall busybox:1.37 busybox:1.36.1 busybox:1.36.0  > /tmp/foo.tar
+# doesn't play well with stdin unfortunately
+mkfs.erofs --tar =f /tmp/peimage/ocismall.erofs /tmp/foo.tar

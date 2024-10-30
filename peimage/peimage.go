@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"path/filepath"
     "bytes"
+    "encoding/binary"
     "encoding/json"
     "errors"
     "fmt"
     "io"
     "maps"
     "os"
+    "os/exec"
     "slices"
     "strings"
 
@@ -31,6 +33,9 @@ import (
 
 const ImageRefName = "org.opencontainers.image.ref.name"
 const UidGidOffset = 1000
+const TwoMBAlignment = 0x20_0000  // 2MB alignment size
+const IndexJsonMagic = uint64(0x1db56abd7b82da38)  // magic to be put at end of image
+const IndexJsonSize  = 4  // num bytes for size
 
 type HeaderXform func(*tar.Header) (error)
 
@@ -194,27 +199,27 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
     return PEImageIndex { Images: images }
 }
 
-func mainExport(args []string) (error) {
+func mainExport(output io.Writer, args []string) ([]byte, error) {
     if len(args) < 2 {
-        return fmt.Errorf("expected <oci dir> <names...>")
+        return nil, fmt.Errorf("expected <oci dir> <names...>")
     }
     srcDir := args[0]
     l, err := layout.FromPath(srcDir)
     if err != nil {
-        return fmt.Errorf("getting oci layout %w", err)
+        return nil, fmt.Errorf("getting oci layout %w", err)
     }
     idx, err := l.ImageIndex()
     if err != nil {
-        return fmt.Errorf("getting image index %w", err)
+        return nil, fmt.Errorf("getting image index %w", err)
     }
     mapping, err := loadOCIIndex(idx)
     if err != nil {
-        return fmt.Errorf("making image index map %w", err)
+        return nil, fmt.Errorf("making image index map %w", err)
     }
 
     selected, err := subsetIndex(mapping, args[1:])
     if err != nil {
-        return fmt.Errorf("choosing images %w", err)
+        return nil, fmt.Errorf("choosing images %w", err)
     }
     rootfsMap := makeRootfsMap(selected)
     rootfsShortMap := makeRootfsShortMap(rootfsMap)
@@ -239,36 +244,34 @@ func mainExport(args []string) (error) {
     {
         peidxBuf, err := json.MarshalIndent(&peIdx, "", "  ")
         if err != nil {
-            return fmt.Errorf("error writing index.json")
+            return nil, fmt.Errorf("error writing index.json")
         }
         fmt.Fprintf(os.Stderr, "index.json is\n%s\n", peidxBuf)
     }
 
-    tarWriter := tar.NewWriter(os.Stdout)
+    tarWriter := tar.NewWriter(output)
     defer tarWriter.Close()
 
     // write index.json
-    {
-        peidxBuf, err := json.Marshal(&peIdx)
-        if err != nil {
-            return fmt.Errorf("error writing index.json")
-        }
-        indexHeader := &tar.Header{
-            Typeflag: tar.TypeReg,
-            Name:     "index.json",
-            Mode:     0o400,
-            Size:     int64(len(peidxBuf)),
-            Format:   tar.FormatPAX,
-            Uid:      0,
-            Gid:      0,
-        }
+    peidxBuf, err := json.Marshal(&peIdx)
+    if err != nil {
+        return nil, fmt.Errorf("error writing index.json")
+    }
+    indexHeader := &tar.Header{
+        Typeflag: tar.TypeReg,
+        Name:     "index.json",
+        Mode:     0o400,
+        Size:     int64(len(peidxBuf)),
+        Format:   tar.FormatPAX,
+        Uid:      0,
+        Gid:      0,
+    }
 
-        if err := tarWriter.WriteHeader(indexHeader); err != nil {
-            return fmt.Errorf("writing tar index.json header: %w", err)
-        }
-        if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
-            return fmt.Errorf("writing tar index.json file: %w", err)
-        }
+    if err := tarWriter.WriteHeader(indexHeader); err != nil {
+        return nil, fmt.Errorf("writing tar index.json header: %w", err)
+    }
+    if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
+        return nil, fmt.Errorf("writing tar index.json file: %w", err)
     }
 
     for rootfsDigest, img := range rootfsMap {
@@ -278,8 +281,99 @@ func mainExport(args []string) (error) {
         }
         err = flatten(tarWriter, img, OffsetUidGid(UidGidOffset), PrependPath(prefix))
         if err != nil {
-            return fmt.Errorf("flattening rootfs %v %w", rootfsDigest, err)
+            return nil, fmt.Errorf("flattening rootfs %v %w", rootfsDigest, err)
         }
+    }
+
+    return peidxBuf, nil
+}
+
+func stashIndexJson(outfile string, data []byte) (error) {
+    f, err := os.OpenFile(outfile, os.O_RDWR, 0644)
+    if err != nil {
+        return fmt.Errorf("opening file %s %w", outfile, err)
+    }
+    info, err := f.Stat()
+    if err != nil {
+        return fmt.Errorf("stating file %s %w", outfile, err)
+    }
+    oldSize := int(info.Size())
+    // 8 for magic, 4 for data size
+    sizeNeeded := len(data) + 8 + 4
+    newSize := roundUpTo(oldSize + sizeNeeded, TwoMBAlignment)
+    if err = f.Truncate(int64(newSize)); err != nil {
+        return fmt.Errorf("truncating file %s %w", outfile, err)
+    }
+    // 2 is from end
+    if _, err = f.Seek(int64(-sizeNeeded), 2); err != nil {
+        return fmt.Errorf("seeking file %s to %d %w", outfile, sizeNeeded, err)
+    }
+    if _, err = f.Write(data); err != nil {
+        return fmt.Errorf("writing file data %s %w", outfile, err)
+    }
+    u32Size := uint32(len(data))
+    if int(u32Size) != len(data) {
+        return fmt.Errorf("data way too big")
+    }
+    if err = binary.Write(f, binary.LittleEndian, u32Size); err != nil {
+        return fmt.Errorf("writing file size %s", outfile, err)
+    }
+    if err = binary.Write(f, binary.LittleEndian, IndexJsonMagic); err != nil {
+        return fmt.Errorf("writing magic%s", outfile, err)
+    }
+    return nil
+}
+
+func exportImageSqfs(outfile string, args []string) (error) {
+    cmd := exec.Command("sqfstar", "-force", outfile)
+    stdin, err := cmd.StdinPipe()
+    if err != nil {
+        return fmt.Errorf("error getting stdin %w", err)
+    }
+    if err = cmd.Start(); err != nil {
+        return fmt.Errorf("error starting sqfstar %w", err)
+    }
+    idxBuf, err := mainExport(stdin, args)
+    if err != nil {
+        return fmt.Errorf("error exporting %w", err)
+    }
+    if err = cmd.Wait(); err != nil {
+        return fmt.Errorf("error waiting for sqfstar %w", err)
+    }
+    if err = stashIndexJson(outfile, idxBuf); err != nil {
+        return fmt.Errorf("error writing index.json %w", err)
+    }
+    return nil
+}
+
+func mainImage(args []string) (error) {
+    if len(args) < 3 {
+        return fmt.Errorf("expected <image.sqfs|image.erofs> <oci-dir> <names...>")
+    }
+    image := args[0]
+    isSqfs := strings.HasSuffix(image, ".sqfs")
+    isErofs := strings.HasSuffix(image, ".erofs")
+    if !isSqfs && !isErofs {
+        return fmt.Errorf("expected image to end with .sqfs or .erofs")
+    }
+    format := "sqfs"
+    if isErofs {
+        format = "erofs"
+    }
+
+    // f, err := os.OpenFile(image, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+    // if err != nil {
+    //     return fmt.Errorf("error opening image file %w", err)
+    // }
+
+    switch format {
+    case "sqfs":
+        return exportImageSqfs(image, args[1:])
+
+    case "erofs":
+        return fmt.Errorf("not handled yet")
+    default:
+        return fmt.Errorf("got unexpected format %s", format)
     }
 
     return nil
@@ -413,19 +507,26 @@ func mainParse(args []string) (error) {
 
 func main() {
     if len(os.Args) == 1 {
-        fmt.Fprintf(os.Stderr, "expected <pull|export|info|parse> <names ...> %w\n");
+        fmt.Fprintf(os.Stderr, "expected <pull|export|list|parse|image>\n");
+        fmt.Fprintf(os.Stderr, "  pull <oci-dir> <names...>\n");
+        fmt.Fprintf(os.Stderr, "  export <oci-dir> <names...>; writes to stdout\n");
+        fmt.Fprintf(os.Stderr, "  list <oci-dir>\n");
+        fmt.Fprintf(os.Stderr, "  parse <names...>\n");
+        fmt.Fprintf(os.Stderr, "  image <image.sqfs|image.erofs> <oci-dir> <names...>\n");
         os.Exit(1)
     }
     err := error(nil)
     switch cmd := os.Args[1]; cmd {
     case "export":
-        err = mainExport(os.Args[2:])
+        _, err = mainExport(os.Stdout, os.Args[2:])
     case "pull":
         err = mainPull(os.Args[2:])
     case "list":
         err = mainList(os.Args[2:])
     case "parse":
         err = mainParse(os.Args[2:])
+    case "image":
+        err = mainImage(os.Args[2:])
     default:
         err = fmt.Errorf("command export|pull|list|parse")
     }
@@ -599,4 +700,8 @@ func openFile(s string) (*os.File, error) {
 		return os.Stdout, nil
 	}
 	return os.Create(s)
+}
+
+func roundUpTo(x, N int) int {
+    return ((x + (N - 1)) / N) * N
 }
