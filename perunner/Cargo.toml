@@ -24,3 +24,5 @@ tempfile = "3.13.0"
 memmap2 = "0.9.5"
 clap = { version = "4.5.20", features = ["derive"] }
 peimage = { version = "0.1.0", path = "../peimage" }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"

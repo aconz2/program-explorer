@@ -400,3 +400,16 @@ mkfs.erofs --tar =f /tmp/peimage/ocismall.erofs /tmp/foo.tar
 
 go run peimage.go image /tmp/peimage/ocismall.sqfs  /tmp/peimage/ocismall busybox:1.37 busybox:1.36.1 busybox:1.36.0
 go run peimage.go image /tmp/peimage/ocismall.erofs /tmp/peimage/ocismall busybox:1.37 busybox:1.36.1 busybox:1.36.0
+
+diff <(cd perunner && cargo run -- --index ../ocismall.sqfs sh -c 'find' 2> /dev/null) <(cd perunner && cargo run -- --index ../ocismall.erofs sh -c 'find' 2> /dev/null)
+< ./proc/1/map_files/5639f1954000-5639f1962000
+< ./proc/1/map_files/5639f1962000-5639f1a21000
+---
+> ./proc/1/map_files/563187792000-5631877a0000
+> ./proc/1/map_files/5631877a0000-56318785f000
+
+note to self that find | sha256sum isn't reliable because of the above, the proc maps will come back with differences
+
+this does better by pruning out find
+diff <(cd perunner && cargo run -- --index ../ocismall.sqfs find ! -path './proc*' 2> /dev/null) <(cd perunner && cargo run -- --index ../ocismall.erofs find ! -path './proc*' 2> /dev/null)
+cat <(cd perunner && cargo run -- --index ../ocismall.sqfs sh -c 'find ! -path "./proc*" | sha256sum' 2> /dev/null) <(cd perunner && cargo run -- --index ../ocismall.erofs sh -c 'find ! -path "./proc*" | sha256sum' 2> /dev/null)

@@ -47,9 +47,6 @@ impl PEImageIndex {
         if magic != INDEX_JSON_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "file doesn't end with magic"))
         }
-        {
-            println!("JJJJ file size {len} data size {data_size}")
-        }
         if u64::from(data_size) + 8 + 4 > len {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "file too short to hold index.json"))
         }

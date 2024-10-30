@@ -13,6 +13,8 @@ use bincode;
 use byteorder::{WriteBytesExt,ReadBytesExt,LE};
 use memmap2::{Mmap,MmapOptions};
 use clap::{Parser};
+// use tracing::{info,error,Level};
+// use tracing_subscriber::FmtSubscriber;
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
@@ -178,7 +180,7 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: Option<P1>, 
     let config_bytes = bincode::serialize(&config).unwrap();
     if true {
         let hash_hex = sha2_hex(&config_bytes);
-        println!("H config_bytes len {} {}", config_bytes.len(), hash_hex);
+        eprintln!("H config_bytes len {} {}", config_bytes.len(), hash_hex);
     }
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     f.write_u32::<LE>(0).unwrap(); // or seek
@@ -200,10 +202,12 @@ fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: Option<P1>, 
 fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
     output.clear();
     for b in input {
-        if *b == b'\n' { output.push(*b) }
-        else {
-            for e in std::ascii::escape_default(*b) {
-                output.push(e);
+        match *b {
+            b'\n' | b'\t' => { output.push(*b) },
+            _ => {
+                for e in std::ascii::escape_default(*b) {
+                    output.push(e);
+                }
             }
         }
     }
@@ -220,13 +224,26 @@ fn write_escaped<W: Write>(r: &[u8], w: &mut W) {
     }
 }
 
-struct UnpackVisitorPrinter { }
+struct UnpackVisitorPrinter {
+    stdout: bool,
+}
+
 impl UnpackVisitor for UnpackVisitorPrinter {
     fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
-        println!("=== {:?} ===", name);
-        write_escaped(&data, &mut io::stdout());
+        if self.stdout && AsRef::<Path>::as_ref(name) == AsRef::<Path>::as_ref("stdout") {
+            write_escaped(&data, &mut io::stdout());
+        } else {
+            eprintln!("=== {:?} ===", name);
+            write_escaped(&data, &mut io::stderr());
+        }
         true
     }
+}
+
+
+fn dump_archive(mmap: &Mmap) {
+    let mut visitor = UnpackVisitorPrinter{stdout: true};
+    unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
 }
 
 fn parse_response(mut file: &NamedTempFile) -> (Response, Mmap) {
@@ -240,7 +257,7 @@ fn parse_response(mut file: &NamedTempFile) -> (Response, Mmap) {
 
         if true {
             let hash_hex = sha2_hex(&buf);
-            println!("H response_bytes len {} {}", response_size, hash_hex);
+            eprintln!("H response_bytes len {} {}", response_size, hash_hex);
         }
         bincode::deserialize(&buf).unwrap()
     };
@@ -256,13 +273,8 @@ fn parse_response(mut file: &NamedTempFile) -> (Response, Mmap) {
     (response, mapping)
 }
 
-fn dump_archive(mmap: &Mmap) {
-    let mut visitor = UnpackVisitorPrinter{};
-    unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
-}
-
 fn dump_file<F: Read>(name: &str, file: &mut F) {
-    println!("=== {} ===", name);
+    eprintln!("=== {} ===", name);
     let _ = io::copy(file, &mut io::stdout());
 }
 #[derive(Parser, Debug)]
@@ -323,6 +335,12 @@ fn main() {
     };
     let cwd = std::env::current_dir().unwrap();
 
+    // let subscriber = tracing_subscriber::fmt()
+    //     .with_max_level(Level::TRACE)
+    //     .finish();
+    // tracing::subscriber::set_global_default(subscriber)
+    //     .expect("setting default subscriber failed");
+
     // TODO This will disappear when we grab the image spec from the sqfs
     // I think we should do that now
 
@@ -330,7 +348,7 @@ fn main() {
     // they are erofs: 0xE0F5E1E2 at 1024
     //       squashfs: 0x73717368 at    0
     let pe_image_index = PEImageIndex::from_path(&args.index).unwrap();
-    //println!("index is {:#?}", pe_image_index);
+    //eprintln!("index is {:#?}", pe_image_index);
     let rootfs_kind = if args.index.ends_with(".sqfs") {
         RootfsKind::Sqfs
     } else if args.index.ends_with(".erofs") {
@@ -345,8 +363,8 @@ fn main() {
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
     let runtime_spec = create_runtime_spec(&image_index_entry.config, &args.args).unwrap();
-    //println!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
-    println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+    //eprintln!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
+    eprintln!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
     let ch_config = CloudHypervisorConfig {
         bin      : cwd.join(args.ch).into(),
@@ -389,15 +407,15 @@ fn main() {
             if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
 
             let (response, archive_map) = parse_response(&mut io_file);
-            println!("response {:#?}", response);
+            eprintln!("response {:#?}", response);
 
             dump_archive(&archive_map);
 
         }
         Err(e) => {
-            println!("oh no something went bad {:?}", e.error);
+            eprintln!("oh no something went bad {:?}", e.error);
             if let Some(args) = e.args {
-                println!("launched ch with args {:?}", args);
+                eprintln!("launched ch with args {:?}", args);
             }
             if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
             if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
