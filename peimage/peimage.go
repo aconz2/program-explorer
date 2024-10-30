@@ -327,7 +327,7 @@ func stashIndexJson(outfile string, data []byte) (error) {
 }
 
 func exportImageSqfs(outfile string, args []string) (error) {
-    cmd := exec.Command("sqfstar", "-force", outfile)
+    cmd := exec.Command("sqfstar", "-comp", "zstd", "-force", outfile)
     stdin, err := cmd.StdinPipe()
     if err != nil {
         return fmt.Errorf("error getting stdin %w", err)

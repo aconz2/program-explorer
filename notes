@@ -413,3 +413,5 @@ note to self that find | sha256sum isn't reliable because of the above, the proc
 this does better by pruning out find
 diff <(cd perunner && cargo run -- --index ../ocismall.sqfs find ! -path './proc*' 2> /dev/null) <(cd perunner && cargo run -- --index ../ocismall.erofs find ! -path './proc*' 2> /dev/null)
 cat <(cd perunner && cargo run -- --index ../ocismall.sqfs sh -c 'find ! -path "./proc*" | sha256sum' 2> /dev/null) <(cd perunner && cargo run -- --index ../ocismall.erofs sh -c 'find ! -path "./proc*" | sha256sum' 2> /dev/null)
+
+right now I'm testing with sqfs zstd level 15 and erofs no compression (and when it does use zstd it defaults to 3) so maybe at some point will need to add options in peimage.go to export those
