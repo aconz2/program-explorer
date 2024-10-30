@@ -2,6 +2,12 @@ use serde::{Serialize, Deserialize};
 use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
+pub enum RootfsKind {
+    Sqfs,
+    Erofs,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     // https://github.com/opencontainers/runtime-spec/blob/main/config.md
     // fully filled in config.json ready to pass to crun
@@ -13,6 +19,7 @@ pub struct Config {
     pub strace: bool,
     pub crun_debug: bool,
     pub rootfs_dir: String,
+    pub rootfs_kind: RootfsKind, // this isn't really viable since we need to know
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

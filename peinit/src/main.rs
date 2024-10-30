@@ -9,7 +9,7 @@ use std::path::Path;
 use std::io;
 use std::time::Instant;
 
-use peinit::{Config,Response,ExitKind};
+use peinit::{Config,Response,ExitKind,RootfsKind};
 use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
 use byteorder::{ReadBytesExt,WriteBytesExt,LE};
@@ -356,7 +356,7 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
 fn main() {
     setup_panic();
 
-    parent_rootfs();
+    parent_rootfs().unwrap();
 
     { // initial mounts
         mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
@@ -370,20 +370,27 @@ fn main() {
         chmod(c"/run/output/dir", 0o777).unwrap();
     }
 
+    let config = unpack_input(INOUT_DEVICE, "/run/input");
+
     //              rootfs    input/output
     wait_for_pmem(&[c"pmem0", c"pmem1"]).unwrap();
 
     // mount index
-    mount(c"/dev/pmem0", c"/mnt/index", Some(c"squashfs"), libc::MS_SILENT, None).unwrap();
+    let rootfs_kind = match config.rootfs_kind {
+        RootfsKind::Sqfs => c"squashfs",
+        RootfsKind::Erofs => c"erofs",
+    };
+    mount(c"/dev/pmem0", c"/mnt/index", Some(rootfs_kind), libc::MS_SILENT, None).unwrap();
 
-    let config = unpack_input(INOUT_DEVICE, "/run/input");
-
+    // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
     let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
     let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
     mount(&rootfs_dir, c"/mnt/rootfs", None, libc::MS_SILENT | libc::MS_BIND, None).unwrap();
+
     let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT, Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"));
+    mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT,
+          Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work")).unwrap();
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 

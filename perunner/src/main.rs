@@ -2,9 +2,8 @@ use std::time::Duration;
 use std::fs::File;
 use std::io;
 use std::io::{Write,Seek,SeekFrom,Read};
-use std::ffi::{OsStr,OsString};
+use std::ffi::{OsString};
 use std::path::{Path,PathBuf};
-use std::process::Command;
 
 use tempfile::NamedTempFile;
 use oci_spec::runtime as oci_runtime;
@@ -17,7 +16,7 @@ use clap::{Parser};
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
-use peinit::{Response};
+use peinit::{Response,RootfsKind};
 use peimage::PEImageIndex;
 
 mod cloudhypervisor;
@@ -283,7 +282,7 @@ struct Args {
     // rootfs: OsString,
 
     #[arg(long, default_value = "../ocismall.sqfs")]
-    index: OsString,
+    index: String,
 
     // TODO
     // #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]
@@ -327,8 +326,18 @@ fn main() {
     // TODO This will disappear when we grab the image spec from the sqfs
     // I think we should do that now
 
+    // TODO if we want to support both erofs and sqfs and check their magic
+    // they are erofs: 0xE0F5E1E2 at 1024
+    //       squashfs: 0x73717368 at    0
     let pe_image_index = PEImageIndex::from_path(&args.index).unwrap();
-    println!("index is {:#?}", pe_image_index);
+    //println!("index is {:#?}", pe_image_index);
+    let rootfs_kind = if args.index.ends_with(".sqfs") {
+        RootfsKind::Sqfs
+    } else if args.index.ends_with(".erofs") {
+        RootfsKind::Erofs
+    } else {
+        panic!("--index should end with .erofs or .sqfs");
+    };
 
     let image_index_entry = &pe_image_index.images[0];
 
@@ -357,6 +366,7 @@ fn main() {
         strace: args.strace,
         crun_debug: args.crun_debug,
         rootfs_dir: image_index_entry.rootfs.clone(),
+        rootfs_kind: rootfs_kind,
     };
 
     let io_file = NamedTempFile::new().unwrap();
