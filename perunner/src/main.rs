@@ -18,8 +18,8 @@ use clap::{Parser};
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
-use peinit::{Response,RootfsKind};
-use peimage::PEImageIndex;
+use peinit::{Response};
+use peimage::PEImageMultiIndex;
 
 mod cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
@@ -240,7 +240,6 @@ impl UnpackVisitor for UnpackVisitorPrinter {
     }
 }
 
-
 fn dump_archive(mmap: &Mmap) {
     let mut visitor = UnpackVisitorPrinter{stdout: true};
     unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
@@ -296,9 +295,8 @@ struct Args {
     #[arg(long, default_value = "../ocismall.sqfs")]
     index: String,
 
-    // TODO
-    // #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]
-    // container: OsString,
+    #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]
+    image: String,
 
     #[arg(long, help = "name of dir to use as input dir")]
     input: Option<PathBuf>,
@@ -341,28 +339,27 @@ fn main() {
     // tracing::subscriber::set_global_default(subscriber)
     //     .expect("setting default subscriber failed");
 
-    // TODO This will disappear when we grab the image spec from the sqfs
-    // I think we should do that now
+    let image_index = PEImageMultiIndex::new()
+        .add_path(&args.index)
+        .expect("failed to create image index");
 
-    // TODO if we want to support both erofs and sqfs and check their magic
-    // they are erofs: 0xE0F5E1E2 at 1024
-    //       squashfs: 0x73717368 at    0
-    let pe_image_index = PEImageIndex::from_path(&args.index).unwrap();
-    //eprintln!("index is {:#?}", pe_image_index);
-    let rootfs_kind = if args.index.ends_with(".sqfs") {
-        RootfsKind::Sqfs
-    } else if args.index.ends_with(".erofs") {
-        RootfsKind::Erofs
-    } else {
-        panic!("--index should end with .erofs or .sqfs");
+    let image_index_entry = {
+        match image_index.get(&args.image) {
+            Some(e) => e,
+            None => {
+                eprintln!("image {} not found in the index; available images are: ", args.image);
+                for (k, v) in image_index.map() {
+                    eprintln!("  {} {}", k, v.image.id.digest);
+                }
+                panic!("image not present");
+            }
+        }
     };
-
-    let image_index_entry = &pe_image_index.images[0];
 
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
-    let runtime_spec = create_runtime_spec(&image_index_entry.config, &args.args).unwrap();
+    let runtime_spec = create_runtime_spec(&image_index_entry.image.config, &args.args).unwrap();
     //eprintln!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
     eprintln!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
 
@@ -383,8 +380,8 @@ fn main() {
         stdin: args.stdin,
         strace: args.strace,
         crun_debug: args.crun_debug,
-        rootfs_dir: image_index_entry.rootfs.clone(),
-        rootfs_kind: rootfs_kind,
+        rootfs_dir: image_index_entry.image.rootfs.clone(),
+        rootfs_kind: image_index_entry.rootfs_kind,
     };
 
     let io_file = NamedTempFile::new().unwrap();
@@ -396,7 +393,7 @@ fn main() {
         ch_config: ch_config,
         ch_timeout: ch_timeout,
         io_file: io_file,
-        rootfs: cwd.join(args.index).into(),
+        rootfs: image_index_entry.path.clone().into(),
     };
 
     match worker::run(worker_input) {

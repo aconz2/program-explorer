@@ -18,7 +18,6 @@ use api_client;
 pub enum Error {
     #[default]
     Unk,
-    WorkdirSetup,
     TempfileSetup,
     Spawn,
     Socket,

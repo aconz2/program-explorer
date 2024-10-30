@@ -1,10 +1,29 @@
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
+use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum RootfsKind {
     Sqfs,
     Erofs,
+}
+
+// TODO if we want to support both erofs and sqfs and check their magic
+// they are erofs: 0xE0F5E1E2 at 1024
+//       squashfs: 0x73717368 at    0
+impl RootfsKind {
+    pub fn try_from_path_name<P: AsRef<Path>>(p: P) -> Option<Self> {
+        match p.as_ref().extension() {
+            Some(e) => {
+                match e.to_str() {
+                    Some("sqfs") => Some(RootfsKind::Sqfs),
+                    Some("erofs") => Some(RootfsKind::Erofs),
+                    _ => None
+                }
+            }
+            None => None
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,7 +49,7 @@ pub struct Response {
     pub rusage  : Option<Rusage>,
 }
 
-#[derive(Debug, Serialize, Deserialize,Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub enum ExitKind {
     Ok,
     Panic,

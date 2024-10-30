@@ -1,15 +1,18 @@
 use std::fs::File;
 use std::io;
+use std::path::{Path,PathBuf};
 use std::io::{Seek,SeekFrom,Read};
+use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde_json;
 use oci_spec::image as oci_image;
 use byteorder::{ReadBytesExt,LE};
+use peinit::RootfsKind;
 
 const INDEX_JSON_MAGIC: u64 = 0x1db56abd7b82da38;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PEImageId {
     pub digest: String,
     pub repository: String,
@@ -17,7 +20,13 @@ pub struct PEImageId {
     pub tag: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl PEImageId {
+    pub fn name(&self) -> String {
+        format!("{}/{}:{}", self.registry, self.repository, self.tag)
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct PEImageIndexEntry {
     pub rootfs: String,
     pub config: oci_image::ImageConfiguration,
@@ -31,8 +40,7 @@ pub struct PEImageIndex {
 }
 
 impl PEImageIndex {
-
-    pub fn from_path<P: AsRef<std::path::Path>>(p: P) -> io::Result<Self> {
+    pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Self> {
         Self::from_file(&mut File::open(p)?)
     }
 
@@ -55,5 +63,49 @@ impl PEImageIndex {
         f.read_exact(&mut buf)?;
         serde_json::from_slice(buf.as_slice())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "index.json not valid PEImageIndex"))
+    }
+}
+
+pub struct PEImageMultiIndexEntry {
+    pub path: PathBuf,
+    pub image: PEImageIndexEntry,
+    pub rootfs_kind: RootfsKind,
+}
+
+pub struct PEImageMultiIndex {
+    map: HashMap<String, PEImageMultiIndexEntry>,
+}
+
+impl PEImageMultiIndex {
+    pub fn new() -> PEImageMultiIndex {
+        Self { map: HashMap::new() }
+    }
+
+    pub fn add_path<P: AsRef<Path> + Into<PathBuf>>(mut self, path: P) -> io::Result<Self> {
+        let idx = PEImageIndex::from_path(&path)?;
+        let rootfs_kind = RootfsKind::try_from_path_name(&path)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "couldn't determine rootfs kind"))?;
+        let pathbuf: PathBuf = path.into();
+        for image in idx.images {
+            let key = image.id.name();
+            if self.map.contains_key(&key) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "duplicate image id name"))
+            }
+            let entry = PEImageMultiIndexEntry{
+                path: pathbuf.clone(),
+                image: image.clone(),
+                rootfs_kind: rootfs_kind,
+            };
+            self.map.insert(image.id.name(), entry);
+        }
+        Ok(self)
+    }
+
+    pub fn get<'a>(&'a self, key: &str) -> Option<&'a PEImageMultiIndexEntry> {
+        self.map.get(key)
+    }
+
+    pub fn map<'a>(&'a self) -> &'a HashMap<String, PEImageMultiIndexEntry> {
+        &self.map
     }
 }

@@ -532,6 +532,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "oci-spec",
+ "peinit",
  "serde",
  "serde_json",
 ]
