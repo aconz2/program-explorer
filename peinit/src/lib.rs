@@ -26,7 +26,7 @@ impl RootfsKind {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     // https://github.com/opencontainers/runtime-spec/blob/main/config.md
     // fully filled in config.json ready to pass to crun

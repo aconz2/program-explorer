@@ -175,7 +175,7 @@ fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &
 //     <archive size : u32le> [ <config size> <config> <archive> ] <padding>
 
 // how do you get away from this P1 P2 thing
-fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: Option<P1>, file: P2, config: &peinit::Config) {
+fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &Option<P1>, file: P2, config: &peinit::Config) {
     let mut f = File::create(file).unwrap();
     let config_bytes = bincode::serialize(&config).unwrap();
     if true {
@@ -276,6 +276,33 @@ fn dump_file<F: Read>(name: &str, file: &mut F) {
     eprintln!("=== {} ===", name);
     let _ = io::copy(file, &mut io::stdout());
 }
+
+fn handle_worker_output(output: worker::OutputResult) {
+    match output {
+        Ok(worker::Output{mut io_file, ch_logs, id}) => {
+            let _ = id;
+            if let Some(mut err_file) = ch_logs.err_file { dump_file("ch err", &mut err_file); }
+            if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
+
+            let (response, archive_map) = parse_response(&mut io_file);
+            eprintln!("response {:#?}", response);
+
+            dump_archive(&archive_map);
+
+        }
+        Err(e) => {
+            eprintln!("oh no something went bad {:?}", e.error);
+            if let Some(args) = e.args {
+                eprintln!("launched ch with args {:?}", args);
+            }
+            if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
+            if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = e.logs.con_file { dump_file("ch con", &mut con_file); }
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -318,6 +345,9 @@ struct Args {
 
     #[arg(long, help = "pass --debug to crun")]
     crun_debug: bool,
+
+    #[arg(long, default_value_t = 0, help = "num workers to run")]
+    parallel: u64,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -384,39 +414,42 @@ fn main() {
         rootfs_kind: image_index_entry.rootfs_kind,
     };
 
-    let io_file = NamedTempFile::new().unwrap();
-    create_pack_file_from_dir(args.input, &io_file, &pe_config);
-
-    let worker_input = worker::Input {
-        id: 0,
-        pe_config: pe_config,
-        ch_config: ch_config,
-        ch_timeout: ch_timeout,
-        io_file: io_file,
-        rootfs: image_index_entry.path.clone().into(),
-    };
-
-    match worker::run(worker_input) {
-        Ok(worker::Output{mut io_file, ch_logs, id}) => {
-            let _ = id;
-            if let Some(mut err_file) = ch_logs.err_file { dump_file("ch err", &mut err_file); }
-            if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
-
-            let (response, archive_map) = parse_response(&mut io_file);
-            eprintln!("response {:#?}", response);
-
-            dump_archive(&archive_map);
-
+    if args.parallel > 0 {
+        let num_workers = args.parallel as usize;
+        let cpus = worker::cpuset(2, num_workers, 2).expect("couldn't make cpuset");
+        let mut pool = worker::Pool::new(&cpus);
+        for id in 0..args.parallel {
+            let io_file = NamedTempFile::new().unwrap();
+            create_pack_file_from_dir(&args.input, &io_file, &pe_config);
+            let worker_input = worker::Input {
+                id: id,
+                pe_config: pe_config.clone(),
+                ch_config: ch_config.clone(),
+                ch_timeout: ch_timeout,
+                io_file: io_file,
+                rootfs: image_index_entry.path.clone().into(),
+            };
+            pool.sender().try_send(worker_input).expect("couldn't submit work");
         }
-        Err(e) => {
-            eprintln!("oh no something went bad {:?}", e.error);
-            if let Some(args) = e.args {
-                eprintln!("launched ch with args {:?}", args);
-            }
-            if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
-            if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = e.logs.con_file { dump_file("ch con", &mut con_file); }
+        for id in 0..args.parallel {
+            println!("hi trying to get work for {id}");
+            let output = pool.receiver().recv_timeout(ch_timeout).expect("should have gotten a response by now");
+            handle_worker_output(output);
         }
+        let pool = pool.close_sender();
+        let _ = pool.shutdown();
+
+    } else {
+        let io_file = NamedTempFile::new().unwrap();
+        create_pack_file_from_dir(&args.input, &io_file, &pe_config);
+        let worker_input = worker::Input {
+            id: 0,
+            pe_config: pe_config,
+            ch_config: ch_config,
+            ch_timeout: ch_timeout,
+            io_file: io_file,
+            rootfs: image_index_entry.path.clone().into(),
+        };
+        handle_worker_output(worker::run(worker_input));
     }
 }

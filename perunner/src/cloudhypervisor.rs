@@ -32,6 +32,7 @@ impl From<api_client::Error> for Error {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum ChLogLevel {
     Warn,
     Info,
@@ -39,6 +40,7 @@ pub enum ChLogLevel {
     Trace,
 }
 
+#[derive(Clone)]
 pub struct CloudHypervisorConfig {
     pub bin: OsString,
     pub kernel: OsString,

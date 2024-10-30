@@ -2,7 +2,7 @@
 use std::thread;
 use std::thread::{spawn,JoinHandle};
 use crossbeam::channel as channel;
-use crossbeam::channel::{Receiver,Sender};
+use crossbeam::channel::{Receiver,Sender,TrySendError};
 use std::time::Duration;
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 use std::path::PathBuf;
@@ -32,22 +32,28 @@ pub struct Output {
     pub ch_logs: CloudHypervisorLogs,
 }
 
-// TODO I guess if we get an error, then we'll drop the CloudHypervisor thing
-// which holds the tempdir and console/log info, maybe extract these out?
-type OutputResult = Result<Output, CloudHypervisorPostMortem>;
+pub type OutputResult = Result<Output, CloudHypervisorPostMortem>;
 
-struct Pool {
+pub struct Pool {
     sender: Sender<Input>,
     receiver: Receiver<OutputResult>,
     handles: Vec<JoinHandleT>,
 }
 
+pub struct PoolShuttingDown {
+    receiver: Receiver<OutputResult>,
+    handles: Vec<JoinHandleT>,
+}
+
 impl Pool {
-    fn new(cores: &[CpuSet]) -> Self {
+    pub fn new(cores: &[CpuSet]) -> Self {
         let (i_s, i_r) = channel::bounded::<Input>(cores.len() * 2);
         let (o_s, o_r) = channel::bounded::<OutputResult>(cores.len() * 2);
-        let handles: Vec<_> = cores.iter()
-            .map(|c| spawn_worker(*c, i_r.clone(), o_s.clone())).collect();
+        let handles: Vec<_> = cores
+            .iter()
+            .enumerate()
+            .map(|(i, c)| spawn_worker(i, *c, i_r.clone(), o_s.clone()))
+            .collect();
         Self {
             sender: i_s,
             receiver: o_r,
@@ -55,8 +61,17 @@ impl Pool {
         }
     }
 
-    fn shutdown(self) -> Vec<thread::Result<()>> {
-        drop(self.sender);
+    pub fn sender(&mut self) -> &Sender<Input> { &self.sender }
+    pub fn receiver(&mut self) -> &Receiver<OutputResult> { &self.receiver }
+
+    pub fn close_sender(self) -> PoolShuttingDown {
+        PoolShuttingDown { receiver: self.receiver, handles: self.handles, }
+    }
+}
+
+impl PoolShuttingDown {
+    pub fn shutdown(self) -> Vec<thread::Result<()>> {
+        // do we need to do anything with receiver?
         self.handles.into_iter().map(|h| h.join()).collect()
     }
 }
@@ -124,22 +139,26 @@ pub fn run(input: Input) -> OutputResult {
     })
 }
 
-fn spawn_worker(cpuset: CpuSet,
+fn spawn_worker(id: usize,
+                cpuset: CpuSet,
                 input:  Receiver<Input>,
                 output: Sender<OutputResult>,
                )
     -> JoinHandleT {
     spawn(move || {
+        println!("starting worker {id}");
         sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
         for msg in input.iter() {
             match output.send(run(msg)) {
                 Ok(_) => { },
                 Err(_) => {
                     // output got disconnected somehow
+                    println!("worker {id} got disconnected");
                     return;
                 },
             }
         }
+        println!("worker {id} shutting down");
     })
 }
 
