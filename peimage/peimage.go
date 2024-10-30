@@ -15,6 +15,7 @@ import (
     "os/exec"
     "slices"
     "strings"
+    "syscall"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
@@ -293,6 +294,8 @@ func stashIndexJson(outfile string, data []byte) (error) {
     if err != nil {
         return fmt.Errorf("opening file %s %w", outfile, err)
     }
+    defer f.Close()
+
     info, err := f.Stat()
     if err != nil {
         return fmt.Errorf("stating file %s %w", outfile, err)
@@ -346,6 +349,42 @@ func exportImageSqfs(outfile string, args []string) (error) {
     return nil
 }
 
+func exportImageErofs(outfile string, args []string) (error) {
+    f, err := os.CreateTemp("", "fifo")
+    if err != nil {
+        return fmt.Errorf("tempfile %w", err)
+    }
+    f.Close()
+    fifoName := f.Name()
+    os.Remove(fifoName)
+    if err = syscall.Mkfifo(fifoName, 0600); err != nil {
+        return fmt.Errorf("mkfifo %w", err)
+    }
+    defer os.Remove(fifoName)
+
+    fifo, err := os.OpenFile(fifoName, os.O_RDWR, 0600)
+    if err != nil {
+        return fmt.Errorf("fifo open %w", err)
+    }
+
+    cmd := exec.Command("mkfs.erofs", "--tar=f", outfile, fifoName)
+    if err = cmd.Start(); err != nil {
+        return fmt.Errorf("error starting mkfs.erofs %w", err)
+    }
+    idxBuf, err := mainExport(fifo, args)
+    if err != nil {
+        return fmt.Errorf("error exporting %w", err)
+    }
+    fifo.Close()
+    if err = cmd.Wait(); err != nil {
+        return fmt.Errorf("error waiting for mkfs.erofs %w", err)
+    }
+    if err = stashIndexJson(outfile, idxBuf); err != nil {
+        return fmt.Errorf("error writing index.json %w", err)
+    }
+    return nil
+}
+
 func mainImage(args []string) (error) {
     if len(args) < 3 {
         return fmt.Errorf("expected <image.sqfs|image.erofs> <oci-dir> <names...>")
@@ -361,17 +400,12 @@ func mainImage(args []string) (error) {
         format = "erofs"
     }
 
-    // f, err := os.OpenFile(image, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-    // if err != nil {
-    //     return fmt.Errorf("error opening image file %w", err)
-    // }
-
     switch format {
     case "sqfs":
         return exportImageSqfs(image, args[1:])
 
     case "erofs":
-        return fmt.Errorf("not handled yet")
+        return exportImageErofs(image, args[1:])
     default:
         return fmt.Errorf("got unexpected format %s", format)
     }
