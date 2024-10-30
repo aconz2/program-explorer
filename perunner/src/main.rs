@@ -51,11 +51,6 @@ fn round_up_file_to_pmem_size(f: &File) -> io::Result<u64> {
     Ok(newlen)
 }
 
-fn round_up_path_to_pmem_size<P: AsRef<Path>>(p: P) -> io::Result<u64> {
-    let f = File::options().write(true).open(p)?;
-    round_up_file_to_pmem_size(&f)
-}
-
 // ImageConfiguration: {created, architecture, os, config: {Env, User, Entrypoint, Cmd, WorkingDir}, rootfs, ...}
 // RuntimeSpec: {process: {terminal, user: {uid, gid}, args, env, cwd, capabilities, ...}
 
@@ -319,14 +314,6 @@ struct Args {
     args: Vec<String>,
 }
 
-fn load_index_from_file<P: AsRef<OsStr>>(p: P) -> io::Result<PEImageIndex> {
-    let output = Command::new("sqfscat").arg(p).arg("index.json").output()?;
-    let output_s = String::from_utf8(output.stdout)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "index.json not utf8"))?;
-    serde_json::from_str::<PEImageIndex>(&output_s)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "index.json not valid PEImageIndex"))
-}
-
 fn main() {
     let args = {
         let mut args = Args::parse();
@@ -340,8 +327,7 @@ fn main() {
     // TODO This will disappear when we grab the image spec from the sqfs
     // I think we should do that now
 
-    round_up_path_to_pmem_size(&args.index);  // maybe hacky
-    let pe_image_index = load_index_from_file(&args.index).unwrap();
+    let pe_image_index = PEImageIndex::from_path(&args.index).unwrap();
     println!("index is {:#?}", pe_image_index);
 
     let image_index_entry = &pe_image_index.images[0];

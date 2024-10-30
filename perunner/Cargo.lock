@@ -508,8 +508,10 @@ dependencies = [
 name = "peimage"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "oci-spec",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

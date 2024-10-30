@@ -36,7 +36,6 @@ const ImageRefName = "org.opencontainers.image.ref.name"
 const UidGidOffset = 1000
 const TwoMBAlignment = 0x20_0000  // 2MB alignment size
 const IndexJsonMagic = uint64(0x1db56abd7b82da38)  // magic to be put at end of image
-const IndexJsonSize  = 4  // num bytes for size
 
 type HeaderXform func(*tar.Header) (error)
 
