@@ -1,0 +1,16 @@
+[package]
+name = "peserver"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+clap = "4.5.20"
+http = "1.1.0"
+httparse = "1.9.5"
+mio = { version = "1.0.2", features = ["net"] }
+nix = { version = "0.29.0", features = ["time"] }
+peimage = { version = "0.1.0", path = "../peimage" }
+peinit = { version = "0.1.0", path = "../peinit" }
+perunner = { version = "0.1.0", path = "../perunner" }
+tempfile = "3.13.0"

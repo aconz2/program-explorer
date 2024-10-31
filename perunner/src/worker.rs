@@ -2,7 +2,7 @@
 use std::thread;
 use std::thread::{spawn,JoinHandle};
 use crossbeam::channel as channel;
-use crossbeam::channel::{Receiver,Sender,TrySendError};
+use crossbeam::channel::{Receiver,Sender};
 use std::time::Duration;
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 use std::path::PathBuf;

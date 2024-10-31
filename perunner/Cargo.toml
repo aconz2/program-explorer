@@ -3,6 +3,10 @@ name = "perunner"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "perunner"
+path = "src/lib.rs"
+
 [dependencies]
 api_client = { version = "0.1.0", path = "../../cloud-hypervisor/api_client" }
 pearchive = { version = "0.1.0", path = "../pearchive" }
