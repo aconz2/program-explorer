@@ -1,5 +1,5 @@
 use std::io;
-use std::io::{Read};
+use std::io::{Read,Write};
 
 use mio;
 use mio::{Events, Interest, Poll, Registry};
@@ -9,13 +9,17 @@ use std::time::Duration;
 use clap::{Parser};
 use tempfile::NamedTempFile;
 use httparse;
+use atoi_simd;
 
 mod mytimerfd;
 use mytimerfd::TimerFd;
 
-// use nix::sys::timerfd::{TimerFd,ClockId,TimerFlags};
-
 const MAX_HEADER_SIZE_BYTES: usize = 4096;
+const MAX_HEADER_COUNT: usize = 5;
+// max body size caps the size of our io file, though we have the config header additionally and it
+// will get truncated up to nearest 2 MB alignment, so really it should be about MAX_BODY_SIZE +
+// 2MB since the config should always fit in 2 MB anyways
+const MAX_BODY_SIZE: usize = 0xa00000; // 10 MB
 
 struct Config {
     addr: SocketAddr,
@@ -130,40 +134,69 @@ impl Request {
 
     fn index(&self) -> usize { self.resources.index }
 
-    fn into_resources(self) -> RequestResources { self.resources.reset() }
+    fn into_resources(mut self, registry: &Registry) -> RequestResources {
+        let _ = self.deregister(registry);
+        self.resources.reset()
+    }
 
     fn connection_ready(&mut self) -> io::Result<()> {
+        // we are going to have to transition to registering for writable, so we need the
+        // registry here
         match self.state {
             State::ReadingHeaders => {
+                if self.resources.buf_offset + 1 == self.resources.buf.len() {
+                    panic!("guaranteed by check in partial read");
+                }
                 let n = self.connection.read(&mut self.resources.buf[self.resources.buf_offset..])?;
                 if n == 0 {
-                    todo!();
+                    todo!("eof, send error response and close");
                 }
-                // if n is 0, end of connection
                 let data = &self.resources.buf[..self.resources.buf_offset + n];
                 self.resources.buf_offset = data.len();
                 {
                     escape_dump(&data);
                 }
-                let mut headers = [httparse::EMPTY_HEADER; 5];
+                // I tried for a second to move these into RequestResources but the lifetimes get a
+                // bit hairy
+                let mut headers = [httparse::EMPTY_HEADER; MAX_HEADER_COUNT];
                 let mut request = httparse::Request::new(&mut headers[..]);
                 let res = request.parse(data);
                 match res {
                     Ok(httparse::Status::Complete(body_start)) => {
                         eprintln!("yo lets go method={:?} path={:?} version={:?}", request.method, request.path, request.version);
-                        eprintln!("{body_start} {}", data.len());
                         let body = &data[body_start..];
-                        if !body.is_empty() {
-                            let len = body.len();
-                            eprintln!("yo got some body {len}");
-                            escape_dump(&body);
+                        match content_length(&request) {
+                            Some(body_length) => {
+                                if body_length as usize > MAX_BODY_SIZE {
+                                    todo!("body size too big, send error response and close");
+                                } else if body.len() == body_length as usize {
+                                    todo!("complete body");
+                                    // tiny write, just do it
+                                    match self.resources.io_file.write_all(body) {
+                                        Ok(_) => {
+                                            todo!("ready to put me on the queue");
+                                        },
+                                        Err(_) => {
+                                            todo!("got error writing body");
+                                        }
+                                    }
+                                } else {
+                                    todo!("incomplete body, move to ReadingBody state");
+                                }
+                            },
+                            None => {
+                                todo!("no content length, send error and close");
+                            }
                         }
                     }
                     Ok(httparse::Status::Partial) => {
+                        if self.resources.buf_offset == MAX_HEADER_SIZE_BYTES {
+                            todo!("max header size exceeded, send error response and close");
+                        }
                         eprintln!("not enough request data yet");
                     }
                     Err(e) => {
-                        eprintln!("oh no {e}");
+                        todo!("malformed request, send error and close");
                     }
                 }
 
@@ -178,6 +211,10 @@ impl Request {
         registry.register(&mut self.connection, token_conn.into(), Interest::READABLE)?;
         //registry.register(&mut self.resources.timer, token_time.into(), Interest::READABLE)?;
         Ok(())
+    }
+
+    fn deregister(&mut self, registry: &Registry) {
+        let _ = registry.deregister(&mut self.connection);
     }
 }
 
@@ -204,20 +241,20 @@ impl RequestPool {
     }
 
     fn activate(&mut self, mut req: Request, registry: &Registry) -> io::Result<()> {
-        let index = req.resources.index;
+        let index = req.index();
         if self.active[index].is_some() {
-            panic!("no free slot here");
+            panic!("no free slot here {index}");
         }
         req.register(registry)?;
         self.active[index] = Some(req);
         Ok(())
     }
 
-    fn deactivate(&mut self, index: usize) {
+    fn deactivate(&mut self, index: usize, registry: &Registry) {
         if self.active[index].is_none() {
             panic!("no active request here {index}");
         }
-        let resources = self.active[index].take().unwrap().into_resources();
+        let resources = self.active[index].take().unwrap().into_resources(registry);
         self.inactive.push(resources);
         // TODO unregister from registry?
     }
@@ -246,8 +283,6 @@ fn serve(config: Config) -> io::Result<()> {
         poll.poll(&mut events, Some(Duration::from_millis(100)))?;
 
         for event in events.iter() {
-            // We can use the token we previously provided to `register` to
-            // determine for which type the event is.
             match event.token().into() {
                 Token::Server => loop {
                     match reqpool.pop() {
@@ -306,4 +341,49 @@ fn main() {
         timeout_per_conn: Duration::from_millis(1000 * 5),
     };
     serve(config).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use httparse;
+    use super::*;
+
+    #[test]
+    fn test_request_reuse() {
+        let mut headers = [httparse::EMPTY_HEADER; 5];
+        {
+            let mut req = httparse::Request::new(&mut headers[..]);
+            let _ = req.parse(b"GET / HTTP/1.1\r\nHeader1: value1\r\nContent-Length: 123\r\n\r\n").unwrap();
+            assert_eq!(content_length(&req), Some(123));
+        }
+        {
+            let mut req = httparse::Request::new(&mut headers[..]);
+            let _ = req.parse(b"GET / HTTP/1.1\r\nContent-Length: 123\r\nHeader1: value1\r\n\r\n").unwrap();
+            assert_eq!(content_length(&req), Some(123));
+        }
+        {
+            let mut req = httparse::Request::new(&mut headers[..]);
+            let _ = req.parse(b"GET / HTTP/1.1\r\nHeader1: value1\r\n\r\n").unwrap();
+            assert_eq!(content_length(&req), None);
+        }
+        {
+            let mut req = httparse::Request::new(&mut headers[..]);
+            let _ = req.parse(b"GET / HTTP/1.1\r\nContenT-LENGTH: kdjkfj\r\n\r\n").unwrap();
+            assert_eq!(content_length(&req), None);
+        }
+        {
+            let mut req = httparse::Request::new(&mut headers[..]);
+            let _ = req.parse(b"GET / HTTP/1.1\r\nContenT-LENGTH: 999999999999999999999999999999\r\n\r\n").unwrap();
+            assert_eq!(content_length(&req), None);
+        }
+    }
+}
+
+fn content_length(req: &httparse::Request) -> Option<u64> {
+    for header in req.headers.iter() {
+        if header.name.eq_ignore_ascii_case("content-length") {  // TODO could do this simd
+            return atoi_simd::parse::<u64>(header.value).ok()
+        }
+    }
+    None
 }

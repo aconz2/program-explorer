@@ -108,9 +108,8 @@ fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.a
 fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
 fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
 
-fn parent_rootfs() -> io::Result<()> {
-    let pivot_dir = c"/abc";
-    unshare(libc::CLONE_NEWNS)?;
+fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
+    //unshare(libc::CLONE_NEWNS)?;
     mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
     chdir(pivot_dir)?;
     mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None)?;
@@ -356,7 +355,7 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
 fn main() {
     setup_panic();
 
-    parent_rootfs().unwrap();
+    parent_rootfs(c"/abc").unwrap();
 
     { // initial mounts
         mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
