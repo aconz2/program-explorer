@@ -157,36 +157,58 @@ async fn send_response(mut socket: TcpStream, status: usize, message: &str) -> i
 //    // parse
 //}
 
-async fn parse_request<'a>(buf: &'a mut Box<[u8; MAX_HEADER_SIZE_BYTES]>, socket: &mut TcpStream, request: &mut httparse::Request<'a, 'a>) -> io::Result<usize> {
-    let mut offset = 0;
-    loop {
-        let n_read = socket.read(&mut buf.as_mut()[offset..]).await?;
-        let valid = &buf[..n_read + offset];
-        offset = valid.len();
-        match request.parse(valid) {
-            Ok(httparse::Status::Complete(body_start)) => {
-                return Ok(body_start)
-            }
-            Ok(httparse::Status::Partial) => {
-                if offset >= MAX_HEADER_SIZE_BYTES {
-                    return Err(ErrorKind::InvalidData.into());
-                }
-            }
-            Err(e) => {
-                eprintln!("error parsing request {e}");
-                return Err(ErrorKind::InvalidData.into());
-            }
-        }
-    }
-}
+//async fn parse_request<'a>(buf: &'a mut Box<[u8; MAX_HEADER_SIZE_BYTES]>, socket: &mut TcpStream, request: &mut httparse::Request<'a, 'a>) -> io::Result<usize> {
+//    let mut offset = 0;
+//    loop {
+//        let n_read = socket.read(&mut buf.as_mut()[offset..]).await?;
+//        let valid = &buf[..n_read + offset];
+//        offset = valid.len();
+//        match request.parse(valid) {
+//            Ok(httparse::Status::Complete(body_start)) => {
+//                return Ok(body_start)
+//            }
+//            Ok(httparse::Status::Partial) => {
+//                if offset >= MAX_HEADER_SIZE_BYTES {
+//                    return Err(ErrorKind::InvalidData.into());
+//                }
+//            }
+//            Err(e) => {
+//                eprintln!("error parsing request {e}");
+//                return Err(ErrorKind::InvalidData.into());
+//            }
+//        }
+//    }
+//}
 
 async fn handle_conn(mut socket: TcpStream, addr: SocketAddr, max_requests: usize) -> io::Result<()> {
     eprintln!("handling conn from {addr}");
+    let mut buf = Box::new([0; MAX_HEADER_SIZE_BYTES]);
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADER_COUNT]; // Box?
+    let mut request = httparse::Request::new(&mut headers[..]);
     for _ in 0..max_requests {
-        let mut buf = Box::new([0; MAX_HEADER_SIZE_BYTES]);
-        let mut headers = [httparse::EMPTY_HEADER; MAX_HEADER_COUNT]; // Box?
-        let mut request = httparse::Request::new(&mut headers[..]);
-        let body_start = parse_request(&mut buf, &mut socket, &mut request).await?;
+        let body_start = {
+            let mut offset = 0;
+            loop {
+                let n_read = socket.read(&mut buf.as_mut()[offset..]).await?;
+                let valid = &buf[..n_read + offset];
+                offset = valid.len();
+                match request.parse(valid) {
+                    Ok(httparse::Status::Complete(body_start)) => {
+                        break body_start;
+                    }
+                    Ok(httparse::Status::Partial) => {
+                        if offset >= MAX_HEADER_SIZE_BYTES {
+                            return Err(ErrorKind::InvalidData.into());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error parsing request {e}");
+                        return Err(ErrorKind::InvalidData.into());
+                    }
+                }
+            }
+        };
+        eprintln!("body_start {body_start}");
     }
     Ok(())
 }
