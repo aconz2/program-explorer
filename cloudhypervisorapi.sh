@@ -17,34 +17,28 @@ rm -f ${socket_path}
     --cmdline "console=hvc0" \
     --cpus boot=1 \
     --memory size=1024M \
-    --api-socket ${socket_path} > /tmp/chout 2> /tmp/cherr &
+    --event-monitor fd=2 \
+    -vv \
+    --api-socket ${socket_path} > /tmp/ch.out &
 
 curl --unix-socket ${socket_path} \
     -i -X PUT 'http://localhost/api/v1/vm.add-pmem' \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json' \
-    -d '{"file": "gcc-14.1.0.sqfs", "discard_writes": true}'
+    -d '{"file": "ocismall.erofs", "discard_writes": true}'
 
 curl --unix-socket ${socket_path} \
     -i -X PUT 'http://localhost/api/v1/vm.add-pmem' \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json' \
-    -d '{"file": "/tmp/_in/input.sqfs", "discard_writes": true}'
+    -d '{"file": "/tmp/perunner-io-file", "discard_writes": false}'
 
-curl --unix-socket ${socket_path} \
-    -i -X PUT 'http://localhost/api/v1/vm.add-pmem' \
-    -H 'Content-Type: application/json' \
-    -H 'Accept: application/json' \
-    -d '{"file": "/tmp/_out/output"}'
+sleep 1
+cat /tmp/ch.out
+#wait
 
-wait
-
-echo '-- out'
-cat /tmp/chout
-echo '-- err'
-cat /tmp/cherr
 # (./cloud-hypervisor-static -v --event-monitor path=/tmp/chevent --api-socket ${socket_path} | ts "%H:%M:%.S") > /tmp/chout 2> /tmp/cherr &
-# 
+#
 # config='{
 #     "cpus": {"boot_vcpus": 1, "max_vcpus": 1},
 #     "memory": {"size": 1073741824},
@@ -52,20 +46,20 @@ cat /tmp/cherr
 #     "pmem": [{"file": "gcc-14.1.0.sqfs", "discard_writes": true}, {"file": "pmemtestfile"}],
 #     "console": {"mode": "Tty"}
 # }'
-# 
+#
 # time curl --unix-socket ${socket_path} -i \
 #     -X PUT 'http://localhost/api/v1/vm.create' \
 #      -H 'Accept: application/json'              \
 #      -H 'Content-Type: application/json'        \
 #      -d "${config}"
-# 
+#
 # echo 'pre  boot' | ts "%H:%M:%.S"
 # time curl --unix-socket ${socket_path} -i -X PUT 'http://localhost/api/v1/vm.boot'
 # echo 'post  boot' | ts "%H:%M:%.S"
 # sleep 1
-# 
+#
 # echo 'rebooting'
-# 
+#
 # echo 'pre  reboot' | ts "%H:%M:%.S"
 # time curl --unix-socket ${socket_path} -i -X PUT 'http://localhost/api/v1/vm.reboot'
 # echo 'post reboot' | ts "%H:%M:%.S"
@@ -89,6 +83,6 @@ cat /tmp/cherr
 #time curl --unix-socket ${socket_path} -X GET 'http://localhost/api/v1/vm.info' | jq
 
 # wait
-# 
+#
 # cat /tmp/chout
 # cat /tmp/cherr

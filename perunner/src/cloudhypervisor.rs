@@ -40,6 +40,19 @@ pub enum ChLogLevel {
     Trace,
 }
 
+impl TryFrom<&str> for ChLogLevel {
+    type Error = io::Error;
+    fn try_from(x: &str) -> io::Result<Self> {
+        match x {
+            "warn" =>  Ok(Self::Warn),
+            "info" =>  Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            _ => Err(io::ErrorKind::InvalidData.into())
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CloudHypervisorConfig {
     pub bin: OsString,
@@ -48,6 +61,7 @@ pub struct CloudHypervisorConfig {
     pub console: bool,
     pub log_level: Option<ChLogLevel>,
     pub keep_args: bool,
+    pub event_monitor: bool,
 }
 
 pub struct CloudHypervisor {
@@ -157,11 +171,20 @@ impl CloudHypervisor {
              .arg("--initramfs").arg(config.initramfs)
              .arg("--cpus").arg("boot=1")
              .arg("--memory").arg("size=1024M")
-             .arg("--cmdline").arg("console=hvc0")
+             //.arg("--pvpanic")
              .arg("--api-socket").arg(format!("fd={socket_fd}"));
 
+            // NOTE: using --cmdline console=hvc0 --console off causes the guest
+            //       to do bad things (guessing because its like a write to a bad "fd"?)
+            //             --cmdline console=hvc0 --console null does work though
             if config.console {
-                x.arg("--console").arg(format!("file={:?}", con_file.path()));
+                x.arg("--cmdline").arg("console=hvc0")
+                 .arg("--console").arg(format!("file={:?}", con_file.path()));
+            } else {
+                x.arg("--console").arg("off");
+            }
+            if config.event_monitor {
+                x.arg("--event-monitor").arg("fd=2");
             }
             if let Some(ref level) = config.log_level {
                 x.arg("--log-file").arg(log_file.path());

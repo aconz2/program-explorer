@@ -35,7 +35,13 @@ fn sha2_hex(buf: &[u8]) -> String {
     base16ct::lower::encode_string(&hash)
 }
 
+fn kernel_panic() {
+    fs::write("/proc/sys/kernel/sysrq", b"1").unwrap();
+    fs::write("/proc/sysrq-trigger", b"c").unwrap();
+}
+
 fn exit() {
+    kernel_panic();
     unsafe {
         libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
     }
@@ -221,15 +227,12 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archive: P) {
-    Command::new("/bin/busybox").arg("ls").arg("-lh").arg("/run/output").spawn().unwrap().wait().unwrap();
+    //Command::new("/bin/busybox").arg("ls").arg("-lh").arg("/run/output").spawn().unwrap().wait().unwrap();
     let mut f = File::create(&archive).unwrap();
     let response_bytes = bincode::serialize(response).unwrap();
 
     if true {
-        use sha2::{Sha256,Digest};
-        use base16ct;
-        let hash = Sha256::digest(&response_bytes);
-        let hash_hex = base16ct::lower::encode_string(&hash);
+        let hash_hex = sha2_hex(&response_bytes);
         println!("V response_bytes len {} {}", response_bytes.len(), hash_hex);
     }
 
@@ -383,10 +386,10 @@ fn main() {
 
     // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
     let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
-    let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
+    //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
     mount(&rootfs_dir, c"/mnt/rootfs", None, libc::MS_SILENT | libc::MS_BIND, None).unwrap();
 
-    let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
+    //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT,
           Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work")).unwrap();

@@ -10,6 +10,10 @@ else
     cargo_profile="$profile"
 fi
 
+for dir in perunner; do
+    (cd $dir && cargo build --profile=${cargo_profile})
+done
+
 for dir in peinit pearchive; do
     (cd $dir && cargo build --profile=${cargo_profile} --target x86_64-unknown-linux-musl)
 done

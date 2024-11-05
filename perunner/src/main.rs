@@ -340,6 +340,12 @@ struct Args {
     #[arg(long, help = "enable ch console")]
     console: bool,
 
+    #[arg(long, help = "enable ch event-monitor")]
+    event_monitor: bool,
+
+    #[arg(long, default_value = "warn", help = "ch log level")]
+    ch_log_level: String,
+
     #[arg(long, help = "strace the crun")]
     strace: bool,
 
@@ -361,6 +367,7 @@ fn main() {
         }
         args
     };
+    let ch_log_level: ChLogLevel = args.ch_log_level.as_str().try_into().unwrap();
     let cwd = std::env::current_dir().unwrap();
 
     // let subscriber = tracing_subscriber::fmt()
@@ -391,7 +398,7 @@ fn main() {
 
     let runtime_spec = create_runtime_spec(&image_index_entry.image.config, &args.args).unwrap();
     //eprintln!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
-    eprintln!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+    eprintln!("{}", serde_json::to_string(&runtime_spec).unwrap());
 
     let ch_config = CloudHypervisorConfig {
         bin      : cwd.join(args.ch).into(),
@@ -400,6 +407,7 @@ fn main() {
         log_level: Some(ChLogLevel::Warn),
         console  : args.console,
         keep_args: true,
+        event_monitor: args.event_monitor,
     };
 
     let pe_config = peinit::Config {
@@ -442,6 +450,7 @@ fn main() {
     } else {
         let io_file = NamedTempFile::new().unwrap();
         create_pack_file_from_dir(&args.input, &io_file, &pe_config);
+        //std::fs::copy(io_file.path(), "/tmp/perunner-io-file").unwrap();
         let worker_input = worker::Input {
             id: 0,
             pe_config: pe_config,
