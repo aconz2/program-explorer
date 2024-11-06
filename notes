@@ -417,3 +417,13 @@ cat <(cd perunner && cargo run -- --index ../ocismall.sqfs sh -c 'find ! -path "
 right now I'm testing with sqfs zstd level 15 and erofs no compression (and when it does use zstd it defaults to 3) so maybe at some point will need to add options in peimage.go to export those
 
 we seem to get a event!("vm", "shutdown") event whether we do shutdown from the guest or kernel panic. This is triggered by the EpollDispatch::Exit getting read in vmm and comes from the exit_evt.write(1) in vcpu.rs
+
+ACPI
+using libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF)
+the second is for sure the ACPI shutdown
+  cloud-hypervisor: 107.561860ms: <vcpu0> INFO:devices/src/acpi.rs:51 -- ACPI event 128 80 10000000
+  cloud-hypervisor: 107.597857ms: <vcpu0> INFO:devices/src/acpi.rs:51 -- ACPI event 52 34 110100
+  cloud-hypervisor: 107.624958ms: <vcpu0> INFO:devices/src/acpi.rs:70 -- ACPI Shutdown signalled
+
+using libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF)
+  just instantly reboots
