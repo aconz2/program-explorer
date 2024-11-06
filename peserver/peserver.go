@@ -3,6 +3,7 @@ package main
 import (
     "encoding/json"
     "fmt"
+    "syscall"
     // "math/rand"
     "time"
     "errors"
@@ -61,11 +62,27 @@ func runCloudHypervisor() {
     }...)
     out, err := cmd.Output()
     exitError := &exec.ExitError{}
+    // fmt.Println(ctx.Err())
+    switch ctx.Err() {
+    case context.DeadlineExceeded:
+        fmt.Println("run was canceled from timeout")
+    case context.Canceled:
+        fmt.Println("run was canceled from elsewhere")
+    }
     if errors.As(err, &exitError) {
         exitCode := exitError.ExitCode()
+        sys := exitError.Sys()
+        if waitStatus, ok := sys.(syscall.WaitStatus); ok {
+            fmt.Println("got wait status", waitStatus)
+            sig := waitStatus.Signal()
+            fmt.Println("got signal", sig)
+        }
         fmt.Println("got exit error", exitError)
         fmt.Println("exit code", exitCode)
         fmt.Println("stderr:", string(exitError.Stderr[:]))
+    }
+    if err == nil {
+        fmt.Println("successful exit")
     }
     fmt.Println(string(out[:]))
     // if err != nil {

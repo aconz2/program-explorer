@@ -3,8 +3,8 @@
 # https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/master/vmm/src/api/openapi/cloud-hypervisor.yaml
 
 k=/home/andrew/Repos/linux/vmlinux
-#ch=$(realpath cloud-hypervisor-static)
-ch=/home/andrew/Repos/cloud-hypervisor/target/debug/cloud-hypervisor
+ch=$(realpath cloud-hypervisor-static)
+#ch=/home/andrew/Repos/cloud-hypervisor/target/debug/cloud-hypervisor
 
 trap "pkill -P $$" EXIT KILL TERM
 
@@ -22,7 +22,8 @@ rm -f ${socket_path}
 #     --event-monitor fd=2 \
 #     -v \
 #     --api-socket ${socket_path} > /tmp/ch.out &
-$ch -v --api-socket ${socket_path} > /tmp/ch.out &
+$ch -vvv --event-monitor path=/tmp/ch.events --api-socket path=${socket_path} > /tmp/ch.out 2> /tmp/ch.err &
+#trap "cat /tmp/ch.out" EXIT KILL TERM
 
 cat > /tmp/ch.config.json <<EOF
 {
@@ -34,7 +35,7 @@ cat > /tmp/ch.config.json <<EOF
     "size": 1073741824
   },
   "payload": {
-    "kernel": "/home/andrew/Repos/linux/vmlinux",
+    "kernel": "vmlinux",
     "cmdline": "console=hvc0",
     "initramfs": "initramfs"
   },
@@ -61,8 +62,11 @@ curl --unix-socket ${socket_path} \
     -i -X PUT 'http://localhost/api/v1/vm.create' \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json' \
-    -d '@/tmp/ch.config.json'
+    -d '@/tmp/ch.config.json' &> /dev/null
 
+curl --unix-socket ${socket_path} \
+    -i -X PUT 'http://localhost/api/v1/vm.boot' \
+    -H 'Accept: application/json' &> /dev/null
 # curl --unix-socket ${socket_path} \
 #     -i -X PUT 'http://localhost/api/v1/vm.add-pmem' \
 #     -H 'Content-Type: application/json' \
@@ -75,21 +79,27 @@ curl --unix-socket ${socket_path} \
 #    -H 'Accept: application/json' \
 #    -d '{"file": "/tmp/perunner-io-file", "discard_writes": false}'
 
-curl --unix-socket ${socket_path} \
-    'http://localhost/api/v1/vm.info' \
-    -H 'Accept: application/json' | jq
+# curl --unix-socket ${socket_path} \
+#     'http://localhost/api/v1/vm.info' \
+#     -H 'Accept: application/json' | jq
 
 #cat /tmp/ch.out
 
 
-sleep 1
+sleep 2
+kill %%
+cat /tmp/ch.out
+echo '-----------------------------'
+cat /tmp/ch.err
+echo '-----------------------------'
+cat /tmp/ch.events
+echo '-----------------------------'
 #curl --unix-socket ${socket_path} \
 #    -i -X PUT 'http://localhost/api/v1/vm.reboot'
 #sleep 1
 #wait
 
 
-wait
 # (./cloud-hypervisor-static -v --event-monitor path=/tmp/chevent --api-socket ${socket_path} | ts "%H:%M:%.S") > /tmp/chout 2> /tmp/cherr &
 #
 # config='{
