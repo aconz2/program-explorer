@@ -292,13 +292,13 @@ fn handle_worker_output(output: worker::OutputResult) {
 
         }
         Err(e) => {
+            if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
+            if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = e.logs.con_file { dump_file("ch con", &mut con_file); }
             eprintln!("oh no something went bad {:?}", e.error);
             if let Some(args) = e.args {
                 eprintln!("launched ch with args {:?}", args);
             }
-            if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
-            if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = e.logs.con_file { dump_file("ch con", &mut con_file); }
         }
     }
 }
@@ -404,7 +404,7 @@ fn main() {
         bin      : cwd.join(args.ch).into(),
         kernel   : cwd.join(args.kernel).into(),
         initramfs: cwd.join(args.initramfs).into(),
-        log_level: Some(ChLogLevel::Warn),
+        log_level: Some(ch_log_level),
         console  : args.console,
         keep_args: true,
         event_monitor: args.event_monitor,

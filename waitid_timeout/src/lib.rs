@@ -89,6 +89,12 @@ pub fn waitid_pidfd_exited_nohang<Fd: AsRawFd>(pidfd: &Fd) -> io::Result<WaitIdD
     waitid(libc::P_PIDFD, pidfd, libc::WEXITED | libc::WNOHANG)
 }
 
+pub fn waitid_pidfd_exited_hang<Fd: AsRawFd>(pidfd: &Fd) -> io::Result<WaitIdData> {
+    let pidfd: u32 = pidfd.as_raw_fd().try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "pidfd into u32 failed"))?;
+    waitid(libc::P_PIDFD, pidfd, libc::WEXITED)
+}
+
 // ugh pid is such a pain, command returns a u32 but pid_t is i32 but id_t is u32...
 pub fn waitid_pid_exited_nohang(pid: u32) -> io::Result<WaitIdData> {
     waitid(libc::P_PID, pid, libc::WEXITED | libc::WNOHANG)
@@ -124,7 +130,7 @@ impl<'a> PidFdWaiter<'a> {
         match self.wait_timeout(duration) {
             Ok(WaitIdData::NotExited) => {
                 self.kill(libc::SIGKILL)?;
-                match self.wait_timeout(Duration::from_millis(10)) {
+                match waitid_pidfd_exited_hang(self.pidfd) {
                     Ok(WaitIdData::Exited{siginfo, rusage}) => Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, rusage}),
                     Ok(WaitIdData::NotExited)               => Ok(WaitIdDataOvertime::NotExited),
                     Err(e) => Err(e),

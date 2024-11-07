@@ -119,6 +119,7 @@ pub fn run(input: Input) -> OutputResult {
     }
     match ch.wait_timeout_or_kill(input.ch_timeout).map_err(|_| cloudhypervisor::Error::Wait) {
         Ok(WaitIdDataOvertime::NotExited) => {
+            panic!("ch not exited");
             // TODO this is real bad
         },
         Ok(WaitIdDataOvertime::Exited{siginfo, ..}) => {

@@ -42,10 +42,11 @@ fn kernel_panic() {
 
 fn exit() {
     //kernel_panic();
-    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
+    //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_SW_SUSPEND); }
+    std::thread::sleep(std::time::Duration::from_millis(10000));
     std::process::exit(1);
 }
 
