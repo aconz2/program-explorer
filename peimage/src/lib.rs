@@ -81,6 +81,14 @@ impl PEImageMultiIndex {
         Self { map: HashMap::new() }
     }
 
+    pub fn from_paths(paths: &Vec<String>) -> io::Result<Self> {
+        let mut ret = Self::new();
+        for p in paths {
+            ret = ret.add_path(&p)?;
+        }
+        Ok(ret)
+    }
+
     pub fn add_path<P: AsRef<Path> + Into<PathBuf>>(mut self, path: P) -> io::Result<Self> {
         let idx = PEImageIndex::from_path(&path)?;
         let rootfs_kind = RootfsKind::try_from_path_name(&path)

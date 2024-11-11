@@ -16,6 +16,7 @@ use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use libc;
 use bincode;
 
+// rootfs on /dev/pmem0
 const INOUT_DEVICE: &str = "/dev/pmem1";
 
 #[derive(Debug)]
@@ -42,8 +43,10 @@ fn kernel_panic() {
 
 fn exit() {
     //kernel_panic();
-    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
-    //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF); }
+
+    //unsafe { core::arch::asm!("hlt", options(att_syntax, nomem, nostack)); }
+    //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
+    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_SW_SUSPEND); }
     //std::thread::sleep(std::time::Duration::from_millis(10000));
@@ -129,59 +132,6 @@ fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
     let mut buf: libc::stat = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::fstatat(file.as_raw_fd(), name.as_ptr(), &mut buf, 0) };
     ret == 0
-}
-
-fn wait_for_pmem(files: &[&std::ffi::CStr]) -> Result<(), Error> {
-    let dev_file = unsafe {
-        let ret = libc::open(c"/dev".as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
-        if ret < 0 {
-            return Err(Error::OpenDev);
-        }
-        File::from_raw_fd(ret)
-    };
-
-    if files.iter().all(|file| fstatat_exists(&dev_file, file)) {
-        return Ok(());
-    }
-
-    let inotify_file: File = unsafe {
-        println!("V using inotify");
-        let fd = libc::inotify_init1(libc::IN_CLOEXEC);
-        if fd < 0 {
-            return Err(Error::InotifyInit);
-        }
-
-        File::from_raw_fd(fd)
-    };
-    let ret = unsafe { libc::inotify_add_watch(inotify_file.as_raw_fd(), c"/dev".as_ptr(), libc::IN_CREATE) };
-    if ret < 0 {
-        return Err(Error::InotifyAddWatch);
-    }
-    let events: [libc::inotify_event; 4] = unsafe { std::mem::zeroed() };
-
-    for file in files.iter() {
-        loop {
-            if fstatat_exists(&dev_file, file) {
-                println!("pmem exists");
-                break;
-            } else {
-                // check one more time before blocking on reading inotify in case it got added
-                // after we stat'd but before we created the watcher. idk this still isn't atomic
-                // though
-                if fstatat_exists(&dev_file, file) {
-                    println!("pmem exists");
-                    break;
-                } else {
-                    let ret = unsafe { libc::read(inotify_file.as_raw_fd(), events.as_ptr() as *mut libc::c_void, size_of(events)) };
-                    if ret < 0 {
-                        return Err(Error::InotifyRead);
-                    }
-                    // we don't bother checking what the events are, just trying again
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 // kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
@@ -375,9 +325,6 @@ fn main() {
     }
 
     let config = unpack_input(INOUT_DEVICE, "/run/input");
-
-    //              rootfs    input/output
-    wait_for_pmem(&[c"pmem0", c"pmem1"]).unwrap();
 
     // mount index
     let rootfs_kind = match config.rootfs_kind {

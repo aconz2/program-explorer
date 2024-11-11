@@ -2,149 +2,80 @@ package main
 
 import (
     "encoding/json"
+    "os"
+    "net"
     "fmt"
-    "syscall"
-    // "math/rand"
-    "time"
-    "errors"
+    // "syscall"
+    "math/rand"
+    // "time"
+    // "errors"
     "os/exec"
-    "context"
+    // "context"
 )
+type StdoutWriter struct{}
 
-type ConsoleConfig struct {
+func (StdoutWriter) Write(b []byte) (int, error) {
+    return os.Stdout.Write(b)
+}
+
+type WorkerInput struct {
     File string `json:"file"`
-    Mode string `json:"mode"`
 }
 
-type CpusConfig struct {
-    Boot_vcpus int `json:"boot_vcpus"`
-    Max_vcpus  int `json:"max_vcpus"`
+type WorkerOutput struct {
+    Status int `json:"status"`
 }
 
-type PayloadConfig struct {
-    Kernel    string `json:"kernel"`
-    Cmdline   string `json:"cmdline"`
-    Initramfs string `json:"initramfs"`
+func makeSockPath() string {
+    return fmt.Sprintf("/tmp/sock-%x", rand.Int31())
 }
 
-type MemoryConfig struct {
-    Size int `json:"size"`
-}
+func runWorker() (string, *exec.Cmd, *net.UnixListener, error) {
+    sockPath := makeSockPath()
 
-type PmemConfig struct {
-    File             string `json:"file"`
-    Discard_writes   bool   `json:"discard_writes"`
-}
-
-type VmConfig struct {
-    Cpus     CpusConfig    `json:"cpus"`
-    Memory   MemoryConfig  `json:"memory"`
-    Payload  PayloadConfig `json:"payload"`
-    Pmem     []PmemConfig  `json:"pmem"`
-    Console  ConsoleConfig `json:"console"`
-}
-
-func runCloudHypervisor() {
-    // rng := rand.Int31()
-    // socketPath := fmt.Sprintf("/tmp/ch.sock-%x", rng)
-	ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
-	defer cancel()
-
-    cmd := exec.CommandContext(ctx, "../cloud-hypervisor-static")
-    cmd.WaitDelay = 10 * time.Millisecond
-    cmd.Args = append(cmd.Args, []string{
-        "--kernel", "/home/andrew/Repos/program-explorer/vmlinux",
-        "--initramfs", "/home/andrew/Repos/program-explorer/initramfs",
-        "--cpus", "boot=1",
-        "--memory", "size=1024M",
-        "--cmdline", "console=hvc0",
-        "--pmem", "file=/home/andrew/Repos/program-explorer/ocismall.erofs,discard_writes=true file=/tmp/perunner-io-file,discard_writes=false",
-    }...)
-    out, err := cmd.Output()
-    exitError := &exec.ExitError{}
-    // fmt.Println(ctx.Err())
-    switch ctx.Err() {
-    case context.DeadlineExceeded:
-        fmt.Println("run was canceled from timeout")
-    case context.Canceled:
-        fmt.Println("run was canceled from elsewhere")
+    conn, err := net.ListenUnix("unixpacket",  &net.UnixAddr{sockPath, "unixpacket"})
+    if err != nil {
+        return "", nil, nil, err
     }
-    if errors.As(err, &exitError) {
-        exitCode := exitError.ExitCode()
-        sys := exitError.Sys()
-        if waitStatus, ok := sys.(syscall.WaitStatus); ok {
-            fmt.Println("got wait status", waitStatus)
-            sig := waitStatus.Signal()
-            fmt.Println("got signal", sig)
-        }
-        fmt.Println("got exit error", exitError)
-        fmt.Println("exit code", exitCode)
-        fmt.Println("stderr:", string(exitError.Stderr[:]))
-    }
-    if err == nil {
-        fmt.Println("successful exit")
-    }
-    fmt.Println(string(out[:]))
-    // if err != nil {
-    //     fmt.Println("hit timeout running cloud hypervisor or maybe?", err)
-    //     fmt.Println(ctx.Err()) // this will be context.Canceled if canceled
-    // } else {
-    //     fmt.Println(out)
-    // }
-    // if err := cmd.Run(); err != nil {
-    //     fmt.Println("hit timeout running cloud hypervisor or maybe?", err)
-    // }
+    cmd := exec.Command("target/debug/peserver",
+        "--socket", sockPath,
+        "../ocismall.erofs",
+    );
+    cmd.Stderr = StdoutWriter{}
+    cmd.Stdout = StdoutWriter{}
+    err = cmd.Start()
+    return sockPath, cmd, conn, err
 }
 
 func main() {
-    // if len(os.Args) == 1 {
-    //     fmt.Fprintf(os.Stderr, "  ...\n");
-    //     os.Exit(1)
-
-    // }
-    var vmConfig VmConfig
-    err := json.Unmarshal(testJsonBlob(), &vmConfig);
+    sockPath, cmd, listener, err := runWorker()
     if err != nil {
-        fmt.Println("error: ", err)
-    } else {
-        fmt.Printf("%#v\n", vmConfig)
+        panic(err)
     }
-    runCloudHypervisor()
+    defer cmd.Wait()
 
-}
+    conn, err := listener.Accept()
+    if err != nil {
+        panic(err)
+    }
+    defer conn.Close()
+    os.Remove(sockPath)
 
-func testJsonBlob() []byte {
-    return []byte(`
-{
-  "cpus": {
-    "boot_vcpus": 1,
-    "max_vcpus": 1
-  },
-  "memory": {
-    "size": 1073741824
-  },
-  "payload": {
-    "kernel": "/home/andrew/Repos/linux/vmlinux",
-    "cmdline": "console=hvc0",
-    "initramfs": "initramfs"
-  },
-  "pmem": [
-      {
-        "file": "ocismall.erofs",
-        "discard_writes": true
-      },
-      {
-        "file": "/tmp/perunner-io-file",
-        "discard_writes": false
-      }
-  ],
-  "serial": {
-    "mode": "Off"
-  },
-  "console": {
-    "mode": "Tty"
-  }
-}
-`)
+    _, err = conn.Write([]byte("{\"file\": \"/tmp/foo\"}"))
+    if err != nil {
+        panic(err)
+    }
+
+    data := make([]byte, 1024)
+    n, err := conn.Read(data)
+    if err != nil {
+        panic(err)
+    }
+    output := WorkerOutput{}
+    err = json.Unmarshal(data[0:n], &output)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("got response from worker", output)
 }
 
