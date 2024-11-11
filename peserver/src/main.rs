@@ -46,6 +46,19 @@ struct Args {
 }
 
 fn handle_input(inp: WorkerInput) -> io::Result<WorkerOutput> {
+    // read from temp file to get the config size
+    // read the config
+    // lookup the image in the index
+    // compute the ch config
+    //         the oci runtime config
+    //         the pe config
+    // write data to ...
+    // crap we want to write this json stuff to the header
+    // but now we might overrun the archive
+    // so do we put it at the end now? and truncate off the
+    // beginning? I guess so
+    // then it looks like <archive size> <config size> <archive... > <config ...> <padding ...>
+    // which is fine, order doesn't really matter
     Ok(WorkerOutput{ status: 200 })
 }
 

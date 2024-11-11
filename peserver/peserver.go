@@ -26,16 +26,27 @@ type WorkerOutput struct {
     Status int `json:"status"`
 }
 
-func makeSockPath() string {
-    return fmt.Sprintf("/tmp/sock-%x", rand.Int31())
+type Worker struct {
+    sockPath string
+    cmd *exec.Cmd
+    listener *net.UnixListener
+    conn net.Conn
 }
 
-func runWorker() (string, *exec.Cmd, *net.UnixListener, error) {
-    sockPath := makeSockPath()
+func (self *Worker) Cleanup() {
+    self.conn.Close()
+    self.cmd.Process.Kill()
+    self.cmd.Wait()
+}
 
-    conn, err := net.ListenUnix("unixpacket",  &net.UnixAddr{sockPath, "unixpacket"})
+func makeWorker() (*Worker, error) {
+    ret := new(Worker)
+    sockPath := makeSockPath()
+    defer os.Remove(sockPath)
+
+    listener, err := net.ListenUnix("unixpacket",  &net.UnixAddr{sockPath, "unixpacket"})
     if err != nil {
-        return "", nil, nil, err
+        return nil, err
     }
     cmd := exec.Command("target/debug/peserver",
         "--socket", sockPath,
@@ -44,30 +55,53 @@ func runWorker() (string, *exec.Cmd, *net.UnixListener, error) {
     cmd.Stderr = StdoutWriter{}
     cmd.Stdout = StdoutWriter{}
     err = cmd.Start()
-    return sockPath, cmd, conn, err
-}
-
-func main() {
-    sockPath, cmd, listener, err := runWorker()
     if err != nil {
-        panic(err)
+        return nil, err
     }
-    defer cmd.Wait()
 
     conn, err := listener.Accept()
     if err != nil {
-        panic(err)
+        return nil, err
     }
-    defer conn.Close()
-    os.Remove(sockPath)
 
-    _, err = conn.Write([]byte("{\"file\": \"/tmp/foo\"}"))
+    ret.cmd = cmd
+    ret.listener = listener
+    ret.conn = conn
+
+    return ret, nil
+}
+
+func (self *Worker) Read(data []byte) (int, error) {
+    return self.conn.Read(data)
+}
+
+func (self *Worker) Write(data []byte) (int, error) {
+    return self.conn.Write(data)
+}
+
+func main() {
+    // i is for interactive
+    // TODO add routes /api/v1/i/run
+    //                 /api/v1/i/containers
+    // /api/v1/i/run
+    // grab a token from the pool for max requests
+    // put body in tempfile
+    // grab worker from pool and send it a message
+    // wait for response, put worker back on pool
+    // send response from tempfile
+    // put token back to pool
+
+    worker, err := makeWorker()
+    defer worker.Cleanup()
     if err != nil {
         panic(err)
     }
 
+    _, err = worker.Write([]byte("{\"file\": \"/tmp/foo\"}"))
+
     data := make([]byte, 1024)
-    n, err := conn.Read(data)
+    n, err := worker.Read(data)
+    fmt.Println("did read")
     if err != nil {
         panic(err)
     }
@@ -79,3 +113,6 @@ func main() {
     fmt.Println("got response from worker", output)
 }
 
+func makeSockPath() string {
+    return fmt.Sprintf("/tmp/sock-%x", rand.Int31())
+}
