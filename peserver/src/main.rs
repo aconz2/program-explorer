@@ -26,6 +26,9 @@ struct Args {
     #[arg(long, default_value = "../cloud-hypervisor-static")]
     ch: String,
 
+    #[arg(long, default_value_t = 0)]
+    id: usize,
+
     #[arg(long, default_value = "../vmlinux")]
     kernel: String,
 
@@ -64,6 +67,9 @@ fn handle_input(inp: WorkerInput) -> io::Result<WorkerOutput> {
 
 fn main() {
     let args = Args::parse();
+
+    eprintln!("worker {} starting up", args.id);
+
     let image_index = PEImageMultiIndex::from_paths(&args.image_indexes)
         .expect("couldn't build image index");
 
@@ -78,7 +84,7 @@ fn main() {
         .expect("couldn't get sendbuf size");
     eprintln!("sndbuf max size is {sndbuf}");
 
-    let mut buf = [0; 4096];
+    let mut buf = [0; 2];
     let mut outbuf = vec![0; 4096];
 
     loop {
