@@ -12,6 +12,8 @@ import (
     "math/rand"
     "time"
     "os/exec"
+    "os/signal"
+    "syscall"
 )
 
 const MaxFileSize = 0x20_0000 // 2 MB
@@ -58,6 +60,7 @@ func makeWorker(id int) (*Worker, error) {
         "--socket", sockPath,
         "../ocismall.erofs",
     );
+    cmd.WaitDelay = 100 * time.Millisecond
     cmd.Stderr = StdoutWriter{}
     cmd.Stdout = StdoutWriter{}
     err = cmd.Start()
@@ -116,6 +119,19 @@ func sendError(status int, w http.ResponseWriter, message string) {
     }
 }
 
+func (self *v1iRunner) Shutdown() {
+    close(self.files)
+    close(self.workers)
+    log.Println("cleaning files")
+    for file := range self.files {
+        os.Remove(file.Name())
+    }
+    log.Println("closing workers")
+    for worker := range self.workers {
+        worker.Cleanup()
+    }
+}
+
 func (self *v1iRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     if r.ContentLength == -1 {
         log.Println("missing content length")
@@ -149,6 +165,8 @@ func (self *v1iRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     worker := <- self.workers
     defer func() { self.workers <- worker }()
 
+    // TODO should we be sending an fd? we still need it visible on the fs
+    // for cloud-hypervisor at the moment (custom frontend would solve that)
     workerInput := WorkerInput { File: file.Name() }
     workerOutput, err := worker.Run(workerInput)
     if err != nil {
@@ -173,19 +191,17 @@ func (self *v1iRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     }
 }
 
+func exitSignal(c chan os.Signal, runner *v1iRunner) {
+    <- c
+    runner.Shutdown()
+    os.Exit(0)
+}
+
 func main() {
-    // i is for interactive
-    // TODO add routes /api/v1/i/run
-    //                 /api/v1/i/containers
-    // /api/v1/i/run
-    // grab a token from the pool for max requests
-    // put body in tempfile
-    // grab worker from pool and send it a message
-    // wait for response, put worker back on pool
-    // send response from tempfile
-    // put token back to pool
-    tokenCapacity := 100
-    numWorkers := 2
+    // TODO  /api/v1/i/containers
+    // where are we getting this data from?
+    tokenCapacity := 10
+    numWorkers := 3
     runner := new(v1iRunner)
     runner.files = make(chan *os.File, tokenCapacity)
     for i := 0; i < tokenCapacity; i++ {
@@ -203,6 +219,10 @@ func main() {
     }
 
     http.Handle("POST /api/v1/i/run", runner)
+
+    exitSignalChan := make(chan os.Signal, 1)
+    signal.Notify(exitSignalChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT)
+    go exitSignal(exitSignalChan, runner)
 
     s := &http.Server{
         Addr:              ":8080",

@@ -1,16 +1,22 @@
 use std::io;
+use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::fs::File;
+use std::time::Duration;
 
 use serde::{Deserialize,Serialize};
 use clap::{Parser};
 use nix::sys::socket::{UnixAddr,SockFlag,SockType,AddressFamily,MsgFlags,GetSockOpt,
                        socket,connect,send,recv};
 use nix::sys::socket::sockopt::{SndBuf};
+use byteorder::{ReadBytesExt,LE};
+use tempfile;
+use tempfile::NamedTempFile;
 
 use peimage::PEImageMultiIndex;
-use perunner::create_runtime_spec;
 use perunner::worker;
 use perunner::cloudhypervisor::{ChLogLevel,CloudHypervisorConfig};
+
 
 const MAX_CONFIG_SIZE: u32 = 4096;
 
@@ -27,6 +33,8 @@ struct WorkerOutput {
 #[derive(Serialize,Deserialize)]
 struct ApiV1iRequest {
     image: String,
+    stdin: Option<String>,
+    args: Vec<String>, // TODO handle entrypoint
 }
 
 #[derive(Parser, Debug)]
@@ -58,63 +66,69 @@ struct Args {
     image_indexes: Vec<String>,
 }
 
+// blargh we can't truncate at an offset I was reading off_t as the offset
+// file formats
+// 1) <u32: rest size>    <u32: config size (zeroes)> <u32: request size> <request ...> <archive ...>
+//                                                    \-------------- rest size --------------------/
+// 2) <u32: archive size> <u32: config size>          <u32: request size> <request ...> <archive ...> <config ...> <... padding ...>
+// 2) <u32: rest size>    <u32: response size> <response ...> <archive ...> <... padding ...>
+//                        \---------------- rest size --------------------/
 fn handle_input(ch_config: &CloudHypervisorConfig,
                 image_index: &PEImageMultiIndex,
                 buf: &mut Vec<u8>,
-                inp: WorkerInput,
+                input: WorkerInput,
                 )
     -> io::Result<WorkerOutput> {
 
-    let timeout = Duration::from_millis(args.timeout);
-    let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
+    let timeout = Duration::from_millis(10_000);
+    let ch_timeout = timeout + Duration::from_millis(500);
 
-    let file = File::open(inp.file)?;
+    let mut f = File::open(&input.file)?;
     let config_size = f.read_u32::<LE>()?;
     if config_size > MAX_CONFIG_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "config size too big"))
     }
-    buf.set_len(config_size);
-    let config_buf = f.read_exact(&mut buf)?;
-    let request: ApiV1iRequest = serde_json::deserialize(&config_buf)?;
+    buf.resize(config_size as usize, 0);
+    () = f.read_exact(buf)?;
+    let request: ApiV1iRequest = serde_json::from_slice(&buf)?;
 
     let image_index_entry = image_index.get(&request.image)
-        .ok_or_else(|| Err(io::Error::new(io::ErrorKind::InvalidData, "no such image")))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no such image"))?;
+
+    let runtime_spec = perunner::create_runtime_spec(&image_index_entry.image.config, &request.args)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "couldn't make runtime spec"))?;
 
     let pe_config = peinit::Config {
         timeout: timeout,
-        oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
-        uid_gid: worker::UID,
-        nids: worker::NIDS,
-        stdin: args.stdin,
-        strace: args.strace,
-        crun_debug: args.crun_debug,
+        oci_runtime_config: serde_json::to_string(&runtime_spec)?,
+        uid_gid: perunner::UID,
+        nids: perunner::NIDS,
+        stdin: request.stdin,
+        strace: false,
+        crun_debug: false,
         rootfs_dir: image_index_entry.image.rootfs.clone(),
         rootfs_kind: image_index_entry.rootfs_kind,
     };
-    // read from temp file to get the config size
-    // read the config
-    // lookup the image in the index
-    // compute the ch config
-    //         the oci runtime config
-    //         the pe config
-    // write data to ...
-    // crap we want to write this json stuff to the header
-    // but now we might overrun the archive
-    // so do we put it at the end now? and truncate off the
-    // beginning? I guess so
-    // then it looks like <archive size> <config size> <archive... > <config ...> <padding ...>
-    // which is fine, order doesn't really matter
-    //
+
+    let ntf = NamedTempFile::from_parts(f, tempfile::TempPath::from_path(input.file));
     let worker_input = worker::Input {
         id: 0,
         pe_config: pe_config,
         ch_config: ch_config.clone(),
         ch_timeout: ch_timeout,
-        io_file: io_file,
+        io_file: ntf,
         rootfs: image_index_entry.path.clone().into(),
     };
 
-    worker::run(worker_input)
+    let worker_output = {
+        match worker::run(worker_input) {
+            Ok(o) => o,
+            Err(postmortem) => {
+                // todo print logs
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "error running ch"));
+            }
+        }
+    };
     Ok(WorkerOutput{ status: 200 })
 }
 
@@ -149,8 +163,7 @@ fn main() {
     eprintln!("sndbuf max size is {sndbuf}");
 
     let mut buf = [0; 1024];
-
-    let request_buf = vec![0; 4096];
+    let mut request_buf = vec![0; 4096];
 
     // TODO cpuset
 

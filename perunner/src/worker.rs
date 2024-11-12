@@ -112,15 +112,6 @@ pub fn run(input: Input) -> OutputResult {
             Err(e) => { return Err(e.into()); }
         }
     };
-    // order of calls is important here
-    //match ch.add_pmem_ro(input.rootfs) {
-    //    Ok(_) => { },
-    //    Err(e) => { return Err(ch.postmortem(e)); }
-    //}
-    //match ch.add_pmem_rw(&input.io_file) {
-    //    Ok(_) => { },
-    //    Err(e) => { return Err(ch.postmortem(e)); }
-    //}
     match ch.wait_timeout_or_kill(input.ch_timeout).map_err(|_| cloudhypervisor::Error::Wait) {
         Ok(WaitIdDataOvertime::NotExited) => {
             panic!("ch not exited");

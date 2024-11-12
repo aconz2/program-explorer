@@ -83,7 +83,6 @@ pub struct CloudHypervisorConfig {
     pub log_level: Option<ChLogLevel>,
     pub keep_args: bool,
     pub event_monitor: bool,
-    pub pmems: Option<CloudHypervisorPmem>,
 }
 
 pub struct CloudHypervisor {

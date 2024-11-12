@@ -299,7 +299,6 @@ fn main() {
         console  : args.console,
         keep_args: true,
         event_monitor: args.event_monitor,
-        pmems: None,
     };
 
     let pe_config = peinit::Config {
