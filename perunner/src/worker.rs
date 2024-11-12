@@ -12,7 +12,7 @@ use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
 use tempfile::NamedTempFile;
 
 use crate::cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem,CloudHypervisorLogs};
+use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem,CloudHypervisorLogs,CloudHypervisorPmem,CloudHypervisorPmemMode};
 use peinit;
 
 type JoinHandleT = JoinHandle<()>;
@@ -102,21 +102,25 @@ pub fn cpuset(core_offset: usize,
 // choosing kernel version, then doesn't really work
 // a bit ugly since we can't easily use ? to munge the errors
 pub fn run(input: Input) -> OutputResult {
+    let pmems = CloudHypervisorPmem::Two([
+        (input.rootfs, CloudHypervisorPmemMode::ReadOnly),
+        (input.io_file.path().into(), CloudHypervisorPmemMode::ReadWrite),
+    ]);
     let mut ch = {
-        match CloudHypervisor::start(input.ch_config) {
+        match CloudHypervisor::start(input.ch_config, Some(pmems)) {
             Ok(ch) => ch,
             Err(e) => { return Err(e.into()); }
         }
     };
     // order of calls is important here
-    match ch.add_pmem_ro(input.rootfs) {
-        Ok(_) => { },
-        Err(e) => { return Err(ch.postmortem(e)); }
-    }
-    match ch.add_pmem_rw(&input.io_file) {
-        Ok(_) => { },
-        Err(e) => { return Err(ch.postmortem(e)); }
-    }
+    //match ch.add_pmem_ro(input.rootfs) {
+    //    Ok(_) => { },
+    //    Err(e) => { return Err(ch.postmortem(e)); }
+    //}
+    //match ch.add_pmem_rw(&input.io_file) {
+    //    Ok(_) => { },
+    //    Err(e) => { return Err(ch.postmortem(e)); }
+    //}
     match ch.wait_timeout_or_kill(input.ch_timeout).map_err(|_| cloudhypervisor::Error::Wait) {
         Ok(WaitIdDataOvertime::NotExited) => {
             panic!("ch not exited");

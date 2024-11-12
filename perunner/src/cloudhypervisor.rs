@@ -54,6 +54,27 @@ impl TryFrom<&str> for ChLogLevel {
 }
 
 #[derive(Clone)]
+pub enum CloudHypervisorPmemMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl CloudHypervisorPmemMode {
+    fn discard_writes(&self) -> &'static str {
+        match self {
+            CloudHypervisorPmemMode::ReadOnly => "on",
+            CloudHypervisorPmemMode::ReadWrite => "off"
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum CloudHypervisorPmem {
+    One([(PathBuf, CloudHypervisorPmemMode); 1]),
+    Two([(PathBuf, CloudHypervisorPmemMode); 2]),
+}
+
+#[derive(Clone)]
 pub struct CloudHypervisorConfig {
     pub bin: OsString,
     pub kernel: OsString,
@@ -62,6 +83,7 @@ pub struct CloudHypervisorConfig {
     pub log_level: Option<ChLogLevel>,
     pub keep_args: bool,
     pub event_monitor: bool,
+    pub pmems: Option<CloudHypervisorPmem>,
 }
 
 pub struct CloudHypervisor {
@@ -149,7 +171,8 @@ fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
 
 impl CloudHypervisor {
 
-    pub fn start(config: CloudHypervisorConfig) -> Result<Self, Error> {
+    pub fn start(config: CloudHypervisorConfig, pmems: Option<CloudHypervisorPmem>) -> Result<Self, Error>
+    {
         let err_file = NamedTempFile::with_prefix("err-")
             .map_err(|_| Error::TempfileSetup)?;
         let log_file = NamedTempFile::with_prefix("log-")
@@ -157,6 +180,7 @@ impl CloudHypervisor {
         let con_file = NamedTempFile::with_prefix("con-")
             .map_err(|_| Error::TempfileSetup)?;
 
+        // TODO make api setup optional
         let (listener, stream) = setup_socket(rand_path_prefix("sock-"))
             .ok_or(Error::Socket)?;
 
@@ -195,12 +219,25 @@ impl CloudHypervisor {
                     ChLogLevel::Trace => { x.arg("-vvv"); }
                 }
             }
+            match pmems {
+                Some(CloudHypervisorPmem::One([(path, mode)])) => {
+                    x.arg("--pmem")
+                     .arg(format!("file={:?},discard_writes={}", path, mode.discard_writes()));
+                }
+                Some(CloudHypervisorPmem::Two([(path1, mode1), (path2, mode2)])) => {
+                    x.arg("--pmem")
+                     .arg(format!("file={},discard_writes={}", path1.display(), mode1.discard_writes()))
+                     .arg(format!("file={},discard_writes={}", path2.display(), mode2.discard_writes()));
+                }
+                None => {}
+            }
             if config.keep_args {
                 args.extend(x.get_args().map(|x| x.into()));
             }
             x.spawn().map_err(|_| Error::Spawn)?
         };
 
+        eprintln!("starting ch with args {:?}", args);
         let ret = CloudHypervisor {
             err_file: err_file,
             log_file: if config.log_level.is_some() { Some(log_file) } else { None },

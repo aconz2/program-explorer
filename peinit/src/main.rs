@@ -53,6 +53,8 @@ fn exit() {
     std::process::exit(1);
 }
 
+// NOTE: the host can still not receive this message if the pmem is configured incorrectly, for
+// example by having discard_writes=on accidentally in which case the writes are silently dropped
 fn write_panic_response(message: &str) {
     let response = Response {
         status: ExitKind::Panic,
@@ -67,7 +69,7 @@ fn write_panic_response(message: &str) {
     }
     match bincode::serialize(&response) {
         Ok(ser) => {
-            println!("V panic response bytes len {}", ser.len());
+            println!("V panic response bytes len {} {}", ser.len(), sha2_hex(&ser));
             let f = File::create(INOUT_DEVICE);
             if f.is_err() {
                 println!("V couldnt open inout device!");

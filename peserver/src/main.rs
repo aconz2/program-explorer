@@ -8,6 +8,11 @@ use nix::sys::socket::{UnixAddr,SockFlag,SockType,AddressFamily,MsgFlags,GetSock
 use nix::sys::socket::sockopt::{SndBuf};
 
 use peimage::PEImageMultiIndex;
+use perunner::create_runtime_spec;
+use perunner::worker;
+use perunner::cloudhypervisor::{ChLogLevel,CloudHypervisorConfig};
+
+const MAX_CONFIG_SIZE: u32 = 4096;
 
 #[derive(Serialize,Deserialize)]
 struct WorkerInput {
@@ -17,6 +22,11 @@ struct WorkerInput {
 #[derive(Serialize,Deserialize)]
 struct WorkerOutput {
     status: i32
+}
+
+#[derive(Serialize,Deserialize)]
+struct ApiV1iRequest {
+    image: String,
 }
 
 #[derive(Parser, Debug)]
@@ -48,7 +58,39 @@ struct Args {
     image_indexes: Vec<String>,
 }
 
-fn handle_input(inp: WorkerInput) -> io::Result<WorkerOutput> {
+fn handle_input(ch_config: &CloudHypervisorConfig,
+                image_index: &PEImageMultiIndex,
+                buf: &mut Vec<u8>,
+                inp: WorkerInput,
+                )
+    -> io::Result<WorkerOutput> {
+
+    let timeout = Duration::from_millis(args.timeout);
+    let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
+
+    let file = File::open(inp.file)?;
+    let config_size = f.read_u32::<LE>()?;
+    if config_size > MAX_CONFIG_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "config size too big"))
+    }
+    buf.set_len(config_size);
+    let config_buf = f.read_exact(&mut buf)?;
+    let request: ApiV1iRequest = serde_json::deserialize(&config_buf)?;
+
+    let image_index_entry = image_index.get(&request.image)
+        .ok_or_else(|| Err(io::Error::new(io::ErrorKind::InvalidData, "no such image")))?;
+
+    let pe_config = peinit::Config {
+        timeout: timeout,
+        oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
+        uid_gid: worker::UID,
+        nids: worker::NIDS,
+        stdin: args.stdin,
+        strace: args.strace,
+        crun_debug: args.crun_debug,
+        rootfs_dir: image_index_entry.image.rootfs.clone(),
+        rootfs_kind: image_index_entry.rootfs_kind,
+    };
     // read from temp file to get the config size
     // read the config
     // lookup the image in the index
@@ -62,11 +104,33 @@ fn handle_input(inp: WorkerInput) -> io::Result<WorkerOutput> {
     // beginning? I guess so
     // then it looks like <archive size> <config size> <archive... > <config ...> <padding ...>
     // which is fine, order doesn't really matter
+    //
+    let worker_input = worker::Input {
+        id: 0,
+        pe_config: pe_config,
+        ch_config: ch_config.clone(),
+        ch_timeout: ch_timeout,
+        io_file: io_file,
+        rootfs: image_index_entry.path.clone().into(),
+    };
+
+    worker::run(worker_input)
     Ok(WorkerOutput{ status: 200 })
 }
 
 fn main() {
     let args = Args::parse();
+
+    let cwd = std::env::current_dir().unwrap();
+    let ch_config = CloudHypervisorConfig {
+        bin      : cwd.join(args.ch).into(),
+        kernel   : cwd.join(args.kernel).into(),
+        initramfs: cwd.join(args.initramfs).into(),
+        log_level: Some(ChLogLevel::Warn),
+        console  : false,
+        keep_args: true,
+        event_monitor: false,
+    };
 
     eprintln!("worker {} starting up", args.id);
 
@@ -84,8 +148,11 @@ fn main() {
         .expect("couldn't get sendbuf size");
     eprintln!("sndbuf max size is {sndbuf}");
 
-    let mut buf = [0; 2];
-    let mut outbuf = vec![0; 4096];
+    let mut buf = [0; 1024];
+
+    let request_buf = vec![0; 4096];
+
+    // TODO cpuset
 
     loop {
         eprintln!("reading...");
@@ -98,7 +165,7 @@ fn main() {
                 eprintln!("read {n}");
                 let output = match serde_json::from_slice(&buf[..n]) {
                     Ok(inp) => {
-                        match handle_input(inp) {
+                        match handle_input(&ch_config, &image_index, &mut request_buf, inp) {
                             Ok(o) => o,
                             Err(e) => {
                                 eprintln!("err {e}");
