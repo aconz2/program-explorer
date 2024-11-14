@@ -55,6 +55,7 @@ fn main() {
     my_server.bootstrap();
 
     let mut echo_service_http = Service::new("Echo Service HTTP".to_string(), HttpEchoApp());
+    echo_service_http.add_tcp("127.0.0.1:8080");
 
     let services: Vec<Box<dyn IService>> = vec![
         Box::new(echo_service_http),
