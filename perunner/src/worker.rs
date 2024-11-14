@@ -1,7 +1,7 @@
 //use std::io;
 use std::thread;
 use std::thread::{spawn,JoinHandle};
-use crossbeam::channel as channel;
+use crossbeam::channel;
 use crossbeam::channel::{Receiver,Sender};
 use std::time::Duration;
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
@@ -156,6 +156,58 @@ fn spawn_worker(id: usize,
         }
         println!("worker {id} shutting down");
     })
+}
+
+#[cfg(feature = "asynk")]
+pub mod asynk {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    type SenderElement = (Input, oneshot::Sender<OutputResult>);
+
+    pub struct Pool {
+        sender: Sender<SenderElement>,
+        handles: Vec<JoinHandleT>,
+    }
+
+    impl Pool {
+        pub fn new(cores: &[CpuSet]) -> Self {
+            let (i_s, i_r) = channel::bounded::<SenderElement>(cores.len() * 2);
+            let handles: Vec<_> = cores
+                .iter()
+                .enumerate()
+                .map(|(i, c)| spawn_worker(i, *c, i_r.clone()))
+                .collect();
+            Self {
+                sender: i_s,
+                handles: handles,
+            }
+        }
+
+        pub fn sender(&self) -> &Sender<SenderElement> { &self.sender }
+    }
+
+    fn spawn_worker(id: usize,
+                    cpuset: CpuSet,
+                    input:  Receiver<(Input, oneshot::Sender<OutputResult>)>
+                   )
+        -> JoinHandleT {
+        spawn(move || {
+            println!("starting worker {id}");
+            sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
+            for (msg, output) in input.iter() {
+                match output.send(run(msg)) {
+                    Ok(_) => { },
+                    Err(_) => {
+                        // output got disconnected somehow
+                        println!("worker {id} got disconnected");
+                        return;
+                    },
+                }
+            }
+            println!("worker {id} shutting down");
+        })
+    }
 }
 
 #[cfg(test)]

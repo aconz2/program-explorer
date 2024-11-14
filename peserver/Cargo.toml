@@ -16,7 +16,7 @@ clap = "4.5.21"
 http = "1.1.0"
 peimage = { version = "0.1.0", path = "../peimage" }
 peinit = { version = "0.1.0", path = "../peinit" }
-perunner = { version = "0.1.0", path = "../perunner" }
+perunner = { version = "0.1.0", path = "../perunner", features = ["asynk"] }
 pingora = "0.4.0"
 pingora-timeout = "0.4.0"
 serde = { version = "1.0.214", features = ["serde_derive"] }

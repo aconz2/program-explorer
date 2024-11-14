@@ -81,7 +81,7 @@ impl PEImageMultiIndex {
         Self { map: HashMap::new() }
     }
 
-    pub fn from_paths(paths: &Vec<String>) -> io::Result<Self> {
+    pub fn from_paths(paths: &[String]) -> io::Result<Self> {
         let mut ret = Self::new();
         for p in paths {
             ret = ret.add_path(&p)?;

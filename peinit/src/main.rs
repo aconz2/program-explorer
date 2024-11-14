@@ -9,15 +9,19 @@ use std::path::Path;
 use std::io;
 use std::time::Instant;
 
-use peinit::{Config,Response,ExitKind,RootfsKind};
+use peinit::{Config,Response,ExitKind,RootfsKind,ContentType,ResponseJson};
 use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
 use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use libc;
 use bincode;
+use serde_json;
 
 // rootfs on /dev/pmem0
 const INOUT_DEVICE: &str = "/dev/pmem1";
+const STDOUT_FILE: &str = "/run/output/stdout";
+const STDERR_FILE: &str = "/run/output/stderr";
+const RESPSONSE_JSON_STDOUT_SIZE: u64 = 1024;
 
 #[derive(Debug)]
 enum Error {
@@ -26,8 +30,6 @@ enum Error {
     InotifyAddWatch,
     InotifyRead,
 }
-
-fn size_of<T>(_t: T) -> usize { return std::mem::size_of::<T>(); }
 
 fn sha2_hex(buf: &[u8]) -> String {
     use sha2::{Sha256,Digest};
@@ -209,6 +211,22 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
     assert!(ret == 0, "pearchive packdev failed with status {}", ret);
 }
 
+fn read_if_exists_max_len_lossy<P: AsRef<Path>>(p: P) -> Option<String> {
+    let f = File::open(p).ok()?;
+    let mut buf = vec![];
+    let _ = f.take(RESPSONSE_JSON_STDOUT_SIZE).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into())
+}
+
+fn pack_json_output<P: AsRef<Path>>(response: &ResponseJson, archive: P) {
+    let mut f = File::create(&archive).unwrap();
+    let response_bytes = serde_json::to_vec(&response).unwrap();
+    let response_size = response_bytes.len() as u32;
+    f.write_u32::<LE>(0).unwrap();
+    f.write_u32::<LE>(response_size).unwrap();
+    f.write_all(&response_bytes).unwrap();
+}
+
 fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) -> String {
     match File::open(&path) {
         Err(e) => format!("error opening file {} {:?}", path, e),
@@ -231,8 +249,8 @@ fn cat_file_if_exists<P: AsRef<Path>>(name: &str, file: P) {
 }
 
 fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
-    let outfile = File::create_new("/run/output/stdout").unwrap();
-    let errfile = File::create_new("/run/output/stderr").unwrap();
+    let outfile = File::create_new(STDOUT_FILE).unwrap();
+    let errfile = File::create_new(STDERR_FILE).unwrap();
     let run_input = Path::new("/run/input");
     let stdin: Stdio = config.stdin.clone().map(|x| {
         // TODO this is annoying
@@ -380,7 +398,11 @@ fn main() {
         }
     };
 
-    pack_output(&response, "/run/output", INOUT_DEVICE);
+    match config.response_type {
+        ContentType::PeArchiveV1 => { pack_output(&response, "/run/output", INOUT_DEVICE); }
+        ContentType::JsonV1 => { pack_json_output(&response.to_json(read_if_exists_max_len_lossy(STDOUT_FILE),
+                                                                    read_if_exists_max_len_lossy(STDERR_FILE)), INOUT_DEVICE); }
+    }
 
     exit()
 }

@@ -26,6 +26,12 @@ impl RootfsKind {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum ContentType {
+    PeArchiveV1,
+    JsonV1,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     // https://github.com/opencontainers/runtime-spec/blob/main/config.md
@@ -34,11 +40,12 @@ pub struct Config {
     pub uid_gid: u32,
     pub timeout: Duration,
     pub nids: u32,
-    pub stdin: Option<String>,
+    pub stdin: Option<String>,  // name of file in user's archive, not contents
     pub strace: bool,
     pub crun_debug: bool,
     pub rootfs_dir: String,
     pub rootfs_kind: RootfsKind, // this isn't really viable since we need to know
+    pub response_type: ContentType,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -50,6 +57,29 @@ pub struct Response {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ResponseJson {
+    pub status  : ExitKind,
+    pub panic   : Option<String>,
+    pub siginfo : Option<SigInfoRedux>,
+    pub rusage  : Option<Rusage>,
+    pub stdout  : Option<String>,
+    pub stderr  : Option<String>,
+}
+
+impl Response {
+    pub fn to_json(self, stdout: Option<String>, stderr: Option<String>) -> ResponseJson {
+        ResponseJson {
+            status  : self.status,
+            panic   : self.panic,
+            siginfo : self.siginfo,
+            rusage  : self.rusage,
+            stdout  : stdout,
+            stderr  : stderr,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub enum ExitKind {
     Ok,
     Panic,

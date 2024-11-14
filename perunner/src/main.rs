@@ -22,7 +22,7 @@ use peinit::{Response};
 use peimage::PEImageMultiIndex;
 
 mod cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
+use cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
 
 mod worker;
 use perunner::{UID,NIDS,create_runtime_spec};
