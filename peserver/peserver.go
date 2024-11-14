@@ -16,6 +16,7 @@ import (
     "syscall"
 )
 
+// NOTE: currently must fit in u32
 const MaxFileSize = 0x20_0000 // 2 MB
 
 type StdoutWriter struct{}
@@ -149,19 +150,24 @@ func (self *v1iRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     }
     defer func() { self.files <- file }()
 
+    // save body into file
     err := file.Truncate(0)
     if err != nil {
         sendError(http.StatusInternalServerError, w, `{"error": "err truncating file"}`)
         return
     }
-    n, err := io.Copy(file, http.MaxBytesReader(w, r.Body, MaxFileSize))
+    if err = binary.Write(file, binary.LittleEndian, uint32(r.ContentLength)); err != nil {
+        sendError(http.StatusInternalServerError, w, `{"error": "err writing content length"}`)
+        return
+    }
+    n, err := io.Copy(file, http.MaxBytesReader(w, r.Body, MaxFileSize));
     if err != nil {
         sendError(http.StatusInternalServerError, w, `{"error": "err copying body"}`)
         return
     }
     log.Println("body-size=", n)
 
-    // enter run queue
+    // grab worker and run
     worker := <- self.workers
     defer func() { self.workers <- worker }()
 
@@ -170,9 +176,15 @@ func (self *v1iRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     workerInput := WorkerInput { File: file.Name() }
     workerOutput, err := worker.Run(workerInput)
     if err != nil {
-        sendError(http.StatusBadRequest, w, `{"error": "todo"}`)
+        sendError(http.StatusInternalServerError, w, `{"error": "todo"}`)
         return
     }
+
+    // BAD: this doesn't release the worker promptly!
+    // we really have a pool of tempfiles that are incoming and outgoing
+    // and we shouldn't have the worker tied up for either
+
+    // send response, read u32 content length from file
     w.WriteHeader(workerOutput.Status)
     // w.Header().Set("content-type", "application/json") // TODO this will be something custom I think
     _, err = file.Seek(0, 0)
@@ -180,7 +192,6 @@ func (self *v1iRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         sendError(http.StatusInternalServerError, w, `{"error": "err seeking"}`)
         return
     }
-
     var contentLength uint32
     if err = binary.Read(file, binary.LittleEndian, &contentLength); err != nil {
         sendError(http.StatusInternalServerError, w, `{"error": "err reading content length"}`)
