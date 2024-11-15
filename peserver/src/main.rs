@@ -1,5 +1,5 @@
 use std::time::Duration;
-use std::io::{Read,Write};
+use std::io::{Read};
 use std::ffi::OsString;
 
 use async_trait::async_trait;
@@ -7,6 +7,8 @@ use bytes::{Bytes,BytesMut};
 use http;
 use http::{Method, Response, StatusCode};
 use tempfile::NamedTempFile;
+use serde_json;
+use serde::{Serialize};
 
 use pingora_timeout::timeout;
 use pingora::services::Service as IService;
@@ -27,6 +29,23 @@ use peimage::PEImageMultiIndex;
 
 const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
+
+#[derive(Debug)]
+enum Error {
+    ReadTimeout,
+    ReadError,
+    BadRequest,
+    NoSuchImage,
+    TempfileCreate,
+    QueueFull,
+    WorkerRecv,
+    BadContentType,
+    ResponseRead,
+    WorkerError,
+    ResponseBuild,
+    Internal,
+    Serialize,
+}
 
 struct HttpRunnerApp {
     pub pool: worker::asynk::Pool,
@@ -71,7 +90,7 @@ impl Into<&str> for ContentType {
 
 mod apiv1 {
     pub mod runi {
-    use serde::{Deserialize,Serialize};
+        use serde::{Deserialize,Serialize};
         #[derive(Deserialize)]
         pub struct Request {
             pub image: String,
@@ -81,6 +100,38 @@ mod apiv1 {
 
         #[derive(Serialize)]
         pub struct Response {
+        }
+    }
+
+    pub mod images {
+        use serde::{Deserialize,Serialize};
+        use peimage;
+        use oci_spec::image as oci_image;
+        #[derive(Serialize)]
+        pub struct Image {
+            pub id: String,
+            pub config: oci_image::ImageConfiguration,
+            pub manifest: oci_image::ImageManifest,
+        }
+
+        #[derive(Serialize)]
+        pub struct Response {
+            pub images: Vec<Image>,
+        }
+
+        impl From<&peimage::PEImageMultiIndex> for Response {
+            fn from(index: &peimage::PEImageMultiIndex) -> Self {
+                let images: Vec<_> = index.map().iter()
+                    .map(|(k, v)| {
+                        Image {
+                            id: k.clone(),
+                            config: v.image.config.clone(),
+                            manifest: v.image.manifest.clone(),
+                        }
+                    })
+                    .collect();
+                Self { images }
+            }
         }
     }
 }
@@ -121,6 +172,17 @@ fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
         .unwrap()
 }
 
+fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Result<Response<Vec<u8>>> {
+    let buf = serde_json::to_vec(&body)?;
+    let ret = Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
+        .header(http::header::CONTENT_LENGTH, buf.len())
+        .body(buf)
+        .unwrap();
+    Ok(ret)
+}
+
 fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
     let body: Vec<_> = message.into();
     Response::builder()
@@ -128,22 +190,6 @@ fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>>
         .header(http::header::CONTENT_LENGTH, body.len())
         .body(body)
         .unwrap()
-}
-
-#[derive(Debug)]
-enum Error {
-    ReadTimeout,
-    ReadError,
-    BadRequest,
-    NoSuchImage,
-    TempfileCreate,
-    QueueFull,
-    WorkerRecv,
-    BadContentType,
-    ResponseRead,
-    WorkerError,
-    ResponseBuild,
-    Internal,
 }
 
 impl Into<StatusCode> for Error {
@@ -162,6 +208,7 @@ impl Into<StatusCode> for Error {
             ResponseRead |
             WorkerError |
             ResponseBuild |
+            Serialize |
             Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -303,18 +350,25 @@ impl HttpRunnerApp {
             _ => todo!()
         }
     }
+
+    async fn apiv1_images(&self, http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+        response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&self.index))
+            .map_err(|_| Error::Serialize)
+    }
 }
 
 #[async_trait]
 impl ServeHttp for HttpRunnerApp {
     async fn response(&self, http_stream: &mut ServerSession) -> Response<Vec<u8>> {
         let req_parts: &http::request::Parts = http_stream.req_header();
-        match (req_parts.method.clone(), req_parts.uri.path()) {
-            (Method::POST, "/api/v1/runi") => self.apiv1_runi(http_stream).await.unwrap_or_else(|e| e.into()),
+        let res = match (req_parts.method.clone(), req_parts.uri.path()) {
+            (Method::POST, "/api/v1/runi")   => self.apiv1_runi(http_stream).await,
+            (Method::GET,  "/api/v1/images") => self.apiv1_images(http_stream).await,
             _ => {
-                response_no_body(StatusCode::NOT_FOUND)
+                return response_no_body(StatusCode::NOT_FOUND)
             }
-        }
+        };
+        res.unwrap_or_else(|e| e.into())
     }
 }
 

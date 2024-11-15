@@ -16,6 +16,7 @@ byteorder = "1.5.0"
 bytes = "1.8.0"
 clap = "4.5.21"
 http = "1.1.0"
+oci-spec = "0.7.1"
 peimage = { version = "0.1.0", path = "../peimage" }
 peinit = { version = "0.1.0", path = "../peinit" }
 perunner = { version = "0.1.0", path = "../perunner", features = ["asynk"] }
