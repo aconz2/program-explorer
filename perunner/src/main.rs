@@ -6,11 +6,8 @@ use std::ffi::{OsString};
 use std::path::{Path,PathBuf};
 
 use tempfile::NamedTempFile;
-use oci_spec::runtime as oci_runtime;
-use oci_spec::image as oci_image;
 use serde_json;
-use bincode;
-use byteorder::{WriteBytesExt,ReadBytesExt,LE};
+use byteorder::{WriteBytesExt,LE};
 use memmap2::{Mmap,MmapOptions};
 use clap::{Parser};
 // use tracing::{info,error,Level};
@@ -18,7 +15,7 @@ use clap::{Parser};
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
-use peinit::{Response,ResponseFormat,ResponseJson};
+use peinit::{ResponseFormat};
 use peimage::PEImageMultiIndex;
 
 mod cloudhypervisor;
@@ -34,42 +31,23 @@ fn sha2_hex(buf: &[u8]) -> String {
     base16ct::lower::encode_string(&hash)
 }
 
-// ImageConfiguration: {created, architecture, os, config: {Env, User, Entrypoint, Cmd, WorkingDir}, rootfs, ...}
-// RuntimeSpec: {process: {terminal, user: {uid, gid}, args, env, cwd, capabilities, ...}
-
-// on the wire, the client sends
-//     <config size : u32le> <config> <archive>
-// and the server reads the config, and writes its own config and the archive size computed from
-// the content length
-// the packfile input format is
-//     <archive size : u32le> <config size : u32le> <config> <archive> <padding>
-// the return output format is
-//                            |--------- sent to client ---------|
-//     <archive size : u32le> [ <config size> <config> <archive> ] <padding>
-
 // how do you get away from this P1 P2 thing
+// this is kinda dupcliated with pearchive::packdev
 fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &Option<P1>, file: P2, config: &peinit::Config) {
     let mut f = File::create(file).unwrap();
-    let config_bytes = bincode::serialize(&config).unwrap();
-    if true {
-        let hash_hex = sha2_hex(&config_bytes);
-        eprintln!("H config_bytes len {} {}", config_bytes.len(), hash_hex);
-    }
-    let config_size: u32 = config_bytes.len().try_into().unwrap();
-    f.write_u32::<LE>(0).unwrap(); // or seek
-    f.write_u32::<LE>(config_size).unwrap();
-    f.write_all(config_bytes.as_slice()).unwrap();
-    let archive_start_pos = f.stream_position().unwrap();
+    () = peinit::write_io_file_config(&mut f, config).unwrap();
     let mut f = if let Some(dir) = dir {
-        pack_dir_to_file(dir.as_ref(), f).unwrap()
+        let archive_start_pos = f.stream_position().unwrap();
+        let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
+        let archive_end_pos = f.stream_position().unwrap();
+        let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_u32::<LE>(size).unwrap();
+        f
     } else {
         f
     };
-    let archive_end_pos = f.stream_position().unwrap();
-    let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
-    f.seek(SeekFrom::Start(0)).unwrap();
-    f.write_u32::<LE>(size).unwrap();
-    let _ = round_up_file_to_pmem_size(&f).unwrap();
+    round_up_file_to_pmem_size(&mut f).unwrap();
 }
 
 fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
@@ -118,44 +96,6 @@ fn dump_archive(mmap: &Mmap) {
     unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
 }
 
-fn parse_response_pearchivev1(mut file: &NamedTempFile) -> (Response, Mmap) {
-    file.seek(SeekFrom::Start(0)).unwrap();
-    let archive_size = file.read_u32::<LE>().unwrap();
-    let response_size = file.read_u32::<LE>().unwrap();
-
-    eprintln!("H archive_size={} response_size={}", archive_size, response_size);
-
-    let response: Response = {
-        let mut buf = vec![0; response_size.try_into().unwrap()];
-        file.read_exact(buf.as_mut_slice()).unwrap();
-
-        if true {
-            let hash_hex = sha2_hex(&buf);
-            eprintln!("H response_bytes len {} {}", response_size, hash_hex);
-        }
-        bincode::deserialize(&buf).unwrap()
-    };
-
-    let mapping = unsafe {
-        MmapOptions::new()
-        .offset((4 + 4 + response_size).into())
-        .len(archive_size.try_into().unwrap())
-        .map(file)
-        .unwrap()
-    };
-
-    (response, mapping)
-}
-
-fn parse_response_jsonv1(mut file: &NamedTempFile) -> ResponseJson {
-    file.seek(SeekFrom::Start(0)).unwrap();
-    let _archive_size = file.read_u32::<LE>().unwrap();
-    let response_size = file.read_u32::<LE>().unwrap();
-    let mut buf = vec![0; response_size.try_into().unwrap()];
-    file.read_exact(&mut buf).unwrap();
-    serde_json::from_slice(&buf).unwrap()
-}
-
 fn dump_file<F: Read>(name: &str, file: &mut F) {
     eprintln!("=== {} ===", name);
     let _ = io::copy(file, &mut io::stderr());
@@ -169,16 +109,20 @@ fn handle_worker_output(output: worker::OutputResult, response_format: &Response
             if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
             if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
 
+            let (archive_size, response) = peinit::read_io_file_response(io_file.as_file_mut()).unwrap();
+            eprintln!("response {:#?}", response);
             match response_format {
-                ResponseFormat::JsonV1 => {
-                    let response = parse_response_jsonv1(&mut io_file);
-                    eprintln!("response {:#?}", response);
-                }
+                ResponseFormat::JsonV1 => { }
                 ResponseFormat::PeArchiveV1 => {
-                    let (response, archive_map) = parse_response_pearchivev1(&mut io_file);
-                    eprintln!("response {:#?}", response);
+                    let mapping = unsafe {
+                        MmapOptions::new()
+                        .offset(io_file.stream_position().unwrap())
+                        .len(archive_size.try_into().unwrap())
+                        .map(io_file.as_file())
+                        .unwrap()
+                    };
 
-                    dump_archive(&archive_map);
+                    dump_archive(&mapping);
                 }
             }
 

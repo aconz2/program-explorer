@@ -326,7 +326,7 @@ fn round_up_to<const N: u64>(x: u64) -> u64 {
     ((x + (N - 1)) / N) * N
 }
 
-pub fn round_up_file_to_pmem_size(f: &fs::File) -> io::Result<u64> {
+pub fn round_up_file_to_pmem_size(f: &mut fs::File) -> io::Result<u64> {
     let cur = f.metadata()?.len();
     let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
     if cur != newlen {

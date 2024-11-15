@@ -1,35 +1,23 @@
 use std::fs;
 use std::fs::File;
 use std::process::{Stdio, Command};
-use std::io::{Seek,Read,Write,SeekFrom};
-use std::os::fd::{AsRawFd,FromRawFd};
-//use std::os::unix::process::CommandExt;
+use std::io::{Read,Seek};
 use std::ffi::{CStr,OsStr,CString};
 use std::path::Path;
 use std::io;
 use std::time::Instant;
 
-use peinit::{Config,Response,ExitKind,RootfsKind,ResponseFormat,ResponseJson};
+use peinit::{Config,Response,RootfsKind,ResponseFormat};
+use peinit::{write_io_file_response,read_io_file_config};
 use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
-use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use libc;
-use bincode;
-use serde_json;
 
 // rootfs on /dev/pmem0
 const INOUT_DEVICE: &str = "/dev/pmem1";
 const STDOUT_FILE: &str = "/run/output/stdout";
 const STDERR_FILE: &str = "/run/output/stderr";
 const RESPSONSE_JSON_STDOUT_SIZE: u64 = 1024;
-
-#[derive(Debug)]
-enum Error {
-    OpenDev,
-    InotifyInit,
-    InotifyAddWatch,
-    InotifyRead,
-}
 
 fn sha2_hex(buf: &[u8]) -> String {
     use sha2::{Sha256,Digest};
@@ -51,43 +39,20 @@ fn exit() {
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_SW_SUSPEND); }
-    //std::thread::sleep(std::time::Duration::from_millis(10000));
     std::process::exit(1);
 }
 
 // NOTE: the host can still not receive this message if the pmem is configured incorrectly, for
 // example by having discard_writes=on accidentally in which case the writes are silently dropped
-fn write_panic_response(message: &str) {
-    let response = Response {
-        status: ExitKind::Panic,
-        panic: Some(message.into()),
-        ..Default::default()
+fn write_panic_response(message: &str) -> Result<(), peinit::Error> {
+    println!("panic: {message}");
+
+    let response = Response::Panic {
+        message: message.into(),
     };
 
-    fn try_(result: io::Result<()>) {
-        if result.is_err() {
-            println!("V got an error {result:?}");
-        }
-    }
-    match bincode::serialize(&response) {
-        Ok(ser) => {
-            println!("V panic response bytes len {} {}", ser.len(), sha2_hex(&ser));
-            let f = File::create(INOUT_DEVICE);
-            if f.is_err() {
-                println!("V couldnt open inout device!");
-                return
-            }
-            let mut f = f.unwrap();
-            try_(f.write_u32::<LE>(0));
-            try_(f.write_u32::<LE>(ser.len().try_into().unwrap()));
-            try_(f.write_all(&ser));
-            try_(f.sync_data());
-            println!("V wrote panic response");
-        }
-        Err(e) => {
-            println!("V couldnt serialize panic response {e:?}");
-        }
-    }
+    let mut f = File::create(INOUT_DEVICE).map_err(|_| peinit::Error::Io)?;
+    write_io_file_response(&mut f, &response)
 }
 
 fn setup_panic() {
@@ -99,7 +64,10 @@ fn setup_panic() {
         //} else {
         //    write_panic_response("unknown panic");
         //}
-        write_panic_response(&format!("{}", p));
+        let _ = write_panic_response(&format!("{}", p))
+            .map_err(|e| {
+                println!("Error writing panic response {e:?}");
+            });
         exit();
     }));
 }
@@ -117,7 +85,7 @@ fn mount(source: &CStr, target: &CStr, filesystem: Option<&CStr>, flags: libc::c
     check_libc(unsafe { libc::mount(source.as_ptr(), target.as_ptr(), filesystem, flags, data) })
 }
 
-fn unshare(flags: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::unshare(flags) }) }
+//fn unshare(flags: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::unshare(flags) }) }
 fn chdir(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chdir(dir.as_ptr()) }) }
 fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.as_ptr()) }) }
 fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
@@ -132,36 +100,11 @@ fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
     Ok(())
 }
 
-fn fstatat_exists(file: &File, name: &std::ffi::CStr) -> bool {
-    let mut buf: libc::stat = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::fstatat(file.as_raw_fd(), name.as_ptr(), &mut buf, 0) };
-    ret == 0
-}
-
 // kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut f = File::open(&archive).unwrap();
-    let archive_size = f.read_u32::<LE>().unwrap();
-    let config_size = f.read_u32::<LE>().unwrap();
-
-    println!("V archive_size: {archive_size} config_size: {config_size}");
-
-    let config_bytes = {
-        // let mut buf: Vec::<u8> = Vec::with_capacity(config_size as usize); // todo uninit
-        // f.read_exact(buf.spare_capacity_mut()).unwrap();
-        // buf.set_len(config_size as usize);
-        let mut buf = vec![0; config_size as usize];
-        f.read_exact(buf.as_mut_slice()).unwrap();
-        buf
-    };
-
-    if true {
-        let hash_hex = sha2_hex(&config_bytes);
-        println!("V config_bytes len {} {}", config_bytes.len(), hash_hex);
-    }
-    let config: Config = bincode::deserialize(config_bytes.as_slice()).unwrap();
-
+    let (archive_size, config) = read_io_file_config(&mut f).unwrap();
 
     let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
@@ -182,22 +125,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     config
 }
 
-fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archive: P) {
-    //Command::new("/bin/busybox").arg("ls").arg("-lh").arg("/run/output").spawn().unwrap().wait().unwrap();
-    let mut f = File::create(&archive).unwrap();
-    let response_bytes = bincode::serialize(response).unwrap();
-
-    if true {
-        let hash_hex = sha2_hex(&response_bytes);
-        println!("V response_bytes len {} {}", response_bytes.len(), hash_hex);
-    }
-
-    let response_size: u32 = response_bytes.len().try_into().unwrap();
-    f.seek(SeekFrom::Start(4)).unwrap();  // packdev fills in the <archive size>
-    f.write_u32::<LE>(response_size).unwrap();
-    f.write_all(&response_bytes).unwrap();
-    let offset = f.stream_position().unwrap();
-
+fn pack_output<P: AsRef<OsStr>>(offset: u64, dir: P, archive: P) {
     //let ret = Command::new("strace").arg("/bin/pearchive")
     let ret = Command::new("/bin/pearchive")
         .arg("packdev")
@@ -209,43 +137,6 @@ fn pack_output<P: AsRef<OsStr> + AsRef<Path>>(response: &Response, dir: P, archi
         .code()
         .expect("pearchive packdev had no status");
     assert!(ret == 0, "pearchive packdev failed with status {}", ret);
-}
-
-fn read_if_exists_max_len_lossy<P: AsRef<Path>>(p: P) -> Option<String> {
-    let f = File::open(p).ok()?;
-    let mut buf = vec![];
-    let _ = f.take(RESPSONSE_JSON_STDOUT_SIZE).read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into())
-}
-
-fn pack_json_output<P: AsRef<Path>>(response: &ResponseJson, archive: P) {
-    let mut f = File::create(&archive).unwrap();
-    let response_bytes = serde_json::to_vec(&response).unwrap();
-    let response_size = response_bytes.len() as u32;
-    f.write_u32::<LE>(0).unwrap();
-    f.write_u32::<LE>(response_size).unwrap();
-    f.write_all(&response_bytes).unwrap();
-}
-
-fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) -> String {
-    match File::open(&path) {
-        Err(e) => format!("error opening file {} {:?}", path, e),
-        Ok(f) => {
-            let mut buf = String::with_capacity(n);
-            match f.take(n as u64).read_to_string(&mut buf) {
-                Ok(_) => buf,
-                Err(e) => format!("error reading file {} {:?}", path, e)
-            }
-        }
-    }
-}
-
-fn cat_file_if_exists<P: AsRef<Path>>(name: &str, file: P) {
-    if let Ok(mut f ) = File::open(file) {
-        println!("=== {name} ===");
-        let _ = io::copy(&mut f, &mut io::stdout());
-        println!("======");
-    }
 }
 
 fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
@@ -371,38 +262,85 @@ fn main() {
     // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     let container_output = run_container(&config);
+
+    let (stdout, stderr) = match config.response_format {
+        ResponseFormat::PeArchiveV1 => (None, None),
+        ResponseFormat::JsonV1 => (
+            read_if_exists_max_len_lossy(STDOUT_FILE, RESPSONSE_JSON_STDOUT_SIZE),
+            read_if_exists_max_len_lossy(STDERR_FILE, RESPSONSE_JSON_STDOUT_SIZE),
+        )
+    };
+
     let response = match container_output {
-        Err(_) | Ok(WaitIdDataOvertime::NotExited) => {
-            Response {
-                status: ExitKind::Abnormal,
-                siginfo: None,
-                rusage: None,
-                panic: None,
+        Err(e) => {
+            Response::Panic {
+                message: format!("{:?}", e),
+            }
+        }
+        Ok(WaitIdDataOvertime::NotExited) => {
+            Response::Panic {
+                message: "ch not exited overtime".into(),
             }
         }
         Ok(WaitIdDataOvertime::Exited{siginfo, rusage}) => {
-            Response {
-                status: ExitKind::Ok,
-                siginfo: Some(siginfo.into()),
-                rusage: Some(rusage.into()),
-                panic: None,
+            Response::Ok {
+                siginfo: siginfo.into(),
+                rusage: rusage.into(),
+                stdout: stdout,
+                stderr: stderr,
             }
         }
         Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, rusage}) => {
-            Response {
-                status: ExitKind::Overtime,
-                siginfo: Some(siginfo.into()),
-                rusage: Some(rusage.into()),
-                panic: None,
+            Response::Overtime {
+                siginfo: siginfo.into(),
+                rusage: rusage.into(),
+                stdout: stdout,
+                stderr: stderr,
             }
         }
     };
 
-    match config.response_format {
-        ResponseFormat::PeArchiveV1 => { pack_output(&response, "/run/output", INOUT_DEVICE); }
-        ResponseFormat::JsonV1 => { pack_json_output(&response.to_json(read_if_exists_max_len_lossy(STDOUT_FILE),
-                                                                    read_if_exists_max_len_lossy(STDERR_FILE)), INOUT_DEVICE); }
+
+    { // output
+        let mut f = File::create(INOUT_DEVICE).unwrap();
+        write_io_file_response(&mut f, &response).unwrap();
+        let offset = f.stream_position().unwrap();
+
+        match config.response_format {
+            ResponseFormat::PeArchiveV1 => { pack_output(offset, "/run/output", INOUT_DEVICE); }
+            ResponseFormat::JsonV1 => { }
+        }
     }
 
     exit()
 }
+
+
+fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) -> String {
+    match File::open(&path) {
+        Err(e) => format!("error opening file {} {:?}", path, e),
+        Ok(f) => {
+            let mut buf = String::with_capacity(n);
+            match f.take(n as u64).read_to_string(&mut buf) {
+                Ok(_) => buf,
+                Err(e) => format!("error reading file {} {:?}", path, e)
+            }
+        }
+    }
+}
+
+fn read_if_exists_max_len_lossy<P: AsRef<Path>>(p: P, len: u64) -> Option<String> {
+    let f = File::open(p).ok()?;
+    let mut buf = vec![];
+    let _ = f.take(len).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into())
+}
+
+fn cat_file_if_exists<P: AsRef<Path>>(name: &str, file: P) {
+    if let Ok(mut f ) = File::open(file) {
+        println!("=== {name} ===");
+        let _ = io::copy(&mut f, &mut io::stdout());
+        println!("======");
+    }
+}
+

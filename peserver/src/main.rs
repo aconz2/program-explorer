@@ -6,9 +6,7 @@ use async_trait::async_trait;
 use bytes::{Bytes,BytesMut};
 use http;
 use http::{Method, Response, StatusCode};
-use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use tempfile::NamedTempFile;
-use bincode;
 
 use pingora_timeout::timeout;
 use pingora::services::Service as IService;
@@ -139,13 +137,13 @@ enum Error {
     BadRequest,
     NoSuchImage,
     TempfileCreate,
-    TempfileWrite,
     QueueFull,
     WorkerRecv,
     BadContentType,
     ResponseRead,
     WorkerError,
     ResponseBuild,
+    Internal,
 }
 
 impl Into<StatusCode> for Error {
@@ -164,7 +162,7 @@ impl Into<StatusCode> for Error {
             ResponseRead |
             WorkerError |
             ResponseBuild |
-            TempfileWrite => StatusCode::INTERNAL_SERVER_ERROR,
+            Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -213,7 +211,7 @@ impl HttpRunnerApp {
             kernel        : self.kernel.clone(),
             initramfs     : self.initramfs.clone(),
             log_level     : None,
-            console       : false,
+            console       : true,
             keep_args     : true,
             event_monitor : false,
         };
@@ -232,13 +230,11 @@ impl HttpRunnerApp {
         };
 
         let mut io_file = NamedTempFile::new().map_err(|_| Error::TempfileCreate)?;
-        let pe_config_bytes = bincode::serialize(&pe_config).unwrap();
         match content_type {
             ContentType::ApplicationJson => {
-                io_file.write_u32::<LE>(0).map_err(|_| Error::TempfileWrite)?;
-                io_file.write_u32::<LE>(pe_config_bytes.len() as u32).map_err(|_| Error::TempfileWrite)?;
-                io_file.write_all(&pe_config_bytes).map_err(|_| Error::TempfileWrite)?;
-                let _ = round_up_file_to_pmem_size(&io_file.as_file()).unwrap();
+                // this is blocking, but is going to tmpfs so I don't think its bad to do this?
+                peinit::write_io_file_config(io_file.as_file_mut(), &pe_config).map_err(|_| Error::Internal)?;
+                let _ = round_up_file_to_pmem_size(io_file.as_file_mut()).map_err(|_| Error::Internal)?;
             }
             ContentType::PeArchiveV1 => {
                 todo!()
@@ -246,7 +242,7 @@ impl HttpRunnerApp {
         }
 
         let worker_input = worker::Input {
-            id         : 42,
+            id         : 42, // id is useless because we are passing a return channel
             ch_config  : ch_config,
             ch_timeout : ch_timeout,
             io_file    : io_file,
@@ -266,30 +262,36 @@ impl HttpRunnerApp {
             .await
             .map_err(|_| Error::WorkerRecv)?
             .map_err(|postmortem| {
-
                 fn dump_file<F: Read>(name: &str, file: &mut F) {
                     eprintln!("=== {} ===", name);
                     let _ = std::io::copy(file, &mut std::io::stderr());
                 }
                 eprintln!("worker error {:?}", postmortem.error);
-                if let Some(args) = postmortem.args { eprintln!("launching ch with {:?}", args); };
+                if let Some(args) = postmortem.args { eprintln!("launched ch with {:?}", args); };
                 if let Some(mut err_file) = postmortem.logs.err_file { dump_file("ch err", &mut err_file); }
                 if let Some(mut log_file) = postmortem.logs.log_file { dump_file("ch log", &mut log_file); }
                 if let Some(mut con_file) = postmortem.logs.con_file { dump_file("ch con", &mut con_file); }
                 Error::WorkerError
             })?;
 
+        if true {
+            fn dump_file<F: Read>(name: &str, file: &mut F) {
+                eprintln!("=== {} ===", name);
+                let _ = std::io::copy(file, &mut std::io::stderr());
+            }
+            if let Some(mut err_file) = worker_output.ch_logs.err_file { dump_file("ch err", &mut err_file); }
+            if let Some(mut log_file) = worker_output.ch_logs.log_file { dump_file("ch log", &mut log_file); }
+            if let Some(mut con_file) = worker_output.ch_logs.con_file { dump_file("ch con", &mut con_file); }
+        }
 
         match response_format {
             peinit::ResponseFormat::JsonV1 => {
                 let response_json_serialized = {
                     use std::io::{Seek,SeekFrom};
                     worker_output.io_file.seek(SeekFrom::Start(0)).map_err(|_| Error::ResponseRead)?;
-                    let _archive_size = worker_output.io_file.read_u32::<LE>().map_err(|_| Error::ResponseRead)?;
-                    let response_size = worker_output.io_file.read_u32::<LE>().map_err(|_| Error::ResponseRead)?;
-                    let mut buf = vec![0; response_size as usize];
-                    worker_output.io_file.read_exact(&mut buf).map_err(|_| Error::ResponseRead)?;
-                    buf
+                    let (_archive_size, response_bytes) = peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
+                        .map_err(|_| Error::ResponseRead)?;
+                    response_bytes
                 };
                 Response::builder()
                     .status(StatusCode::OK)

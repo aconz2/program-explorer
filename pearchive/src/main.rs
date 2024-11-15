@@ -97,15 +97,6 @@ fn packdev(args: &[String]) {
     fileout.seek(SeekFrom::Start(0)).unwrap();
     fileout.write_u32::<LE>(encoded_size).unwrap();
     println!("packdev archive_size {encoded_size}");
-
-    {
-        let mut file = File::open(outname).unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let archive_size  = file.read_u32::<LE>().unwrap();
-        let response_size = file.read_u32::<LE>().unwrap();
-        println!("packdev reread archive_size {archive_size} response_size {response_size}");
-    }
-
 }
 
 fn main() {

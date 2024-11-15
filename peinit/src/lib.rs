@@ -1,6 +1,10 @@
-use serde::{Serialize, Deserialize};
+use std::fs::File;
+use std::io::{Read,Write,Seek,SeekFrom};
 use std::time::Duration;
 use std::path::Path;
+
+use byteorder::{WriteBytesExt,ReadBytesExt,LE};
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum RootfsKind {
@@ -48,46 +52,32 @@ pub struct Config {
     pub response_format: ResponseFormat,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct Response {
-    pub status  : ExitKind,
-    pub panic   : Option<String>,
-    pub siginfo : Option<SigInfoRedux>,
-    pub rusage  : Option<Rusage>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct ResponseJson {
-    pub status  : ExitKind,
-    pub panic   : Option<String>,
-    pub siginfo : Option<SigInfoRedux>,
-    pub rusage  : Option<Rusage>,
-    pub stdout  : Option<String>,
-    pub stderr  : Option<String>,
-}
-
-impl Response {
-    pub fn to_json(self, stdout: Option<String>, stderr: Option<String>) -> ResponseJson {
-        ResponseJson {
-            status  : self.status,
-            panic   : self.panic,
-            siginfo : self.siginfo,
-            rusage  : self.rusage,
-            stdout  : stdout,
-            stderr  : stderr,
-        }
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Response {
+    Ok {
+        siginfo : SigInfoRedux,
+        rusage  : Rusage,
+        stdout  : Option<String>,  // not included in ResponseFormat::PeArchiveV1
+        stderr  : Option<String>,  // not included in ResponseFormat::PeArchiveV1
+    },
+    Overtime {
+        siginfo : SigInfoRedux,
+        rusage  : Rusage,
+        stdout  : Option<String>,
+        stderr  : Option<String>,
+    },
+    Panic {
+        message : String,
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
-pub enum ExitKind {
-    Ok,
-    Panic,
-    Overtime,
-    Abnormal,
-    #[default]
-    Unk,
-}
+//#[derive(Debug, Serialize, Deserialize, Clone)]
+//pub enum ExitKind {
+//    Ok,
+//    Panic,
+//    Overtime,
+//    Abnormal,
+//}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimeVal {
@@ -98,7 +88,7 @@ pub struct TimeVal {
 // this is a portion of siginfo interpreted from waitid(2)
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SigInfoRedux {
-    Exited(i32), // this is really i8/u8 but
+    Exited(i32),
     Killed(i32),
     Dumped(i32),
     Stopped(i32),
@@ -180,4 +170,80 @@ impl From<libc::rusage> for Rusage {
             ru_nivcsw   : u.ru_nivcsw,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Io,
+    Ser,
+}
+
+// todo use a single write
+fn write_u32_le_slice(file: &mut File, xs: &[u32]) -> std::io::Result<()> {
+    for x in xs {
+        file.write_u32::<LE>(*x)?;
+    }
+    Ok(())
+}
+
+fn read_u32_le_slice(file: &mut File, xs: &mut [u32]) -> std::io::Result<()> {
+    file.read_u32_into::<LE>(xs)
+}
+
+fn read_u32_le_pair<const N: usize>(file: &mut File) -> std::io::Result<(u32, u32)> {
+    let mut buf = [0; 2];
+    read_u32_le_slice(file, &mut buf)?;
+    Ok((buf[0], buf[1]))
+}
+
+// going into the guest, we have
+// <u32: archive size> <u32: config size> <config> <archive>
+// config is always in bincode format
+// file is left with cursor at beginning of archive but you then must
+// seek back to 0 to write the archive size
+// file should be at 0, but we don't seek it so
+pub fn write_io_file_config(file: &mut File, config: &Config) -> Result<(), Error> {
+    let config_bytes = bincode::serialize(&config).map_err(|_| Error::Ser)?;
+    let config_size: u32 = config_bytes.len().try_into().unwrap();
+    write_u32_le_slice(file, &[0, config_size]).map_err(|_| Error::Io)?;
+    file.write_all(&config_bytes).map_err(|_| Error::Io)?;
+    Ok(())
+}
+
+pub fn read_io_file_config(file: &mut File) -> Result<(u32, Config), Error> {
+    let (archive_size, response_size) = read_u32_le_pair::<2>(file).map_err(|_| Error::Io)?;
+    let mut buf = vec![0; response_size as usize];
+    file.read_exact(&mut buf).map_err(|_| Error::Io)?;
+    let config = bincode::deserialize(&buf).map_err(|_| Error::Ser)?;
+    Ok((archive_size, config))
+}
+
+// coming out of the guest, we have
+// <u32: archive size> <u32: response size> <response> <archive>
+// response is always in json format and archive_size may be 0
+pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<(), Error> {
+    let response_bytes = serde_json::to_vec(&response).map_err(|_| Error::Ser)?;
+    let response_size: u32 = response_bytes.len().try_into().unwrap();
+    write_u32_le_slice(file, &[0, response_size]).map_err(|_| Error::Io)?;
+    file.write_all(&response_bytes).map_err(|_| Error::Io)?;
+    Ok(())
+}
+
+// coming out of the guest, we have
+// <u32: archive size> <u32: response size> <response> <archive>
+// response is always in json format and archive_size may be 0
+// we return the archive size and bytes of the response json
+// file cursor is left at beginning of archive
+pub fn read_io_file_response_bytes(file: &mut File) -> Result<(u32, Vec<u8>), Error> {
+    file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+    let (archive_size, response_size) = read_u32_le_pair::<2>(file).map_err(|_| Error::Io)?;
+    let mut ret = vec![0; response_size as usize];
+    file.read_exact(&mut ret).map_err(|_| Error::Io)?;
+    Ok((archive_size, ret))
+}
+
+pub fn read_io_file_response(file: &mut File) -> Result<(u32, Response), Error> {
+    let (archive_size, response_bytes) = read_io_file_response_bytes(file)?;
+    let response = serde_json::from_slice(&response_bytes).map_err(|_| Error::Ser)?;
+    Ok((archive_size, response))
 }

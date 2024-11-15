@@ -1147,7 +1147,6 @@ version = "0.1.0"
 dependencies = [
  "api_client",
  "base16ct",
- "bincode",
  "byteorder",
  "clap 4.5.21",
  "crossbeam",
