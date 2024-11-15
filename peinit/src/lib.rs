@@ -27,7 +27,7 @@ impl RootfsKind {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub enum ContentType {
+pub enum ResponseFormat {
     PeArchiveV1,
     JsonV1,
 }
@@ -45,7 +45,7 @@ pub struct Config {
     pub crun_debug: bool,
     pub rootfs_dir: String,
     pub rootfs_kind: RootfsKind, // this isn't really viable since we need to know
-    pub response_type: ContentType,
+    pub response_format: ResponseFormat,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

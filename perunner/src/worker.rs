@@ -13,14 +13,12 @@ use tempfile::NamedTempFile;
 
 use crate::cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem,CloudHypervisorLogs,CloudHypervisorPmem,CloudHypervisorPmemMode};
-use peinit;
 
 type JoinHandleT = JoinHandle<()>;
 
 pub struct Input {
     pub id: u64,
     pub ch_config: CloudHypervisorConfig,
-    pub pe_config: peinit::Config,
     pub rootfs: PathBuf,
     pub io_file: NamedTempFile,
     pub ch_timeout: Duration,

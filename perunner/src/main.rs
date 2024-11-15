@@ -18,36 +18,20 @@ use clap::{Parser};
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
-use peinit::{Response};
+use peinit::{Response,ResponseFormat,ResponseJson};
 use peimage::PEImageMultiIndex;
 
 mod cloudhypervisor;
-use cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
+use cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
 
 mod worker;
 use perunner::{UID,NIDS,create_runtime_spec};
-
-const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 
 fn sha2_hex(buf: &[u8]) -> String {
     use sha2::{Sha256,Digest};
     use base16ct;
     let hash = Sha256::digest(&buf);
     base16ct::lower::encode_string(&hash)
-}
-
-fn round_up_to<const N: u64>(x: u64) -> u64 {
-    if x == 0 { return N; }
-    ((x + (N - 1)) / N) * N
-}
-
-fn round_up_file_to_pmem_size(f: &File) -> io::Result<u64> {
-    let cur = f.metadata()?.len();
-    let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
-    if cur != newlen {
-        let _ = f.set_len(newlen)?;
-    }
-    Ok(newlen)
 }
 
 // ImageConfiguration: {created, architecture, os, config: {Env, User, Entrypoint, Cmd, WorkingDir}, rootfs, ...}
@@ -134,7 +118,7 @@ fn dump_archive(mmap: &Mmap) {
     unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
 }
 
-fn parse_response(mut file: &NamedTempFile) -> (Response, Mmap) {
+fn parse_response_pearchivev1(mut file: &NamedTempFile) -> (Response, Mmap) {
     file.seek(SeekFrom::Start(0)).unwrap();
     let archive_size = file.read_u32::<LE>().unwrap();
     let response_size = file.read_u32::<LE>().unwrap();
@@ -163,12 +147,21 @@ fn parse_response(mut file: &NamedTempFile) -> (Response, Mmap) {
     (response, mapping)
 }
 
-fn dump_file<F: Read>(name: &str, file: &mut F) {
-    eprintln!("=== {} ===", name);
-    let _ = io::copy(file, &mut io::stdout());
+fn parse_response_jsonv1(mut file: &NamedTempFile) -> ResponseJson {
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let _archive_size = file.read_u32::<LE>().unwrap();
+    let response_size = file.read_u32::<LE>().unwrap();
+    let mut buf = vec![0; response_size.try_into().unwrap()];
+    file.read_exact(&mut buf).unwrap();
+    serde_json::from_slice(&buf).unwrap()
 }
 
-fn handle_worker_output(output: worker::OutputResult) {
+fn dump_file<F: Read>(name: &str, file: &mut F) {
+    eprintln!("=== {} ===", name);
+    let _ = io::copy(file, &mut io::stderr());
+}
+
+fn handle_worker_output(output: worker::OutputResult, response_format: &ResponseFormat) {
     match output {
         Ok(worker::Output{mut io_file, ch_logs, id}) => {
             let _ = id;
@@ -176,10 +169,18 @@ fn handle_worker_output(output: worker::OutputResult) {
             if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
             if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
 
-            let (response, archive_map) = parse_response(&mut io_file);
-            eprintln!("response {:#?}", response);
+            match response_format {
+                ResponseFormat::JsonV1 => {
+                    let response = parse_response_jsonv1(&mut io_file);
+                    eprintln!("response {:#?}", response);
+                }
+                ResponseFormat::PeArchiveV1 => {
+                    let (response, archive_map) = parse_response_pearchivev1(&mut io_file);
+                    eprintln!("response {:#?}", response);
 
-            dump_archive(&archive_map);
+                    dump_archive(&archive_map);
+                }
+            }
 
         }
         Err(e) => {
@@ -243,6 +244,9 @@ struct Args {
     #[arg(long, help = "pass --debug to crun")]
     crun_debug: bool,
 
+    #[arg(long, help = "use json output format")]
+    json: bool,
+
     #[arg(long, default_value_t = 0, help = "num workers to run")]
     parallel: u64,
 
@@ -284,6 +288,11 @@ fn main() {
         }
     };
 
+    let response_format = match args.json {
+        true => ResponseFormat::JsonV1,
+        false => ResponseFormat::PeArchiveV1,
+    };
+
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
@@ -311,6 +320,7 @@ fn main() {
         crun_debug: args.crun_debug,
         rootfs_dir: image_index_entry.image.rootfs.clone(),
         rootfs_kind: image_index_entry.rootfs_kind,
+        response_format: response_format,
     };
 
     if args.parallel > 0 {
@@ -322,7 +332,6 @@ fn main() {
             create_pack_file_from_dir(&args.input, &io_file, &pe_config);
             let worker_input = worker::Input {
                 id: id,
-                pe_config: pe_config.clone(),
                 ch_config: ch_config.clone(),
                 ch_timeout: ch_timeout,
                 io_file: io_file,
@@ -333,7 +342,7 @@ fn main() {
         for id in 0..args.parallel {
             println!("hi trying to get work for {id}");
             let output = pool.receiver().recv_timeout(ch_timeout).expect("should have gotten a response by now");
-            handle_worker_output(output);
+            handle_worker_output(output, &response_format);
         }
         let pool = pool.close_sender();
         let _ = pool.shutdown();
@@ -344,12 +353,11 @@ fn main() {
         //std::fs::copy(io_file.path(), "/tmp/perunner-io-file").unwrap();
         let worker_input = worker::Input {
             id: 0,
-            pe_config: pe_config,
             ch_config: ch_config,
             ch_timeout: ch_timeout,
             io_file: io_file,
             rootfs: image_index_entry.path.clone().into(),
         };
-        handle_worker_output(worker::run(worker_input));
+        handle_worker_output(worker::run(worker_input), &response_format);
     }
 }

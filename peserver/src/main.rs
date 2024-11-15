@@ -1,16 +1,16 @@
 use std::time::Duration;
-use std::io::Write;
-use std::io;
+use std::io::{Read,Write};
 use std::ffi::OsString;
 
 use async_trait::async_trait;
 use bytes::{Bytes,BytesMut};
 use http;
 use http::{Method, Response, StatusCode};
-use pingora_timeout::timeout;
-
+use byteorder::{ReadBytesExt,WriteBytesExt,LE};
 use tempfile::NamedTempFile;
+use bincode;
 
+use pingora_timeout::timeout;
 use pingora::services::Service as IService;
 use pingora::services::listening::Service;
 use pingora::server::Server;
@@ -24,8 +24,11 @@ use pingora::protocols::http::ServerSession;
 
 use peinit;
 use perunner::{worker,UID,NIDS,create_runtime_spec};
-use perunner::cloudhypervisor::{CloudHypervisorConfig};
+use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size};
 use peimage::PEImageMultiIndex;
+
+const APPLICATION_JSON: &str = "application/json";
+const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
 
 struct HttpRunnerApp {
     pub pool: worker::asynk::Pool,
@@ -39,6 +42,33 @@ impl HttpRunnerApp {
     //fn new(pool: worker::Pool, index: PEImageMultiIndex) -> Self {
     //    Self { pool: pool, index: index}
     //}
+}
+
+enum ContentType {
+    ApplicationJson,
+    PeArchiveV1, // <u32 json size> <json> <pearchivev1>
+}
+
+impl TryFrom<&str> for ContentType {
+    type Error = ();
+
+    fn try_from(s: &str) -> Result<ContentType, ()> {
+        match s {
+            APPLICATION_JSON => Ok(ContentType::ApplicationJson),
+            APPLICATION_X_PE_ARCHIVEV1 => Ok(ContentType::PeArchiveV1),
+            _ => Err(()),
+        }
+    }
+
+}
+
+impl Into<&str> for ContentType {
+    fn into(self) -> &'static str {
+        match self {
+            ContentType::ApplicationJson => APPLICATION_JSON,
+            ContentType::PeArchiveV1 => APPLICATION_X_PE_ARCHIVEV1,
+        }
+    }
 }
 
 mod apiv1 {
@@ -72,10 +102,17 @@ async fn read_full_body(http_stream: &mut ServerSession) -> Result<Bytes, Box<pi
     Ok(acc.freeze())
 }
 
-fn parse_api_request(buf: &[u8]) -> Option<apiv1::runi::Request> {
-    if buf.len() < 4 { return None; }
-    let json_size = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    serde_json::from_slice(&buf[4..4+json_size]).ok()
+fn parse_apiv1_runi_request(buf: &[u8], content_type: &ContentType) -> Option<apiv1::runi::Request> {
+    match content_type {
+        ContentType::ApplicationJson => {
+            serde_json::from_slice(&buf).ok()
+        }
+        ContentType::PeArchiveV1 => {
+            if buf.len() < 4 { return None; }
+            let json_size = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            serde_json::from_slice(&buf[4..4+json_size]).ok()
+        }
+    }
 }
 
 fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
@@ -95,6 +132,7 @@ fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>>
         .unwrap()
 }
 
+#[derive(Debug)]
 enum Error {
     ReadTimeout,
     ReadError,
@@ -104,19 +142,28 @@ enum Error {
     TempfileWrite,
     QueueFull,
     WorkerRecv,
+    BadContentType,
+    ResponseRead,
+    WorkerError,
+    ResponseBuild,
 }
 
 impl Into<StatusCode> for Error {
     fn into(self: Error) -> StatusCode {
         use Error::*;
+        eprintln!("got error {:?}", self);
         match self {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
             ReadError |
             NoSuchImage |
+            BadContentType |
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv |
             TempfileCreate |
+            ResponseRead |
+            WorkerError |
+            ResponseBuild |
             TempfileWrite => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -138,7 +185,20 @@ impl HttpRunnerApp {
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::ReadError)?;
 
-        let api_req = parse_api_request(&body).ok_or(Error::BadRequest)?;
+        let content_type = http_stream.req_header()
+            .headers
+            .get("Content-Type")
+            .and_then(|x| x.to_str().ok())
+            .and_then(|x| x.try_into().ok())
+            .ok_or(Error::BadContentType)?;
+
+        // not using accept header
+        let response_format = match content_type {
+            ContentType::ApplicationJson => peinit::ResponseFormat::JsonV1,
+            ContentType::PeArchiveV1 => peinit::ResponseFormat::PeArchiveV1,
+        };
+
+        let api_req = parse_apiv1_runi_request(&body, &content_type).ok_or(Error::BadRequest)?;
 
         let image_entry = self.index.get(&api_req.image).ok_or(Error::NoSuchImage)?;
 
@@ -168,14 +228,25 @@ impl HttpRunnerApp {
             crun_debug         : false,
             rootfs_dir         : image_entry.image.rootfs.clone(),
             rootfs_kind        : image_entry.rootfs_kind,
+            response_format    : response_format,
         };
 
         let mut io_file = NamedTempFile::new().map_err(|_| Error::TempfileCreate)?;
-        () = io_file.write_all(&body).map_err(|_| Error::TempfileWrite)?;
+        let pe_config_bytes = bincode::serialize(&pe_config).unwrap();
+        match content_type {
+            ContentType::ApplicationJson => {
+                io_file.write_u32::<LE>(0).map_err(|_| Error::TempfileWrite)?;
+                io_file.write_u32::<LE>(pe_config_bytes.len() as u32).map_err(|_| Error::TempfileWrite)?;
+                io_file.write_all(&pe_config_bytes).map_err(|_| Error::TempfileWrite)?;
+                let _ = round_up_file_to_pmem_size(&io_file.as_file()).unwrap();
+            }
+            ContentType::PeArchiveV1 => {
+                todo!()
+            }
+        }
 
         let worker_input = worker::Input {
             id         : 42,
-            pe_config  : pe_config,
             ch_config  : ch_config,
             ch_timeout : ch_timeout,
             io_file    : io_file,
@@ -191,9 +262,44 @@ impl HttpRunnerApp {
                 Error::QueueFull
             })?;
 
-        let worker_output = resp_receiver.await.map_err(|_| Error::WorkerRecv)?;
+        let mut worker_output = resp_receiver
+            .await
+            .map_err(|_| Error::WorkerRecv)?
+            .map_err(|postmortem| {
 
-        Ok(response_with_message(StatusCode::OK, "todo"))
+                fn dump_file<F: Read>(name: &str, file: &mut F) {
+                    eprintln!("=== {} ===", name);
+                    let _ = std::io::copy(file, &mut std::io::stderr());
+                }
+                eprintln!("worker error {:?}", postmortem.error);
+                if let Some(args) = postmortem.args { eprintln!("launching ch with {:?}", args); };
+                if let Some(mut err_file) = postmortem.logs.err_file { dump_file("ch err", &mut err_file); }
+                if let Some(mut log_file) = postmortem.logs.log_file { dump_file("ch log", &mut log_file); }
+                if let Some(mut con_file) = postmortem.logs.con_file { dump_file("ch con", &mut con_file); }
+                Error::WorkerError
+            })?;
+
+
+        match response_format {
+            peinit::ResponseFormat::JsonV1 => {
+                let response_json_serialized = {
+                    use std::io::{Seek,SeekFrom};
+                    worker_output.io_file.seek(SeekFrom::Start(0)).map_err(|_| Error::ResponseRead)?;
+                    let _archive_size = worker_output.io_file.read_u32::<LE>().map_err(|_| Error::ResponseRead)?;
+                    let response_size = worker_output.io_file.read_u32::<LE>().map_err(|_| Error::ResponseRead)?;
+                    let mut buf = vec![0; response_size as usize];
+                    worker_output.io_file.read_exact(&mut buf).map_err(|_| Error::ResponseRead)?;
+                    buf
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(http::header::CONTENT_LENGTH, response_json_serialized.len())
+                    .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
+                    .body(response_json_serialized)
+                    .map_err(|_| Error::ResponseBuild)
+            }
+            _ => todo!()
+        }
     }
 }
 
@@ -207,11 +313,6 @@ impl ServeHttp for HttpRunnerApp {
                 response_no_body(StatusCode::NOT_FOUND)
             }
         }
-
-
-        //let mut tf = NamedTempFile::new().unwrap();
-        //tf.write_all(&body).unwrap();
-
     }
 }
 
@@ -236,7 +337,7 @@ fn main() {
         index            : index,
         kernel           : cwd.join("../vmlinux").into(),
         initramfs        : cwd.join("../initramfs").into(),
-        cloud_hypervisor : cwd.join("../cloud-hypervisor").into(),
+        cloud_hypervisor : cwd.join("../cloud-hypervisor-static").into(),
     };
     let mut runner_service_http = Service::new("Echo Service HTTP".to_string(), app);
     runner_service_http.add_tcp("127.0.0.1:8080");

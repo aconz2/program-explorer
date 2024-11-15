@@ -14,12 +14,15 @@ use serde::Serialize;
 use libc;
 use api_client;
 
+const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
+
 #[derive(Debug,Default)]
 pub enum Error {
     #[default]
     Unk,
     TempfileSetup,
     Spawn,
+    SpawnWithArgs(Vec<OsString>),
     Socket,
     Api(api_client::Error),
     Overtime,
@@ -233,10 +236,9 @@ impl CloudHypervisor {
             if config.keep_args {
                 args.extend(x.get_args().map(|x| x.into()));
             }
-            x.spawn().map_err(|_| Error::Spawn)?
+            x.spawn().map_err(|_| Error::SpawnWithArgs(args.clone()))?
         };
 
-        eprintln!("starting ch with args {:?}", args);
         let ret = CloudHypervisor {
             err_file: err_file,
             log_file: if config.log_level.is_some() { Some(log_file) } else { None },
@@ -317,6 +319,20 @@ impl CloudHypervisor {
             err_file: Some(self.err_file),
         }
     }
+}
+
+fn round_up_to<const N: u64>(x: u64) -> u64 {
+    if x == 0 { return N; }
+    ((x + (N - 1)) / N) * N
+}
+
+pub fn round_up_file_to_pmem_size(f: &fs::File) -> io::Result<u64> {
+    let cur = f.metadata()?.len();
+    let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
+    if cur != newlen {
+        let _ = f.set_len(newlen)?;
+    }
+    Ok(newlen)
 }
 
 // TODO I don't really like this because we regrab the pidfd and might already be killed etc

@@ -600,6 +600,7 @@ dependencies = [
  "byteorder",
  "libc",
  "serde",
+ "serde_json",
  "sha2",
  "waitid_timeout",
 ]

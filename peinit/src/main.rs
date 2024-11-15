@@ -9,7 +9,7 @@ use std::path::Path;
 use std::io;
 use std::time::Instant;
 
-use peinit::{Config,Response,ExitKind,RootfsKind,ContentType,ResponseJson};
+use peinit::{Config,Response,ExitKind,RootfsKind,ResponseFormat,ResponseJson};
 use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
 use byteorder::{ReadBytesExt,WriteBytesExt,LE};
@@ -398,9 +398,9 @@ fn main() {
         }
     };
 
-    match config.response_type {
-        ContentType::PeArchiveV1 => { pack_output(&response, "/run/output", INOUT_DEVICE); }
-        ContentType::JsonV1 => { pack_json_output(&response.to_json(read_if_exists_max_len_lossy(STDOUT_FILE),
+    match config.response_format {
+        ResponseFormat::PeArchiveV1 => { pack_output(&response, "/run/output", INOUT_DEVICE); }
+        ResponseFormat::JsonV1 => { pack_json_output(&response.to_json(read_if_exists_max_len_lossy(STDOUT_FILE),
                                                                     read_if_exists_max_len_lossy(STDERR_FILE)), INOUT_DEVICE); }
     }
 
