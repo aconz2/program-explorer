@@ -9,6 +9,7 @@ use http::{Method, Response, StatusCode};
 use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
+use oci_spec::image as oci_image;
 
 use pingora_timeout::timeout;
 use pingora::services::Service as IService;
@@ -42,9 +43,10 @@ enum Error {
     BadContentType,
     ResponseRead,
     WorkerError,
-    ResponseBuild,
     Internal,
     Serialize,
+    BadArch,
+    BadOs,
 }
 
 struct HttpRunnerApp {
@@ -53,12 +55,6 @@ struct HttpRunnerApp {
     pub cloud_hypervisor: OsString,
     pub initramfs: OsString,
     pub kernel: OsString,
-}
-
-impl HttpRunnerApp {
-    //fn new(pool: worker::Pool, index: PEImageMultiIndex) -> Self {
-    //    Self { pool: pool, index: index}
-    //}
 }
 
 enum ContentType {
@@ -76,7 +72,6 @@ impl TryFrom<&str> for ContentType {
             _ => Err(()),
         }
     }
-
 }
 
 impl Into<&str> for ContentType {
@@ -91,9 +86,13 @@ impl Into<&str> for ContentType {
 mod apiv1 {
     pub mod runi {
         use serde::{Deserialize,Serialize};
+        use oci_spec::image as oci_image;
+
         #[derive(Deserialize)]
         pub struct Request {
             pub image: String,
+            pub os: oci_image::Os,
+            pub architecture: oci_image::Arch,
             pub stdin: Option<String>,
             pub args: Vec<String>,
         }
@@ -104,9 +103,10 @@ mod apiv1 {
     }
 
     pub mod images {
-        use serde::{Deserialize,Serialize};
+        use serde::Serialize;
         use peimage;
         use oci_spec::image as oci_image;
+
         #[derive(Serialize)]
         pub struct Image {
             pub id: String,
@@ -173,14 +173,16 @@ fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
 }
 
 fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Result<Response<Vec<u8>>> {
-    let buf = serde_json::to_vec(&body)?;
-    let ret = Response::builder()
+    Ok(response_json_vec(status, serde_json::to_vec(&body)?))
+}
+
+fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
+    Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
-        .header(http::header::CONTENT_LENGTH, buf.len())
-        .body(buf)
-        .unwrap();
-    Ok(ret)
+        .header(http::header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap()
 }
 
 fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -201,13 +203,14 @@ impl Into<StatusCode> for Error {
             ReadError |
             NoSuchImage |
             BadContentType |
+            BadArch |
+            BadOs |
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv |
             TempfileCreate |
             ResponseRead |
             WorkerError |
-            ResponseBuild |
             Serialize |
             Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -247,6 +250,10 @@ impl HttpRunnerApp {
 
         let image_entry = self.index.get(&api_req.image).ok_or(Error::NoSuchImage)?;
 
+        // todo would need to be configurable
+        if api_req.architecture != oci_image::Arch::Amd64 { return Err(Error::BadArch); }
+        if api_req.os != oci_image::Os::Linux { return Err(Error::BadOs); }
+
         let runtime_spec = create_runtime_spec(&image_entry.image.config, &api_req.args)
             .ok_or(Error::BadRequest)?;
 
@@ -284,7 +291,7 @@ impl HttpRunnerApp {
                 let _ = round_up_file_to_pmem_size(io_file.as_file_mut()).map_err(|_| Error::Internal)?;
             }
             ContentType::PeArchiveV1 => {
-                todo!()
+                todo!("need offset of archive buf from when we parse");
             }
         }
 
@@ -334,24 +341,17 @@ impl HttpRunnerApp {
         match response_format {
             peinit::ResponseFormat::JsonV1 => {
                 let response_json_serialized = {
-                    use std::io::{Seek,SeekFrom};
-                    worker_output.io_file.seek(SeekFrom::Start(0)).map_err(|_| Error::ResponseRead)?;
-                    let (_archive_size, response_bytes) = peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
-                        .map_err(|_| Error::ResponseRead)?;
-                    response_bytes
+                    peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
+                        .map_err(|_| Error::ResponseRead)
+                        .map(|(_, x)| x)?
                 };
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header(http::header::CONTENT_LENGTH, response_json_serialized.len())
-                    .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
-                    .body(response_json_serialized)
-                    .map_err(|_| Error::ResponseBuild)
+                Ok(response_json_vec(StatusCode::OK, response_json_serialized))
             }
             _ => todo!()
         }
     }
 
-    async fn apiv1_images(&self, http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+    async fn apiv1_images(&self, _http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&self.index))
             .map_err(|_| Error::Serialize)
     }
@@ -395,6 +395,11 @@ fn main() {
         initramfs        : cwd.join("../initramfs").into(),
         cloud_hypervisor : cwd.join("../cloud-hypervisor-static").into(),
     };
+
+    assert_file_exists(&app.kernel);
+    assert_file_exists(&app.initramfs);
+    assert_file_exists(&app.cloud_hypervisor);
+
     let mut runner_service_http = Service::new("Echo Service HTTP".to_string(), app);
     runner_service_http.add_tcp("127.0.0.1:8080");
 
@@ -403,4 +408,9 @@ fn main() {
     ];
     my_server.add_services(services);
     my_server.run_forever();
+}
+
+use std::path::Path;
+fn assert_file_exists<P: AsRef<Path>>(p: P) {
+    assert!(p.as_ref().is_file(), "{:?} is not a file", p.as_ref());
 }

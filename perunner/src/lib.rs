@@ -35,14 +35,8 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_arg
 
     // TODO how does oci-spec-rs deserialize the config .Env into .env ?
 
-    // TODO add tmpfs of /tmp
-    //      add the bind mounts of /run/{input,output}
-    //      uid mapping isn't quite right, getting lots of nobody/nogroup
-    //      which is because our uid_map only maps 1000 to 0, but the podman map
-    //      maps 65k uids from 1- (starting at host 52488, which is my host subuid)
-
-    // we "know" that a defaulted runtime spec has Some mounts
     {
+        // we "know" that a defaulted runtime spec has Some mounts
         let mounts = spec.mounts_mut().as_mut().unwrap();
 
         // /tmp
