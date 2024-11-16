@@ -10,6 +10,8 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use oci_spec::image as oci_image;
+use env_logger;
+use log::{trace};
 
 use pingora_timeout::timeout;
 use pingora::services::Service as IService;
@@ -361,6 +363,7 @@ impl HttpRunnerApp {
 impl ServeHttp for HttpRunnerApp {
     async fn response(&self, http_stream: &mut ServerSession) -> Response<Vec<u8>> {
         let req_parts: &http::request::Parts = http_stream.req_header();
+        trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
             (Method::POST, "/api/v1/runi")   => self.apiv1_runi(http_stream).await,
             (Method::GET,  "/api/v1/images") => self.apiv1_images(http_stream).await,
@@ -373,6 +376,7 @@ impl ServeHttp for HttpRunnerApp {
 }
 
 fn main() {
+    env_logger::init();
     //let opt = Some(Opt::parse_args());
     let opt = Some(Opt {
         upgrade: false,
@@ -401,7 +405,7 @@ fn main() {
     assert_file_exists(&app.cloud_hypervisor);
 
     let mut runner_service_http = Service::new("Echo Service HTTP".to_string(), app);
-    runner_service_http.add_tcp("127.0.0.1:8080");
+    runner_service_http.add_tcp("127.0.0.1:1234");
 
     let services: Vec<Box<dyn IService>> = vec![
         Box::new(runner_service_http),
