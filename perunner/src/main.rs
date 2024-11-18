@@ -191,11 +191,15 @@ struct Args {
     #[arg(long, help = "just build the spec and exit")]
     spec: bool,
 
+    #[arg(long, help = "print some stuff to console about the kernel")]
+    kernel_inspect: bool,
+
     #[arg(long, help = "use json output format")]
     json: bool,
 
     #[arg(long, default_value_t = 0, help = "num workers to run")]
     parallel: u64,
+
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -250,7 +254,7 @@ fn main() {
         println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
         return;
     }
-    eprintln!("{}", serde_json::to_string(&runtime_spec).unwrap());
+    //eprintln!("{}", serde_json::to_string(&runtime_spec).unwrap());
 
     let ch_config = CloudHypervisorConfig {
         bin      : cwd.join(args.ch).into(),
@@ -271,6 +275,7 @@ fn main() {
         rootfs_dir: image_index_entry.image.rootfs.clone(),
         rootfs_kind: image_index_entry.rootfs_kind,
         response_format: response_format,
+        kernel_inspect: args.kernel_inspect,
     };
 
     if args.parallel > 0 {

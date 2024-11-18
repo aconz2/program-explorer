@@ -293,6 +293,7 @@ impl HttpRunnerApp {
             rootfs_dir         : image_entry.image.rootfs.clone(),
             rootfs_kind        : image_entry.rootfs_kind,
             response_format    : response_format,
+            kernel_inspect     : false,
         };
 
         let mut io_file = NamedTempFile::new().map_err(|_| Error::TempfileCreate)?;

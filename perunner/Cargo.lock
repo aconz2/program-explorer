@@ -618,6 +618,7 @@ dependencies = [
  "memmap2",
  "nix",
  "oci-spec",
+ "once_cell",
  "pearchive",
  "peimage",
  "peinit",

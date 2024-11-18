@@ -1,5 +1,5 @@
 use std::fs;
-use std::fs::File;
+use std::fs::{File,DirEntry};
 use std::process::{Stdio, Command};
 use std::io::{Read,Seek};
 use std::ffi::{CStr,OsStr,CString};
@@ -259,6 +259,12 @@ fn main() {
     // println!("V config is {config:?}");
     fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
 
+    if config.kernel_inspect {
+        walkdir_files("/proc/sys".as_ref(), &|entry: &DirEntry| {
+            println!("{:?} {}", entry.path(), fs::read_to_string(entry.path()).unwrap_or_else(|_| "\n".to_string()).trim_end());
+        }).unwrap();
+    }
+
     // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     let container_output = run_container(&config);
@@ -299,7 +305,6 @@ fn main() {
             }
         }
     };
-
 
     { // output
         let mut f = File::create(INOUT_DEVICE).unwrap();
@@ -344,3 +349,18 @@ fn cat_file_if_exists<P: AsRef<Path>>(name: &str, file: P) {
     }
 }
 
+// https://doc.rust-lang.org/std/fs/fn.read_dir.html
+fn walkdir_files(dir: &Path, cb: &dyn Fn(&DirEntry)) -> io::Result<()> {
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                walkdir_files(&path, cb)?;
+            } else {
+                cb(&entry);
+            }
+        }
+    }
+    Ok(())
+}

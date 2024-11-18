@@ -81,7 +81,6 @@ fn packdev(args: &[String]) {
     assert!(indirpath.is_dir(), "{:?} should be a dir", indirpath);
 
     let offset: u64 = args.get(2).ok_or(Error::MissingArg).unwrap().parse::<u64>().unwrap();
-    println!("packdev starting at offset {offset}");
 
     let mut fileout = File::create(outname).unwrap();
     fileout.seek(SeekFrom::Start(offset)).unwrap();
@@ -96,7 +95,6 @@ fn packdev(args: &[String]) {
     let encoded_size: u32 = archive_size.try_into().unwrap();
     fileout.seek(SeekFrom::Start(0)).unwrap();
     fileout.write_u32::<LE>(encoded_size).unwrap();
-    println!("packdev archive_size {encoded_size}");
 }
 
 fn main() {
