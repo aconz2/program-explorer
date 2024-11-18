@@ -288,7 +288,7 @@ func mainExport(output io.Writer, args []string) ([]byte, error) {
     return peidxBuf, nil
 }
 
-func stashIndexJson(outfile string, data []byte) (error) {
+func writePeIndexJson(outfile string, data []byte) (error) {
     f, err := os.OpenFile(outfile, os.O_RDWR, 0644)
     if err != nil {
         return fmt.Errorf("opening file %s %w", outfile, err)
@@ -297,7 +297,7 @@ func stashIndexJson(outfile string, data []byte) (error) {
 
     info, err := f.Stat()
     if err != nil {
-        return fmt.Errorf("stating file %s %w", outfile, err)
+        return fmt.Errorf("stat'ing file %s %w", outfile, err)
     }
     oldSize := int(info.Size())
     // 8 for magic, 4 for data size
@@ -326,6 +326,56 @@ func stashIndexJson(outfile string, data []byte) (error) {
     return nil
 }
 
+func readPeIndexJson(infile string) (*PEImageIndex, error) {
+    f, err := os.OpenFile(infile, os.O_RDONLY, 0)
+    if err != nil {
+        return nil, fmt.Errorf("opening file %s %w", infile, err)
+    }
+    defer f.Close()
+    info, err := f.Stat()
+    if err != nil {
+        return nil, fmt.Errorf("stat'ing file %s %w", infile, err)
+    }
+    if info.Size() < (8 + 4) {
+        return nil, fmt.Errorf("file too short %s %w", infile)
+    }
+    // 2 is from end
+    if _, err = f.Seek(int64(-(8 + 4)), 2); err != nil {
+        return nil, fmt.Errorf("seeking file %s %w", infile, err)
+    }
+    var indexJsonSize uint32
+    var indexJsonMagic uint64
+    if err = binary.Read(f, binary.LittleEndian, &indexJsonSize); err != nil {
+        return nil, fmt.Errorf("reading json size %s", infile, err)
+    }
+    if err = binary.Read(f, binary.LittleEndian, &indexJsonMagic); err != nil {
+        return nil, fmt.Errorf("reading json magic %s", infile, err)
+    }
+    if indexJsonMagic != IndexJsonMagic {
+        return nil, fmt.Errorf("json magic mismatch %s %x", infile, indexJsonMagic)
+    }
+    if info.Size() < int64(8 + 4 + indexJsonSize) {
+        return nil, fmt.Errorf("file too short %s %w", infile)
+    }
+    if _, err = f.Seek(-int64((8 + 4 + indexJsonSize)), 2); err != nil {
+        return nil, fmt.Errorf("seeking file %s %w", infile, err)
+    }
+    buf := make([]byte, indexJsonSize)
+    // no read_exact?
+    nRead, err := f.Read(buf)
+    if err != nil  {
+        return nil, fmt.Errorf("reading file %s %w", infile, err)
+    }
+    if nRead != len(buf) {
+        return nil, fmt.Errorf("incomplete read %s %d != %d", infile, nRead, len(buf))
+    }
+    peImageIndex := new(PEImageIndex)
+    if err = json.Unmarshal(buf, peImageIndex); err != nil {
+        return nil, fmt.Errorf("reading json %s %w", infile, err)
+    }
+    return peImageIndex, nil
+}
+
 func exportImageSqfs(outfile string, args []string) (error) {
     cmd := exec.Command("sqfstar", "-comp", "zstd", "-force", outfile)
     stdin, err := cmd.StdinPipe()
@@ -342,7 +392,7 @@ func exportImageSqfs(outfile string, args []string) (error) {
     if err = cmd.Wait(); err != nil {
         return fmt.Errorf("error waiting for sqfstar %w", err)
     }
-    if err = stashIndexJson(outfile, idxBuf); err != nil {
+    if err = writePeIndexJson(outfile, idxBuf); err != nil {
         return fmt.Errorf("error writing index.json %w", err)
     }
     return nil
@@ -378,7 +428,7 @@ func exportImageErofs(outfile string, args []string) (error) {
     if err = cmd.Wait(); err != nil {
         return fmt.Errorf("error waiting for mkfs.erofs %w", err)
     }
-    if err = stashIndexJson(outfile, idxBuf); err != nil {
+    if err = writePeIndexJson(outfile, idxBuf); err != nil {
         return fmt.Errorf("error writing index.json %w", err)
     }
     return nil
@@ -538,14 +588,25 @@ func mainParse(args []string) (error) {
     return nil
 }
 
+func mainDump(args []string) (error) {
+    index, err := readPeIndexJson(args[0])
+    if err != nil {
+        return err
+    }
+    buf, err := json.MarshalIndent(index, "", "  ")
+    fmt.Printf("%s\n", buf)
+    return nil
+}
+
 func main() {
     if len(os.Args) == 1 {
-        fmt.Fprintf(os.Stderr, "expected <pull|export|list|parse|image>\n");
+        fmt.Fprintf(os.Stderr, "expected <pull|export|list|parse|image|dump>\n");
         fmt.Fprintf(os.Stderr, "  pull <oci-dir> <names...>\n");
         fmt.Fprintf(os.Stderr, "  export <oci-dir> <names...>; writes to stdout\n");
         fmt.Fprintf(os.Stderr, "  list <oci-dir>\n");
         fmt.Fprintf(os.Stderr, "  parse <names...>\n");
         fmt.Fprintf(os.Stderr, "  image <image.sqfs|image.erofs> <oci-dir> <names...>\n");
+        fmt.Fprintf(os.Stderr, "  dump <image.sqfs|image.erofs>\n");
         os.Exit(1)
     }
     err := error(nil)
@@ -560,8 +621,10 @@ func main() {
         err = mainParse(os.Args[2:])
     case "image":
         err = mainImage(os.Args[2:])
+    case "dump":
+        err = mainDump(os.Args[2:])
     default:
-        err = fmt.Errorf("command export|pull|list|parse")
+        err = fmt.Errorf("command export|pull|list|parse|dump")
     }
 
     if err != nil {
