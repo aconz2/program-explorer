@@ -72,21 +72,34 @@ pub struct PEImageMultiIndexEntry {
     pub rootfs_kind: RootfsKind,
 }
 
+pub enum PEImageMultiIndexKeyType {
+    Name,            // index.docker.io/library/busybox:1.37
+    DigestWithSlash, // sha256/abcd1234
+}
+
 pub struct PEImageMultiIndex {
     map: HashMap<String, PEImageMultiIndexEntry>,
+    key_type: PEImageMultiIndexKeyType,
 }
 
 impl PEImageMultiIndex {
-    pub fn new() -> PEImageMultiIndex {
-        Self { map: HashMap::new() }
+    pub fn new(key_type: PEImageMultiIndexKeyType) -> PEImageMultiIndex {
+        Self {
+            key_type: key_type,
+            map: HashMap::new()
+        }
     }
 
-    pub fn from_paths(paths: &[String]) -> io::Result<Self> {
-        let mut ret = Self::new();
+    pub fn from_paths(key_type: PEImageMultiIndexKeyType, paths: &[&str]) -> io::Result<Self> {
+        let mut ret = Self::new(key_type);
         for p in paths {
             ret = ret.add_path(&p)?;
         }
         Ok(ret)
+    }
+
+    pub fn from_paths_by_digest_with_slash(paths: &[&str]) -> io::Result<Self> {
+        Self::from_paths(PEImageMultiIndexKeyType::DigestWithSlash, paths)
     }
 
     pub fn add_path<P: AsRef<Path> + Into<PathBuf>>(mut self, path: P) -> io::Result<Self> {
@@ -104,9 +117,20 @@ impl PEImageMultiIndex {
                 image: image.clone(),
                 rootfs_kind: rootfs_kind,
             };
-            self.map.insert(image.id.name(), entry);
+            self.insert(&image.id, entry);
         }
         Ok(self)
+    }
+
+    fn insert(&mut self, id: &PEImageId, entry: PEImageMultiIndexEntry) {
+        match self.key_type {
+            PEImageMultiIndexKeyType::Name => {
+                self.map.insert(id.name(), entry);
+            }
+            PEImageMultiIndexKeyType::DigestWithSlash => {
+                self.map.insert(id.digest.replace(":", "/"), entry);
+            }
+        }
     }
 
     pub fn get<'a>(&'a self, key: &str) -> Option<&'a PEImageMultiIndexEntry> {

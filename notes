@@ -427,3 +427,8 @@ the second is for sure the ACPI shutdown
 
 using libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF)
   just instantly reboots
+
+for multi platform images,
+→ crane manifest index.docker.io/library/busybox:1.36.1 | jq
+returns an image index with the architecture+os data pulled out of the config
+remember that an image manifest gives the config + rootfs

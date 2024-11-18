@@ -16,7 +16,7 @@ use clap::{Parser};
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
 use peinit::{ResponseFormat};
-use peimage::PEImageMultiIndex;
+use peimage::{PEImageMultiIndex,PEImageMultiIndexKeyType};
 
 mod cloudhypervisor;
 use cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
@@ -215,7 +215,7 @@ fn main() {
     // tracing::subscriber::set_global_default(subscriber)
     //     .expect("setting default subscriber failed");
 
-    let image_index = PEImageMultiIndex::new()
+    let image_index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name)
         .add_path(&args.index)
         .expect("failed to create image index");
 

@@ -32,12 +32,14 @@ use peimage::PEImageMultiIndex;
 
 const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
+const ROUTE_API_V1_RUNI: &str = "/api/v1/runi/";
 
 #[derive(Debug)]
 enum Error {
     ReadTimeout,
     ReadError,
     BadRequest,
+    BadImagePath,
     NoSuchImage,
     TempfileCreate,
     QueueFull,
@@ -47,8 +49,6 @@ enum Error {
     WorkerError,
     Internal,
     Serialize,
-    BadArch,
-    BadOs,
 }
 
 struct HttpRunnerApp {
@@ -92,9 +92,6 @@ mod apiv1 {
 
         #[derive(Deserialize)]
         pub struct Request {
-            pub image: String,
-            pub os: oci_image::Os,
-            pub architecture: oci_image::Arch,
             pub stdin: Option<String>,
             pub args: Vec<String>,
         }
@@ -205,8 +202,7 @@ impl Into<StatusCode> for Error {
             ReadError |
             NoSuchImage |
             BadContentType |
-            BadArch |
-            BadOs |
+            BadImagePath |
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv |
@@ -225,15 +221,27 @@ impl Into<Response<Vec<u8>>> for Error {
     }
 }
 
+// /api/v1/runi/<algo>/<digest>
+//              [-------------]
+// doesn't fully check things, but covers the basics
+fn parse_apiv1_runi_path(s: &str) -> Option<&str> {
+    //if !s.starts_with(ROUTE_API_V1_RUNI) { return None; }
+    let x = s.strip_prefix(ROUTE_API_V1_RUNI)?;
+    if x.len() > 135 { return None; }  // this is length of sha512:...
+    let slash_i = s.find("/")?;
+    if x[slash_i+1..].contains("/") { return None; }
+    Some(x)
+}
+
 impl HttpRunnerApp {
     async fn apiv1_runi(&self, http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
-        let read_timeout = Duration::from_millis(2000);
-        // TODO ideally could read this in two parts to send the rest to the file
-        // two unwraps, one for timeout and the other for read errors
-        let body = timeout(read_timeout, read_full_body(http_stream))
-            .await
-            .map_err(|_| Error::ReadTimeout)?
-            .map_err(|_| Error::ReadError)?;
+        let req_parts: &http::request::Parts = http_stream.req_header();
+        // this is like sha256/abcdefg1234 with the slash, not colon
+        let uri_path_image = parse_apiv1_runi_path(req_parts.uri.path())
+            .ok_or(Error::BadImagePath)?;
+
+        let image_entry = self.index.get(&uri_path_image)
+            .ok_or(Error::NoSuchImage)?;
 
         let content_type = http_stream.req_header()
             .headers
@@ -248,13 +256,16 @@ impl HttpRunnerApp {
             ContentType::PeArchiveV1 => peinit::ResponseFormat::PeArchiveV1,
         };
 
+        // TODO why aren't we using the bulitin read timeout on the http_stream?
+        let read_timeout = Duration::from_millis(2000);
+        // TODO ideally could read this in two parts to send the rest to the file
+        let body = timeout(read_timeout, read_full_body(http_stream))
+            .await
+            .map_err(|_| Error::ReadTimeout)?
+            .map_err(|_| Error::ReadError)?;
+
         let api_req = parse_apiv1_runi_request(&body, &content_type).ok_or(Error::BadRequest)?;
 
-        let image_entry = self.index.get(&api_req.image).ok_or(Error::NoSuchImage)?;
-
-        // todo would need to be configurable
-        if api_req.architecture != oci_image::Arch::Amd64 { return Err(Error::BadArch); }
-        if api_req.os != oci_image::Os::Linux { return Err(Error::BadOs); }
 
         let runtime_spec = create_runtime_spec(&image_entry.image.config, &api_req.args)
             .ok_or(Error::BadRequest)?;
@@ -365,8 +376,9 @@ impl ServeHttp for HttpRunnerApp {
         let req_parts: &http::request::Parts = http_stream.req_header();
         trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
-            (Method::POST, "/api/v1/runi")   => self.apiv1_runi(http_stream).await,
             (Method::GET,  "/api/v1/images") => self.apiv1_images(http_stream).await,
+            //(Method::POST, "/api/v1/runi")   => self.apiv1_runi(http_stream).await,
+            (Method::POST, path) if path.starts_with(ROUTE_API_V1_RUNI) => self.apiv1_runi(http_stream).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)
             }
@@ -391,7 +403,7 @@ fn main() {
     my_server.bootstrap();
 
     let pool = worker::asynk::Pool::new(&worker::cpuset(2, 2, 2).unwrap());
-    let index = PEImageMultiIndex::from_paths(&["../ocismall.erofs".into()]).unwrap();
+    let index = PEImageMultiIndex::from_paths_by_digest_with_slash(&["../ocismall.erofs"]).unwrap();
     let app = HttpRunnerApp {
         pool             : pool,
         index            : index,
@@ -417,4 +429,14 @@ fn main() {
 use std::path::Path;
 fn assert_file_exists<P: AsRef<Path>>(p: P) {
     assert!(p.as_ref().is_file(), "{:?} is not a file", p.as_ref());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_apiv1_runi_path() {
+        parse_
+    }
 }
