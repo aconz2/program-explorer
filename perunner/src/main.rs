@@ -188,6 +188,9 @@ struct Args {
     #[arg(long, help = "pass --debug to crun")]
     crun_debug: bool,
 
+    #[arg(long, help = "just build the spec and exit")]
+    spec: bool,
+
     #[arg(long, help = "use json output format")]
     json: bool,
 
@@ -240,8 +243,13 @@ fn main() {
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
-    let runtime_spec = create_runtime_spec(&image_index_entry.image.config, &args.args).unwrap();
-    //eprintln!("{}", serde_json::to_string_pretty(runtime_spec.process().as_ref().unwrap()).unwrap());
+    // here we just always replace all the image's arguments
+    let runtime_spec = create_runtime_spec(&image_index_entry.image.config, Some(&[]), Some(&args.args)).unwrap();
+
+    if args.spec {
+        println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
+        return;
+    }
     eprintln!("{}", serde_json::to_string(&runtime_spec).unwrap());
 
     let ch_config = CloudHypervisorConfig {
@@ -257,8 +265,6 @@ fn main() {
     let pe_config = peinit::Config {
         timeout: timeout,
         oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
-        uid_gid: UID,
-        nids: NIDS,
         stdin: args.stdin,
         strace: args.strace,
         crun_debug: args.crun_debug,

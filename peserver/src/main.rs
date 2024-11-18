@@ -9,7 +9,6 @@ use http::{Method, Response, StatusCode};
 use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
-use oci_spec::image as oci_image;
 use env_logger;
 use log::{trace};
 
@@ -88,17 +87,18 @@ impl Into<&str> for ContentType {
 mod apiv1 {
     pub mod runi {
         use serde::{Deserialize,Serialize};
-        use oci_spec::image as oci_image;
+        use peinit;
 
+        #[serde(deny_unknown_fields)]
         #[derive(Deserialize)]
         pub struct Request {
-            pub stdin: Option<String>,
-            pub args: Vec<String>,
+            pub stdin      : Option<String>,       // filename that will be set as stdin, noop
+                                                   // for content-type: application/json
+            pub entrypoint : Option<Vec<String>>,  // as per oci image config
+            pub cmd        : Option<Vec<String>>,  // as per oci image config
         }
 
-        #[derive(Serialize)]
-        pub struct Response {
-        }
+        type Response = peinit::Response;
     }
 
     pub mod images {
@@ -108,7 +108,8 @@ mod apiv1 {
 
         #[derive(Serialize)]
         pub struct Image {
-            pub id: String,
+            pub uri: String,
+            pub info: peimage::PEImageId,
             pub config: oci_image::ImageConfiguration,
             pub manifest: oci_image::ImageManifest,
         }
@@ -121,9 +122,10 @@ mod apiv1 {
         impl From<&peimage::PEImageMultiIndex> for Response {
             fn from(index: &peimage::PEImageMultiIndex) -> Self {
                 let images: Vec<_> = index.map().iter()
-                    .map(|(k, v)| {
+                    .map(|(_k, v)| {
                         Image {
-                            id: k.clone(),
+                            uri: v.image.id.digest.replace(":", "/"),
+                            info: v.image.id.clone(),
                             config: v.image.config.clone(),
                             manifest: v.image.manifest.clone(),
                         }
@@ -150,15 +152,15 @@ async fn read_full_body(http_stream: &mut ServerSession) -> Result<Bytes, Box<pi
     Ok(acc.freeze())
 }
 
-fn parse_apiv1_runi_request(buf: &[u8], content_type: &ContentType) -> Option<apiv1::runi::Request> {
+fn parse_apiv1_runi_request(body: &[u8], content_type: &ContentType) -> Option<apiv1::runi::Request> {
     match content_type {
         ContentType::ApplicationJson => {
-            serde_json::from_slice(&buf).ok()
+            serde_json::from_slice(&body).ok()
         }
         ContentType::PeArchiveV1 => {
-            if buf.len() < 4 { return None; }
-            let json_size = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            serde_json::from_slice(&buf[4..4+json_size]).ok()
+            if body.len() < 4 { return None; }
+            let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+            serde_json::from_slice(&body[4..4+json_size]).ok()
         }
     }
 }
@@ -228,7 +230,7 @@ fn parse_apiv1_runi_path(s: &str) -> Option<&str> {
     //if !s.starts_with(ROUTE_API_V1_RUNI) { return None; }
     let x = s.strip_prefix(ROUTE_API_V1_RUNI)?;
     if x.len() > 135 { return None; }  // this is length of sha512:...
-    let slash_i = s.find("/")?;
+    let slash_i = x.find("/")?;
     if x[slash_i+1..].contains("/") { return None; }
     Some(x)
 }
@@ -266,8 +268,7 @@ impl HttpRunnerApp {
 
         let api_req = parse_apiv1_runi_request(&body, &content_type).ok_or(Error::BadRequest)?;
 
-
-        let runtime_spec = create_runtime_spec(&image_entry.image.config, &api_req.args)
+        let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
             .ok_or(Error::BadRequest)?;
 
         let timeout = Duration::from_millis(1000);
@@ -286,8 +287,6 @@ impl HttpRunnerApp {
         let pe_config = peinit::Config {
             timeout            : timeout,
             oci_runtime_config : serde_json::to_string(&runtime_spec).unwrap(),
-            uid_gid            : UID,
-            nids               : NIDS,
             stdin              : api_req.stdin,
             strace             : false,
             crun_debug         : false,
@@ -377,7 +376,6 @@ impl ServeHttp for HttpRunnerApp {
         trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
             (Method::GET,  "/api/v1/images") => self.apiv1_images(http_stream).await,
-            //(Method::POST, "/api/v1/runi")   => self.apiv1_runi(http_stream).await,
             (Method::POST, path) if path.starts_with(ROUTE_API_V1_RUNI) => self.apiv1_runi(http_stream).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)

@@ -15,7 +15,7 @@ use pingora::proxy::{ProxyHttp, Session};
 
 pub struct LB(Arc<LoadBalancer<RoundRobin>>);
 
-const TlsFalse: bool = false;
+const TLS_FALSE: bool = false;
 
 #[async_trait]
 impl ProxyHttp for LB {
@@ -25,6 +25,7 @@ impl ProxyHttp for LB {
     // so if we do peer selection by reading the body, I think that is maybe not great
     // b/c we have to deal with the two request formats etc.
     // maybe we should put the data into /api/v1/runi/linux/amd64?image=index.docker.io/library/busybox:1.36.1
+    // now just do /api/v1/runi/sha256/kj
     // the colon doesn't work in the url so maybe it has to go as a query param, at least doesn't
     // have to get escaped there
     async fn upstream_peer(&self, _session: &mut Session, _ctx: &mut ()) -> Result<Box<HttpPeer>> {
@@ -35,7 +36,7 @@ impl ProxyHttp for LB {
 
         println!("upstream peer is: {:?}", upstream);
 
-        let peer = Box::new(HttpPeer::new(upstream, TlsFalse, "one.one.one.one".to_string()));
+        let peer = Box::new(HttpPeer::new(upstream, TLS_FALSE, "one.one.one.one".to_string()));
         Ok(peer)
     }
 

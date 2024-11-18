@@ -41,9 +41,7 @@ pub struct Config {
     // https://github.com/opencontainers/runtime-spec/blob/main/config.md
     // fully filled in config.json ready to pass to crun
     pub oci_runtime_config: String,
-    pub uid_gid: u32,
     pub timeout: Duration,
-    pub nids: u32,
     pub stdin: Option<String>,  // name of file in user's archive, not contents
     pub strace: bool,
     pub crun_debug: bool,
@@ -57,13 +55,17 @@ pub enum Response {
     Ok {
         siginfo : SigInfoRedux,
         rusage  : Rusage,
+        #[serde(skip_serializing_if = "Option::is_none")]
         stdout  : Option<String>,  // not included in ResponseFormat::PeArchiveV1
+        #[serde(skip_serializing_if = "Option::is_none")]
         stderr  : Option<String>,  // not included in ResponseFormat::PeArchiveV1
     },
     Overtime {
         siginfo : SigInfoRedux,
         rusage  : Rusage,
+        #[serde(skip_serializing_if = "Option::is_none")]
         stdout  : Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         stderr  : Option<String>,
     },
     Panic {

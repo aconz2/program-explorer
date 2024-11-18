@@ -4,7 +4,7 @@ use std::path::{Path,PathBuf};
 use std::io::{Seek,SeekFrom,Read};
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Serialize,Deserialize};
 use serde_json;
 use oci_spec::image as oci_image;
 use byteorder::{ReadBytesExt,LE};
@@ -12,7 +12,7 @@ use peinit::RootfsKind;
 
 const INDEX_JSON_MAGIC: u64 = 0x1db56abd7b82da38;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PEImageId {
     pub digest: String,
     pub repository: String,

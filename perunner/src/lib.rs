@@ -5,31 +5,35 @@ use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
 
 pub const UID: u32 = 1000;
-pub const NIDS: u32 = 1000; // size of uid_gid_map
+pub const NIDS: u32 = 65534; // size of uid_gid_map
 
 // the allocations in this make me a bit unhappy, but maybe its all worth it
-pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_args: &[String]) -> Option<oci_runtime::Spec> {
+pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
+                           entrypoint: Option<&[String]>,
+                           cmd:        Option<&[String]>,
+                           ) -> Option<oci_runtime::Spec> {
     //let spec: oci_runtime::Spec = Default::default();
-    let mut spec = oci_runtime::Spec::rootless(1000, 1000);
+    let mut spec = oci_runtime::Spec::rootless(UID, UID);
     // ugh this api is horrible
     spec.set_hostname(Some("programexplorer".to_string()));
 
-
     // doing spec.set_uid_mappings sets the volume mount idmap, not the user namespace idmap
-    if true {
-        let map = oci_runtime::LinuxIdMappingBuilder::default()
-            .host_id(UID)
-            .container_id(0u32)
-            .size(NIDS)
-            .build()
-            .unwrap();
-        let linux = spec.linux_mut().as_mut().unwrap();
-        linux
-            .set_uid_mappings(Some(vec![map]))
-            .set_gid_mappings(Some(vec![map]));
-    }
+    let map = oci_runtime::LinuxIdMappingBuilder::default()
+        .host_id(UID)
+        .container_id(0u32)
+        .size(NIDS)
+        .build()
+        .unwrap();
+    let linux = spec.linux_mut().as_mut().unwrap();
+    linux
+        .set_uid_mappings(Some(vec![map]))
+        .set_gid_mappings(Some(vec![map]));
 
-    // sanity checks
+    linux.namespaces_mut().as_mut().unwrap().push(
+        oci_runtime::LinuxNamespaceBuilder::default().typ(oci_runtime::LinuxNamespaceType::Network).build().unwrap()
+        );
+
+    // TODO multi arch/os
     if *image_config.architecture() != oci_image::Arch::Amd64 { return None; }
     if *image_config.os() != oci_image::Os::Linux { return None; }
 
@@ -72,6 +76,37 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_arg
             );
     }
 
+    // we "know" that a defaulted runtime spec has Some process
+    let process = spec.process_mut().as_mut().unwrap();
+
+    // ugh having image_config.config() return Option and config.entrypoint() return &Option messes
+    // the chaining...
+    let args = {
+        let mut acc = vec![];
+        match image_config.config() {
+            Some(config) => {
+                match (entrypoint, config.entrypoint()) {
+                    (Some(xs), _)    => { acc.extend_from_slice(xs); }
+                    (None, Some(xs)) => { acc.extend_from_slice(xs); }
+                    _ => {}
+                }
+                match (cmd, config.cmd()) {
+                    (Some(xs), _)    => { acc.extend_from_slice(xs); }
+                    (None, Some(xs)) => { acc.extend_from_slice(xs); }
+                    _ => {}
+                }
+            }
+            None => {
+                if let Some(xs) = entrypoint { acc.extend_from_slice(xs); }
+                if let Some(xs) = cmd        { acc.extend_from_slice(xs); }
+            }
+        }
+        acc
+    };
+    if args.is_empty() { return None; }
+    process.set_args(Some(args));
+
+    // image config can be null / totally empty
     if let Some(config) = image_config.config() {
         // TODO: handle user
         // from oci-spec-rs/src/image/config.rs
@@ -84,27 +119,12 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration, run_arg
         //   the container are applied.
         // let _ = config.exposed_ports; // ignoring network for now
 
-        // we "know" that a defaulted runtime spec has Some process
-        let process = spec.process_mut().as_mut().unwrap();
-
         if let Some(env) = config.env() {
             *process.env_mut() = Some(env.clone());
         }
 
-        if run_args.is_empty() {
-            let args = {
-                let mut acc = vec![];
-                if let Some(entrypoint) = config.entrypoint() { acc.extend_from_slice(entrypoint); }
-                if let Some(cmd) = config.cmd()               { acc.extend_from_slice(cmd); }
-                if acc.is_empty() { return None; }
-                acc
-            };
-            process.set_args(Some(args));
-        } else {
-            process.set_args(Some(run_args.into()));
-        }
-
         if let Some(cwd) = config.working_dir() { process.set_cwd(cwd.into()); }
+    } else {
     }
 
     Some(spec)

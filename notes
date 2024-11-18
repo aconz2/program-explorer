@@ -432,3 +432,7 @@ for multi platform images,
 → crane manifest index.docker.io/library/busybox:1.36.1 | jq
 returns an image index with the architecture+os data pulled out of the config
 remember that an image manifest gives the config + rootfs
+
+podman run --rm -it --network=none gcc:14.1.0
+podman-oci-config | jq -S
+./build.sh && (cd perunner && target/debug/perunner --spec --console echo hi) | jq -S
