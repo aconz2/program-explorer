@@ -29,7 +29,7 @@ impl Into<&str> for ContentType {
 
 pub mod v1 {
     pub mod runi {
-        use super::super::ContentType; // wtf
+        use super::super::ContentType;
         use serde::{Deserialize};
         use peinit;
 
@@ -52,8 +52,7 @@ pub mod v1 {
             //if !s.starts_with(ROUTE_API_V1_RUNI) { return None; }
             let x = s.strip_prefix(PREFIX)?;
             if x.len() > 135 { return None; }  // this is length of sha512:...
-            let slash_i = x.find("/")?;
-            if x[slash_i+1..].contains("/") { return None; }
+            if x.contains("/") { return None; }
             Some(x)
         }
 
@@ -76,15 +75,22 @@ pub mod v1 {
         use serde::{Deserialize,Serialize};
         use peimage;
         use oci_spec::image as oci_image;
+        use super::runi;
 
         pub const PATH: &str = "/api/v1/images";
 
         #[derive(Deserialize,Serialize)]
+        pub struct ImageLinks {
+            pub runi: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub upstream: Option<String>,
+        }
+
+        #[derive(Deserialize,Serialize)]
         pub struct Image {
-            pub uri: String,
+            pub links: ImageLinks,
             pub info: peimage::PEImageId,
             pub config: oci_image::ImageConfiguration,
-            pub manifest: oci_image::ImageManifest,
         }
 
         #[derive(Deserialize,Serialize)]
@@ -97,10 +103,12 @@ pub mod v1 {
                 let images: Vec<_> = index.map().iter()
                     .map(|(_k, v)| {
                         Image {
-                            uri: v.image.id.digest.replace(":", "/"),
+                            links: ImageLinks {
+                                runi: format!("{}/{}", runi::PREFIX, v.image.id.digest),
+                                upstream: v.image.id.upstream_link(),
+                            },
                             info: v.image.id.clone(),
                             config: v.image.config.clone(),
-                            manifest: v.image.manifest.clone(),
                         }
                     })
                     .collect();

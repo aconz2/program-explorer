@@ -24,6 +24,23 @@ impl PEImageId {
     pub fn name(&self) -> String {
         format!("{}/{}:{}", self.registry, self.repository, self.tag)
     }
+
+    pub fn upstream_link(&self) -> Option<String> {
+        match self.registry.as_str() {
+            "index.docker.io" => {
+                let tag = &self.tag;
+                let repository = &self.repository;
+                let digest = self.digest.replace(":", "-");
+                Some(format!("https://hub.docker.com/layers/{repository}/{tag}/images/{digest}"))
+            }
+            "quay.io" => {
+                let repository = &self.repository;
+                let digest = &self.digest;
+                Some(format!("https://quay.io/repository/{repository}/digest"))
+            }
+            _ => None
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -74,7 +91,8 @@ pub struct PEImageMultiIndexEntry {
 
 pub enum PEImageMultiIndexKeyType {
     Name,            // index.docker.io/library/busybox:1.37
-    DigestWithSlash, // sha256/abcd1234
+    DigestWithSlash, // sha256/abcd1234 I wrongly thought this had to be escaped in urls
+    Digest,          // sha256:abcd1234
 }
 
 pub struct PEImageMultiIndex {
@@ -99,7 +117,7 @@ impl PEImageMultiIndex {
     }
 
     pub fn from_paths_by_digest_with_slash(paths: &[&str]) -> io::Result<Self> {
-        Self::from_paths(PEImageMultiIndexKeyType::DigestWithSlash, paths)
+        Self::from_paths(PEImageMultiIndexKeyType::Digest, paths)
     }
 
     pub fn add_path<P: AsRef<Path> + Into<PathBuf>>(mut self, path: P) -> io::Result<Self> {
@@ -129,6 +147,9 @@ impl PEImageMultiIndex {
             }
             PEImageMultiIndexKeyType::DigestWithSlash => {
                 self.map.insert(id.digest.replace(":", "/"), entry);
+            }
+            PEImageMultiIndexKeyType::Digest => {
+                self.map.insert(id.digest.clone(), entry);
             }
         }
     }

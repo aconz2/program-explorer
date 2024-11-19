@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
-//use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 
 use pingora::prelude::RequestHeader;
 use pingora::services::background::{background_service,BackgroundService};
@@ -15,28 +15,49 @@ use pingora::http::{ResponseHeader};
 use async_trait::async_trait;
 use env_logger;
 use bytes::{Bytes,BytesMut};
-use http::Method;
+use http::{Method,StatusCode};
 use http::header;
 use arc_swap::ArcSwap;
 use log::{error,info};
+use serde_json;
 
 use peserver::api::v1 as apiv1;
 
 const TLS_FALSE: bool = false;
 
+async fn read_full_body(session: &mut pingora::protocols::http::v1::client::HttpSession) -> Result<Bytes, Box<pingora::Error>> {
+    let mut acc = BytesMut::with_capacity(4096);
+    loop {
+        match session.read_body_ref().await? {
+            Some(ref bytes) => {
+                acc.extend_from_slice(&bytes);
+            }
+            None => {
+                break;
+            }
+        }
+    }
+    Ok(acc.freeze())
+}
+
 pub struct ImageData {
+    image_map: BTreeMap<String, HttpPeer>,
     images: Vec<apiv1::images::Image>,
     premade_json: Bytes,
 }
 
 impl ImageData {
-    fn from_parts(images: Vec<apiv1::images::Image>, premade_json: Bytes) -> Self {
-        Self { images, premade_json }
+    fn from_parts(images: Vec<apiv1::images::Image>,
+                  premade_json: Bytes,
+                  image_map: BTreeMap<String, HttpPeer>,
+                  ) -> Self {
+        Self { images, premade_json, image_map }
     }
     fn new() -> Self {
         Self::from_parts(
             vec![],
-            Bytes::from(b"{\"images\": []}".as_slice()),
+            Bytes::from(serde_json::to_vec(&Vec::<apiv1::images::Image>::new()).unwrap()),
+            BTreeMap::new(),
         )
     }
 }
@@ -57,11 +78,26 @@ impl Images {
         }
     }
 
+    fn update_data(&self, peer: HttpPeer, body: Bytes, resp: apiv1::images::Response) {
+        let map: BTreeMap<_, _> = {
+            resp.images
+                .iter()
+                .map(|img| (img.info.digest.clone(), peer.clone()))
+                .collect()
+        };
+        self.data.store(ImageData::from_parts(resp.images, body, map).into());
+    }
+
+    //fn lookup_image(&self, key: &str) -> Option<&HttpPeer> {
+    //    self.data.image_map.get(key)
+    //}
+
     async fn do_update(&self) -> Result<(), Box<pingora::Error>> {
         let upstream = self
             .upstreams
             .select(b"", 256) // hash doesn't matter
             .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))?;
+        // TODO where are we going to get the certkey from for this?
         let peer = HttpPeer::new(upstream, TLS_FALSE, "".to_string());
 
         let connector = pingora::connectors::http::v1::Connector::new(None);
@@ -75,34 +111,26 @@ impl Images {
         };
         let _ = session.write_request_header(req).await?;
         let _ = session.read_response().await?;
+        let res_parts: &http::response::Parts = session.resp_header().unwrap();
+        if res_parts.status != StatusCode::OK {
+            error!("got bad response for images {:?}", res_parts);
+            return Err(pingora::Error::new(pingora::ErrorType::InternalError));
+        }
+
         let body = read_full_body(&mut session).await?;
         let resp: apiv1::images::Response = serde_json::from_slice(&body)
             .map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))?;
         let n_images = resp.images.len();
-        self.data.store(ImageData::from_parts(resp.images, body).into());
+
+        self.update_data(peer.clone(), body, resp);
+
         info!("updated images for backend {}, {} images", peer, n_images);
         Ok(())
     }
 }
 
-async fn read_full_body(session: &mut pingora::protocols::http::v1::client::HttpSession) -> Result<Bytes, Box<pingora::Error>> {
-    let mut acc = BytesMut::with_capacity(4096);
-    loop {
-        match session.read_body_ref().await? {
-            Some(ref bytes) => {
-                acc.extend_from_slice(&bytes);
-            }
-            None => {
-                break;
-            }
-        }
-    }
-    Ok(acc.freeze())
-}
-
 #[async_trait]
 impl BackgroundService for Images {
-
     async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
         let mut interval = tokio::time::interval(self.image_check_frequency);
         loop {
@@ -123,8 +151,6 @@ impl BackgroundService for Images {
 pub struct LB {
     upstreams: Arc<LoadBalancer<RoundRobin>>,
     images: Arc<Images>,
-    //images: Arc<BTreeMap<Backend, Vec<apiv1::images::Image>>>,
-    //premade_images_json: Bytes, // this is arc underneath
 }
 
 impl LB {
@@ -148,6 +174,29 @@ impl LB {
         downstream_session.write_response_body(buf, true).await?;
         Ok(())
     }
+
+    // Ok(true) means request done, ie the image was missed
+    async fn apiv1_runi(&self, session: &mut Session, ctx: &mut <LB as ProxyHttp>::CTX) -> Result<bool> {
+        let req_parts: &http::request::Parts = session.downstream_session.req_header();
+        let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path());
+
+        let image_map = &self.images.data.load().image_map;
+
+        match uri_path_image.and_then(|id| image_map.get(id)) {
+            Some(p) => { *ctx = Some(p.clone()); Ok(false) }
+            None => {
+                let response_header = {
+                    let mut x = ResponseHeader::build(404, Some(0)).unwrap();
+                    x.insert_header(header::CONTENT_LENGTH, 0)?;
+                    Box::new(x)
+                };
+                session.downstream_session
+                    .write_response_header(response_header)
+                    .await
+                    .map(|_| true)
+            }
+        }
+    }
 }
 
 // LB phases go (from HTTPProxy::proxy_request)
@@ -160,10 +209,9 @@ impl LB {
 
 #[async_trait]
 impl ProxyHttp for LB {
-    type CTX = ();
+    type CTX = Option<HttpPeer>;
 
-    fn new_ctx(&self) -> Self::CTX { () }
-
+    fn new_ctx(&self) -> Self::CTX { None }
 
     // Ok(true) means request is done
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
@@ -171,7 +219,7 @@ impl ProxyHttp for LB {
 
         match (req_parts.method.clone(), req_parts.uri.path()) {
             (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, _ctx).await.map(|_| true),
-            //(Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(http_stream).await,
+            (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, _ctx).await,
             _ => {
                 let response_header = {
                     let mut x = ResponseHeader::build(404, Some(0)).unwrap();
@@ -187,16 +235,18 @@ impl ProxyHttp for LB {
     }
 
     // TODO support multiple backends
-    async fn upstream_peer(&self, _session: &mut Session, _ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
-        let upstream = self
-            .upstreams
-            .select(b"", 256) // hash doesn't matter
-            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))?;
-
-        println!("upstream peer is: {:?}", upstream);
-
-        let peer = Box::new(HttpPeer::new(upstream, TLS_FALSE, "".to_string()));
-        Ok(peer)
+    async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
+        //let upstream = self
+        //    .upstreams
+        //    .select(b"", 256) // hash doesn't matter
+        //    .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))?;
+        //
+        //println!("upstream peer is: {:?}", upstream);
+        //let peer = Box::new(HttpPeer::new(upstream, TLS_FALSE, "".to_string()));
+        //Ok(peer)
+        ctx.take()
+           .map(Box::new)
+           .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
     }
 }
 

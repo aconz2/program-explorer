@@ -2,6 +2,14 @@ use std::time::Duration;
 use std::io::{Read};
 use std::ffi::OsString;
 
+use pingora_timeout::timeout;
+use pingora::services::Service as IService;
+use pingora::services::listening::Service;
+use pingora::server::Server;
+use pingora::server::configuration::Opt;
+use pingora::apps::http_app::ServeHttp;
+use pingora::protocols::http::ServerSession;
+
 use async_trait::async_trait;
 use bytes::{Bytes,BytesMut};
 use http;
@@ -10,19 +18,7 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
-//use log::{trace};
-
-use pingora_timeout::timeout;
-use pingora::services::Service as IService;
-use pingora::services::listening::Service;
-use pingora::server::Server;
-use pingora::server::configuration::Opt;
-use pingora::apps::http_app::ServeHttp;
-use pingora::protocols::http::ServerSession;
-//use pingora::protocols::Stream;
-//use pingora::server::ShutdownWatch;
-//use clap::Parser;
-//use clap::derive::Parser;
+use log::{error};
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -105,7 +101,6 @@ fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
 impl Into<StatusCode> for Error {
     fn into(self: Error) -> StatusCode {
         use Error::*;
-        eprintln!("got error {:?}", self);
         match self {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
             ReadError |
@@ -133,7 +128,7 @@ impl Into<Response<Vec<u8>>> for Error {
 impl HttpRunnerApp {
     async fn apiv1_runi(&self, http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         let req_parts: &http::request::Parts = http_stream.req_header();
-        // this is like sha256/abcdefg1234 with the slash, not colon
+
         let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path())
             .ok_or(Error::BadImagePath)?;
 
@@ -216,7 +211,7 @@ impl HttpRunnerApp {
         () = self.pool.sender()
             .try_send((worker_input, resp_sender))
             .map_err(|_| {
-                eprintln!("todo, queue was full, we probably shouldn't have gotten this work item, or maybe somehow interface better with the sync thread pool so we can wait");
+                error!("todo, queue was full, we probably shouldn't have gotten this work item, or maybe somehow interface better with the sync thread pool so we can wait");
                 Error::QueueFull
             })?;
 
