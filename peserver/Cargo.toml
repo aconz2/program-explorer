@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 default-run = "peserver"
 
-
 [[bin]]
 name = "testclient"
 path = "src/testclient.rs"
@@ -13,7 +12,13 @@ path = "src/testclient.rs"
 name = "lb"
 path = "src/lb.rs"
 
+[lib]
+name = "peserver"
+path = "src/lib.rs"
+doctest = false
+
 [dependencies]
+arc-swap = "1.7.1"
 async-trait = "0.1.83"
 bincode = "1.3.3"
 byteorder = "1.5.0"

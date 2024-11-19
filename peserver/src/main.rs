@@ -10,7 +10,7 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
-use log::{trace};
+//use log::{trace};
 
 use pingora_timeout::timeout;
 use pingora::services::Service as IService;
@@ -25,13 +25,12 @@ use pingora::protocols::http::ServerSession;
 //use clap::derive::Parser;
 
 use peinit;
-use perunner::{worker,UID,NIDS,create_runtime_spec};
+use perunner::{worker,create_runtime_spec};
 use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size};
 use peimage::PEImageMultiIndex;
 
-const APPLICATION_JSON: &str = "application/json";
-const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
-const ROUTE_API_V1_RUNI: &str = "/api/v1/runi/";
+use peserver::api::v1 as apiv1;
+use peserver::api::{ContentType,APPLICATION_JSON};
 
 #[derive(Debug)]
 enum Error {
@@ -58,85 +57,6 @@ struct HttpRunnerApp {
     pub kernel: OsString,
 }
 
-enum ContentType {
-    ApplicationJson,
-    PeArchiveV1, // <u32 json size> <json> <pearchivev1>
-}
-
-impl TryFrom<&str> for ContentType {
-    type Error = ();
-
-    fn try_from(s: &str) -> Result<ContentType, ()> {
-        match s {
-            APPLICATION_JSON => Ok(ContentType::ApplicationJson),
-            APPLICATION_X_PE_ARCHIVEV1 => Ok(ContentType::PeArchiveV1),
-            _ => Err(()),
-        }
-    }
-}
-
-impl Into<&str> for ContentType {
-    fn into(self) -> &'static str {
-        match self {
-            ContentType::ApplicationJson => APPLICATION_JSON,
-            ContentType::PeArchiveV1 => APPLICATION_X_PE_ARCHIVEV1,
-        }
-    }
-}
-
-mod apiv1 {
-    pub mod runi {
-        use serde::{Deserialize,Serialize};
-        use peinit;
-
-        #[serde(deny_unknown_fields)]
-        #[derive(Deserialize)]
-        pub struct Request {
-            pub stdin      : Option<String>,       // filename that will be set as stdin, noop
-                                                   // for content-type: application/json
-            pub entrypoint : Option<Vec<String>>,  // as per oci image config
-            pub cmd        : Option<Vec<String>>,  // as per oci image config
-        }
-
-        type Response = peinit::Response;
-    }
-
-    pub mod images {
-        use serde::Serialize;
-        use peimage;
-        use oci_spec::image as oci_image;
-
-        #[derive(Serialize)]
-        pub struct Image {
-            pub uri: String,
-            pub info: peimage::PEImageId,
-            pub config: oci_image::ImageConfiguration,
-            pub manifest: oci_image::ImageManifest,
-        }
-
-        #[derive(Serialize)]
-        pub struct Response {
-            pub images: Vec<Image>,
-        }
-
-        impl From<&peimage::PEImageMultiIndex> for Response {
-            fn from(index: &peimage::PEImageMultiIndex) -> Self {
-                let images: Vec<_> = index.map().iter()
-                    .map(|(_k, v)| {
-                        Image {
-                            uri: v.image.id.digest.replace(":", "/"),
-                            info: v.image.id.clone(),
-                            config: v.image.config.clone(),
-                            manifest: v.image.manifest.clone(),
-                        }
-                    })
-                    .collect();
-                Self { images }
-            }
-        }
-    }
-}
-
 async fn read_full_body(http_stream: &mut ServerSession) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
     loop {
@@ -150,19 +70,6 @@ async fn read_full_body(http_stream: &mut ServerSession) -> Result<Bytes, Box<pi
         }
     }
     Ok(acc.freeze())
-}
-
-fn parse_apiv1_runi_request(body: &[u8], content_type: &ContentType) -> Option<apiv1::runi::Request> {
-    match content_type {
-        ContentType::ApplicationJson => {
-            serde_json::from_slice(&body).ok()
-        }
-        ContentType::PeArchiveV1 => {
-            if body.len() < 4 { return None; }
-            let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
-            serde_json::from_slice(&body[4..4+json_size]).ok()
-        }
-    }
 }
 
 fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
@@ -186,14 +93,14 @@ fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
         .unwrap()
 }
 
-fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
-    let body: Vec<_> = message.into();
-    Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_LENGTH, body.len())
-        .body(body)
-        .unwrap()
-}
+//fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
+//    let body: Vec<_> = message.into();
+//    Response::builder()
+//        .status(status)
+//        .header(http::header::CONTENT_LENGTH, body.len())
+//        .body(body)
+//        .unwrap()
+//}
 
 impl Into<StatusCode> for Error {
     fn into(self: Error) -> StatusCode {
@@ -223,23 +130,11 @@ impl Into<Response<Vec<u8>>> for Error {
     }
 }
 
-// /api/v1/runi/<algo>/<digest>
-//              [-------------]
-// doesn't fully check things, but covers the basics
-fn parse_apiv1_runi_path(s: &str) -> Option<&str> {
-    //if !s.starts_with(ROUTE_API_V1_RUNI) { return None; }
-    let x = s.strip_prefix(ROUTE_API_V1_RUNI)?;
-    if x.len() > 135 { return None; }  // this is length of sha512:...
-    let slash_i = x.find("/")?;
-    if x[slash_i+1..].contains("/") { return None; }
-    Some(x)
-}
-
 impl HttpRunnerApp {
     async fn apiv1_runi(&self, http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         let req_parts: &http::request::Parts = http_stream.req_header();
         // this is like sha256/abcdefg1234 with the slash, not colon
-        let uri_path_image = parse_apiv1_runi_path(req_parts.uri.path())
+        let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path())
             .ok_or(Error::BadImagePath)?;
 
         let image_entry = self.index.get(&uri_path_image)
@@ -266,7 +161,7 @@ impl HttpRunnerApp {
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::ReadError)?;
 
-        let api_req = parse_apiv1_runi_request(&body, &content_type).ok_or(Error::BadRequest)?;
+        let api_req = apiv1::runi::parse_request(&body, &content_type).ok_or(Error::BadRequest)?;
 
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
             .ok_or(Error::BadRequest)?;
@@ -374,10 +269,10 @@ impl HttpRunnerApp {
 impl ServeHttp for HttpRunnerApp {
     async fn response(&self, http_stream: &mut ServerSession) -> Response<Vec<u8>> {
         let req_parts: &http::request::Parts = http_stream.req_header();
-        trace!("{} {}", req_parts.method, req_parts.uri.path());
+        //trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
             (Method::GET,  "/api/v1/images") => self.apiv1_images(http_stream).await,
-            (Method::POST, path) if path.starts_with(ROUTE_API_V1_RUNI) => self.apiv1_runi(http_stream).await,
+            (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(http_stream).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)
             }
@@ -428,14 +323,4 @@ fn main() {
 use std::path::Path;
 fn assert_file_exists<P: AsRef<Path>>(p: P) {
     assert!(p.as_ref().is_file(), "{:?} is not a file", p.as_ref());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_apiv1_runi_path() {
-        parse_
-    }
 }
