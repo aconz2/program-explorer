@@ -81,6 +81,7 @@ fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Resul
 }
 
 fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
+    // TODO presize headermap
     Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
@@ -119,6 +120,7 @@ impl Into<StatusCode> for Error {
     }
 }
 
+// TODO use lazy static for most cmmon responses
 impl Into<Response<Vec<u8>>> for Error {
     fn into(self: Error) -> Response<Vec<u8>> {
         response_no_body(self.into())
@@ -292,7 +294,7 @@ fn main() {
     my_server.bootstrap();
 
     let pool = worker::asynk::Pool::new(&worker::cpuset(2, 2, 2).unwrap());
-    let index = PEImageMultiIndex::from_paths_by_digest_with_slash(&["../ocismall.erofs"]).unwrap();
+    let index = PEImageMultiIndex::from_paths_by_digest_with_colon(&["../ocismall.erofs"]).unwrap();
     let app = HttpRunnerApp {
         pool             : pool,
         index            : index,
@@ -301,6 +303,7 @@ fn main() {
         cloud_hypervisor : cwd.join("../cloud-hypervisor-static").into(),
     };
 
+    // TODO multiple kernels
     assert_file_exists(&app.kernel);
     assert_file_exists(&app.initramfs);
     assert_file_exists(&app.cloud_hypervisor);

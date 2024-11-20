@@ -74,7 +74,7 @@ impl Images {
         Self {
             upstreams,
             data: ArcSwap::from_pointee(ImageData::new()),
-            image_check_frequency: Duration::from_millis(60 * 1000),
+            image_check_frequency: Duration::from_secs(60),
         }
     }
 
@@ -88,10 +88,6 @@ impl Images {
         self.data.store(ImageData::from_parts(resp.images, body, map).into());
     }
 
-    //fn lookup_image(&self, key: &str) -> Option<&HttpPeer> {
-    //    self.data.image_map.get(key)
-    //}
-
     async fn do_update(&self) -> Result<(), Box<pingora::Error>> {
         let upstream = self
             .upstreams
@@ -102,8 +98,8 @@ impl Images {
 
         let connector = pingora::connectors::http::v1::Connector::new(None);
         let (mut session, _) = connector.get_http_session(&peer).await?;
-        session.read_timeout = Some(Duration::from_millis(5 * 1000));
-        session.write_timeout = Some(Duration::from_millis(5 * 1000));
+        session.read_timeout = Some(Duration::from_secs(5));
+        session.write_timeout = Some(Duration::from_secs(5));
 
         let req = {
             let x = RequestHeader::build(Method::GET, apiv1::images::PATH.as_bytes(), None).unwrap();
@@ -164,7 +160,7 @@ impl LB {
         let buf = self.images.data.load().premade_json.clone();
 
         let response_header = {
-            let mut x = ResponseHeader::build(200, None).unwrap();
+            let mut x = ResponseHeader::build(200, Some(2)).unwrap();
             x.insert_header(header::CONTENT_TYPE, "application/json")?;
             x.insert_header(header::CONTENT_LENGTH, buf.len())?;
             Box::new(x)
@@ -185,6 +181,7 @@ impl LB {
         match uri_path_image.and_then(|id| image_map.get(id)) {
             Some(p) => { *ctx = Some(p.clone()); Ok(false) }
             None => {
+                // TODO use lazy static for 404
                 let response_header = {
                     let mut x = ResponseHeader::build(404, Some(0)).unwrap();
                     x.insert_header(header::CONTENT_LENGTH, 0)?;
@@ -209,6 +206,7 @@ impl LB {
 
 #[async_trait]
 impl ProxyHttp for LB {
+    // TODO maybe we can track connections per server with a hacky Drop on CTX
     type CTX = Option<HttpPeer>;
 
     fn new_ctx(&self) -> Self::CTX { None }
@@ -221,6 +219,7 @@ impl ProxyHttp for LB {
             (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, _ctx).await.map(|_| true),
             (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, _ctx).await,
             _ => {
+                // TODO use lazy static for 404
                 let response_header = {
                     let mut x = ResponseHeader::build(404, Some(0)).unwrap();
                     x.insert_header(header::CONTENT_LENGTH, 0)?;
@@ -234,6 +233,10 @@ impl ProxyHttp for LB {
         }
     }
 
+    async fn proxy_upstream_filter(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        Ok(ctx.is_some())
+    }
+
     // TODO support multiple backends
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
         //let upstream = self
@@ -244,6 +247,8 @@ impl ProxyHttp for LB {
         //println!("upstream peer is: {:?}", upstream);
         //let peer = Box::new(HttpPeer::new(upstream, TLS_FALSE, "".to_string()));
         //Ok(peer)
+
+        // we should always have Some here because we end requests early in proxy_upstream_filter
         ctx.take()
            .map(Box::new)
            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))

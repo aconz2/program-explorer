@@ -36,7 +36,7 @@ impl PEImageId {
             "quay.io" => {
                 let repository = &self.repository;
                 let digest = &self.digest;
-                Some(format!("https://quay.io/repository/{repository}/digest"))
+                Some(format!("https://quay.io/repository/{repository}/{digest}"))
             }
             _ => None
         }
@@ -116,7 +116,7 @@ impl PEImageMultiIndex {
         Ok(ret)
     }
 
-    pub fn from_paths_by_digest_with_slash(paths: &[&str]) -> io::Result<Self> {
+    pub fn from_paths_by_digest_with_colon(paths: &[&str]) -> io::Result<Self> {
         Self::from_paths(PEImageMultiIndexKeyType::Digest, paths)
     }
 
