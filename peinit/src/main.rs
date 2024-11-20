@@ -91,12 +91,51 @@ fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.a
 fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
 fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
 
+fn mountinfo(name: &str) {
+    if !name.is_empty() {
+        println!("=== {name} ===");
+    }
+    let root = std::fs::read_link("/proc/self/root").unwrap();
+    let cwd = std::fs::read_link("/proc/self/cwd").unwrap();
+    let root_stats = statfs(root.to_str().unwrap());
+    let root_fsid = unsafe { std::mem::transmute::<libc::fsid_t, [libc::c_int; 2]>(root_stats.f_fsid) };
+
+    println!("root={root:?} root_fsid={:x}:{:x} cwd={cwd:?}", root_fsid[0], root_fsid[1]);
+    let s = fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let table: Vec<Vec<String>> = s.lines().map(|x| x.split(" ").map(|y| y.to_string()).collect()).collect();
+    for row in table {
+        println!("{:>2} {:>2} {:6} {:3} {:10} {:10}", row[0], row[1], row[2], row[3], row[4], row[7]);
+    }
+}
+
+fn statfs(name: &str) -> libc::statfs {
+    let name = CString::new(name).unwrap();
+    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statfs(name.as_ptr(), &mut stats) };
+    assert!(ret == 0);
+    stats
+}
+
 fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
     //unshare(libc::CLONE_NEWNS)?;
-    mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
-    chdir(pivot_dir)?;
-    mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None)?;
+    //mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
+    //chdir(pivot_dir)?;
+    //mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None)?;
+    //chroot(c".")?;
+
+    // from https://lore.kernel.org/linux-fsdevel/20200305193511.28621-1-ignat@cloudflare.com/T/
+    // also seems to work okay
+    mountinfo("before"); println!("");
+
+    mount(c"/", c"/", None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
+    mountinfo("mount / /"); println!("");
+
+    chdir(c"/")?;
+    mountinfo("chdir /.."); println!();
+
     chroot(c".")?;
+    mountinfo("chroot ."); println!();
+
     Ok(())
 }
 
@@ -221,10 +260,11 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
 fn main() {
     setup_panic();
 
+        mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
     parent_rootfs(c"/abc").unwrap();
 
     { // initial mounts
-        mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
+        //mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
         mount(c"none", c"/sys/fs/cgroup", Some(c"cgroup2"),  libc::MS_SILENT, None).unwrap();
         mount(c"none", c"/dev",           Some(c"devtmpfs"), libc::MS_SILENT, None).unwrap();
         mount(c"none", c"/run/output",    Some(c"tmpfs"),    libc::MS_SILENT, Some(c"size=2M,mode=777")).unwrap();

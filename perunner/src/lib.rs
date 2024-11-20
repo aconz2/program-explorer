@@ -46,7 +46,7 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         oci_runtime::LinuxNamespaceBuilder::default().typ(oci_runtime::LinuxNamespaceType::Network).build().unwrap()
         );
 
-    linux.set_seccomp(Some(SECCOMP.clone()));
+    //linux.set_seccomp(Some(SECCOMP.clone()));
 
     // TODO multi arch/os
     if *image_config.architecture() != oci_image::Arch::Amd64 { return None; }

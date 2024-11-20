@@ -31,7 +31,6 @@ fn sha2_hex(buf: &[u8]) -> String {
     base16ct::lower::encode_string(&hash)
 }
 
-// how do you get away from this P1 P2 thing
 // this is kinda dupcliated with pearchive::packdev
 fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &Option<P1>, file: P2, config: &peinit::Config) {
     let mut f = File::create(file).unwrap();
@@ -54,7 +53,7 @@ fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
     output.clear();
     for b in input {
         match *b {
-            b'\n' | b'\t' => { output.push(*b) },
+            b'\n' | b'\t' | b'\'' => { output.push(*b) },
             _ => {
                 for e in std::ascii::escape_default(*b) {
                     output.push(e);

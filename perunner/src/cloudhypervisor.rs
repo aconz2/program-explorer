@@ -334,11 +334,3 @@ pub fn round_up_file_to_pmem_size(f: &mut fs::File) -> io::Result<u64> {
     }
     Ok(newlen)
 }
-
-// TODO I don't really like this because we regrab the pidfd and might already be killed etc
-// impl Drop for CloudHypervisor {
-//     fn drop(&mut self) {
-//         // TODO redo this
-//         //let _ = self.wait_timeout_or_kill(Duration::from_millis(5));
-//     }
-// }

@@ -6,7 +6,7 @@ use pingora_timeout::timeout;
 use pingora::services::Service as IService;
 use pingora::services::listening::Service;
 use pingora::server::Server;
-use pingora::server::configuration::Opt;
+use pingora::server::configuration::{Opt,ServerConf};
 use pingora::apps::http_app::ServeHttp;
 use pingora::protocols::http::ServerSession;
 
@@ -280,6 +280,8 @@ impl ServeHttp for HttpRunnerApp {
 
 fn main() {
     env_logger::init();
+    let cwd = std::env::current_dir().unwrap();
+
     //let opt = Some(Opt::parse_args());
     let opt = Some(Opt {
         upgrade: false,
@@ -289,8 +291,11 @@ fn main() {
         conf: None // path to configuration file
     });
 
-    let cwd = std::env::current_dir().unwrap();
-    let mut my_server = Server::new(opt).unwrap();
+    let mut conf = ServerConf::default();
+    conf.threads = 1;
+
+    //let mut my_server = Server::new(opt).unwrap();
+    let mut my_server = Server::new_with_opt_and_conf(opt, conf);
     my_server.bootstrap();
 
     let pool = worker::asynk::Pool::new(&worker::cpuset(2, 2, 2).unwrap());

@@ -117,3 +117,20 @@ pub mod v1 {
         }
     }
 }
+
+pub mod premade_errors {
+    use once_cell::sync::Lazy;
+    use pingora::protocols::http::error_resp;
+    use pingora::http::ResponseHeader;
+    use http::StatusCode;
+
+    // annoyingly this doesn't work because status gets captured
+    //fn e(status: StatusCode) -> Lazy<ResponseHeader> {
+    //    Lazy::new(move || error_resp::gen_error_response(status.into()))
+    //}
+
+    pub static NOT_FOUND: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::NOT_FOUND.into()));
+    pub static INTERNAL_SERVER_ERROR: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::INTERNAL_SERVER_ERROR.into()));
+    pub static SERVICE_UNAVAILABLE: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::SERVICE_UNAVAILABLE.into()));
+}
+
