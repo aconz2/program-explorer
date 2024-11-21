@@ -91,33 +91,45 @@ fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.a
 fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
 fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
 
-fn mountinfo(name: &str) {
-    if !name.is_empty() {
-        println!("=== {name} ===");
-    }
-    let root = std::fs::read_link("/proc/self/root").unwrap();
-    let cwd = std::fs::read_link("/proc/self/cwd").unwrap();
-    let root_stats = statfs(root.to_str().unwrap());
-    let root_fsid = unsafe { std::mem::transmute::<libc::fsid_t, [libc::c_int; 2]>(root_stats.f_fsid) };
+// debugging code
+//fn mountinfo(name: &str) {
+//    if !name.is_empty() {
+//        println!("=== {name} ===");
+//    }
+//    let root = std::fs::read_link("/proc/self/root").unwrap();
+//    let cwd = std::fs::read_link("/proc/self/cwd").unwrap();
+//    //let root_stats = statfs(root.to_str().unwrap());
+//    let root_stats = statvfs(root.to_str().unwrap());
+//    //let root_fsid = unsafe { std::mem::transmute::<libc::fsid_t, [libc::c_int; 2]>(root_stats.f_fsid) };
+//
+//    println!("root={root:?} root_fsid={:x} cwd={cwd:?}", root_stats.f_fsid);
+//    let s = fs::read_to_string("/proc/self/mountinfo").unwrap();
+//    let table: Vec<Vec<String>> = s.lines().map(|x| x.split(" ").map(|y| y.to_string()).collect()).collect();
+//    for row in table {
+//        println!("{:>2} {:>2} {:6} {:3} {:10} {:10}", row[0], row[1], row[2], row[3], row[4], row[7]);
+//    }
+//}
+//
+//fn statvfs(name: &str) -> libc::statvfs {
+//    let name = CString::new(name).unwrap();
+//    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+//    let ret = unsafe { libc::statvfs(name.as_ptr(), &mut stats) };
+//    assert!(ret == 0);
+//    stats
+//}
+//
+//fn statfs(name: &str) -> libc::statfs {
+//    let name = CString::new(name).unwrap();
+//    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+//    let ret = unsafe { libc::statfs(name.as_ptr(), &mut stats) };
+//    assert!(ret == 0);
+//    stats
+//}
 
-    println!("root={root:?} root_fsid={:x}:{:x} cwd={cwd:?}", root_fsid[0], root_fsid[1]);
-    let s = fs::read_to_string("/proc/self/mountinfo").unwrap();
-    let table: Vec<Vec<String>> = s.lines().map(|x| x.split(" ").map(|y| y.to_string()).collect()).collect();
-    for row in table {
-        println!("{:>2} {:>2} {:6} {:3} {:10} {:10}", row[0], row[1], row[2], row[3], row[4], row[7]);
-    }
-}
-
-fn statfs(name: &str) -> libc::statfs {
-    let name = CString::new(name).unwrap();
-    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statfs(name.as_ptr(), &mut stats) };
-    assert!(ret == 0);
-    stats
-}
-
+// this lets crun do pivot_root even though we're running from initramfs
 fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
-    //unshare(libc::CLONE_NEWNS)?;
+    // this is the thing from https://github.com/containers/bubblewrap/issues/592#issuecomment-2243087731
+    //unshare(libc::CLONE_NEWNS)?;  // seems to be fine without this
     //mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
     //chdir(pivot_dir)?;
     //mount(pivot_dir, c"/", None, libc::MS_MOVE | libc::MS_SILENT, None)?;
@@ -125,17 +137,13 @@ fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
 
     // from https://lore.kernel.org/linux-fsdevel/20200305193511.28621-1-ignat@cloudflare.com/T/
     // also seems to work okay
-    mountinfo("before"); println!("");
-
+    //mountinfo("before"); println!("");
     mount(c"/", c"/", None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
-    mountinfo("mount / /"); println!("");
-
-    chdir(c"/")?;
-    mountinfo("chdir /.."); println!();
-
+    //mountinfo("mount / /"); println!("");
+    chdir(c"/..")?; // TODO: what??
+    //mountinfo("chdir /.."); println!();
     chroot(c".")?;
     mountinfo("chroot ."); println!();
-
     Ok(())
 }
 
@@ -164,6 +172,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     config
 }
 
+// TODO: maybe do this in process?
 fn pack_output<P: AsRef<OsStr>>(offset: u64, dir: P, archive: P) {
     //let ret = Command::new("strace").arg("/bin/pearchive")
     let ret = Command::new("/bin/pearchive")

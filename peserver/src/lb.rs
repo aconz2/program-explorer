@@ -11,6 +11,7 @@ use pingora::Result;
 //use pingora::lb::{health_check, selection::RoundRobin, LoadBalancer};
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::http::{ResponseHeader};
+use pingora_limits::rate::Rate;
 
 use async_trait::async_trait;
 use env_logger;
@@ -20,11 +21,22 @@ use http::header;
 use arc_swap::ArcSwap;
 use log::{error,info};
 use serde_json;
+use once_cell::sync::Lazy;
 
 use peserver::api::v1 as apiv1;
-use peserver::api::premade_errors;
+use peserver::api::{premade_errors,MAX_REQ_PER_SEC};
+
+// pingora has been mostly fine, I don't know why the caching logic is so baked into their proxy
+// though, it makes it a bit complicated to read
 
 const TLS_FALSE: bool = false;
+
+// these are the defaults from pingora-limits/src/rate.rs
+// TODO understand how to tune these
+const HASHES: usize = 4;
+const SLOTS: usize = 1024;
+static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
+
 
 async fn read_full_body(session: &mut pingora::protocols::http::v1::client::HttpSession) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
@@ -41,6 +53,8 @@ async fn read_full_body(session: &mut pingora::protocols::http::v1::client::Http
     Ok(acc.freeze())
 }
 
+// TODO images probably needs the images kept per worker, image_map might have a list of workerids
+// premade_json should store a merged view of all images
 pub struct ImageData {
     image_map: BTreeMap<String, WorkerId>,
     images: Vec<apiv1::images::Image>,
@@ -156,6 +170,7 @@ impl BackgroundService for Images {
                 return;
             }
 
+            // shouldn't this be a select on the shutdown signal?
             interval.tick().await;
 
             // TODO in parallel or something (if dynamic, hard to spawn task per)
@@ -173,7 +188,7 @@ pub struct LB {
     images: Arc<Images>,
 }
 
-//type LBCtx = Option<HttpPeer>;
+// A bit hacky, but we use the Arc::strong_count as the number of active connections to the worker
 pub struct LBCtx(Option<Arc<Worker>>);
 
 impl LBCtx {
@@ -206,6 +221,7 @@ impl LB {
             Box::new(x)
         };
 
+        // NOTE these skip any filter modules
         downstream_session.write_response_header(response_header).await?;
         downstream_session.write_response_body(buf, true).await?;
         Ok(())
@@ -223,8 +239,12 @@ impl LB {
             .and_then(|worker_id| self.images.get_worker(worker_id).map(|x| (worker_id, x)));
 
         match worker {
-            Some((worker_id, worker)) => {
+            Some((_worker_id, worker)) => {
                 // TODO we might walk through possible servers and choose one with least conn
+                // here we bail immediately, but maybe we should join a queue? who will wake
+                // us from that queue? maybe use a channel? semaphore?
+                // who will wake us if the user disconnects and we are waiting?
+                // we can't know if the user disconnects unfortunately...
                 if Arc::strong_count(worker) > worker.max_conn {
                     session.downstream_session
                         .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
@@ -243,6 +263,18 @@ impl LB {
             }
         }
     }
+
+    fn rate_limit(&self, session: &mut Session, _ctx: &mut LBCtx) -> bool {
+        let ip = session
+            .client_addr()
+            .and_then(|x| x.as_inet())
+            .map(|x| format!("{}", x.ip()));
+        let curr_window_requests = match ip {
+            Some(s) => RATE_LIMITER.observe(&s, 1),
+            None => RATE_LIMITER.observe(&"unk", 1),
+        };
+        curr_window_requests > MAX_REQ_PER_SEC
+    }
 }
 
 // LB phases go (from HTTPProxy::proxy_request)
@@ -255,13 +287,19 @@ impl LB {
 
 #[async_trait]
 impl ProxyHttp for LB {
-    // TODO maybe we can track connections per server with a hacky Drop on CTX
     type CTX = LBCtx;
 
     fn new_ctx(&self) -> LBCtx { LBCtx::new() }
 
     // Ok(true) means request is done
     async fn request_filter(&self, session: &mut Session, _ctx: &mut LBCtx) -> Result<bool> {
+        if self.rate_limit(session, _ctx) {
+            return session.downstream_session
+                .write_response_header_ref(&*premade_errors::TOO_MANY_REQUESTS)
+                .await
+                .map(|_| true)
+        }
+
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
         match (req_parts.method.clone(), req_parts.uri.path()) {
@@ -282,16 +320,6 @@ impl ProxyHttp for LB {
 
     // TODO support multiple backends
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut LBCtx) -> Result<Box<HttpPeer>> {
-        //let upstream = self
-        //    .upstreams
-        //    .select(b"", 256) // hash doesn't matter
-        //    .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))?;
-        //
-        //println!("upstream peer is: {:?}", upstream);
-        //let peer = Box::new(HttpPeer::new(upstream, TLS_FALSE, "".to_string()));
-        //Ok(peer)
-
-        // we should always have Some here because we end requests early in proxy_upstream_filter
         ctx.map(|worker| Box::new(worker.peer.clone()))
            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
     }

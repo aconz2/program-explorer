@@ -33,6 +33,7 @@ peimage = { version = "0.1.0", path = "../peimage" }
 peinit = { version = "0.1.0", path = "../peinit" }
 perunner = { version = "0.1.0", path = "../perunner", features = ["asynk"] }
 pingora = { version = "0.4.0", features = ["proxy", "lb"] }
+pingora-limits = "0.4.0"
 pingora-timeout = "0.4.0"
 serde = { version = "1.0.214", features = ["serde_derive"] }
 serde_json = "1.0.132"

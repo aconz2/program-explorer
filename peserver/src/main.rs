@@ -268,7 +268,7 @@ impl ServeHttp for HttpRunnerApp {
         let req_parts: &http::request::Parts = http_stream.req_header();
         //trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
-            (Method::GET,  "/api/v1/images") => self.apiv1_images(http_stream).await,
+            (Method::GET,  apiv1::images::PATH) => self.apiv1_images(http_stream).await,
             (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(http_stream).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)
@@ -291,8 +291,8 @@ fn main() {
         conf: None // path to configuration file
     });
 
-    let mut conf = ServerConf::default();
-    conf.threads = 1;
+    let conf = ServerConf::default();
+    //conf.threads = 1;
 
     //let mut my_server = Server::new(opt).unwrap();
     let mut my_server = Server::new_with_opt_and_conf(opt, conf);

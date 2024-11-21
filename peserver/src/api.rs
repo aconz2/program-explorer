@@ -1,6 +1,9 @@
 pub const APPLICATION_JSON: &str = "application/json";
 pub const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
 
+// max request per second per client
+pub const MAX_REQ_PER_SEC: isize = 1;
+
 pub enum ContentType {
     ApplicationJson,
     PeArchiveV1, // <u32 json size> <json> <pearchivev1>
@@ -123,6 +126,7 @@ pub mod premade_errors {
     use pingora::protocols::http::error_resp;
     use pingora::http::ResponseHeader;
     use http::StatusCode;
+    use super::MAX_REQ_PER_SEC;
 
     // annoyingly this doesn't work because status gets captured
     //fn e(status: StatusCode) -> Lazy<ResponseHeader> {
@@ -132,5 +136,15 @@ pub mod premade_errors {
     pub static NOT_FOUND: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::NOT_FOUND.into()));
     pub static INTERNAL_SERVER_ERROR: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::INTERNAL_SERVER_ERROR.into()));
     pub static SERVICE_UNAVAILABLE: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::SERVICE_UNAVAILABLE.into()));
+
+    pub static TOO_MANY_REQUESTS: Lazy<ResponseHeader> = Lazy::new(|| {
+            let mut header = ResponseHeader::build(StatusCode::TOO_MANY_REQUESTS, Some(3)).unwrap();
+            header
+                .insert_header("X-Rate-Limit-Limit", MAX_REQ_PER_SEC.to_string())
+                .unwrap();
+            header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
+            header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
+            header
+    });
 }
 
