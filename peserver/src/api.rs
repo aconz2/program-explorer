@@ -1,8 +1,17 @@
+use std::time::Duration;
+
+use pingora::http::ResponseHeader;
+use http::header;
+
 pub const APPLICATION_JSON: &str = "application/json";
 pub const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
 
 // max request per second per client
 pub const MAX_REQ_PER_SEC: isize = 1;
+// max time we will wait trying to get a place in line for the worker
+// browsers are maybe a 60s total timeout so we have to get in there pretty quick to then hope to
+// actually get our request through
+pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub enum ContentType {
     ApplicationJson,
@@ -48,11 +57,10 @@ pub mod v1 {
 
         pub type Response = peinit::Response;
 
-        // /api/v1/runi/<algo>/<digest>
+        // /api/v1/runi/<algo>:<digest>
         //              [-------------]
         // doesn't fully check things, but covers the basics
         pub fn parse_path(s: &str) -> Option<&str> {
-            //if !s.starts_with(ROUTE_API_V1_RUNI) { return None; }
             let x = s.strip_prefix(PREFIX)?;
             if x.len() > 135 { return None; }  // this is length of sha512:...
             if x.contains("/") { return None; }
@@ -121,6 +129,13 @@ pub mod v1 {
     }
 }
 
+pub fn make_json_response_header(len: usize) -> ResponseHeader {
+    let mut x = ResponseHeader::build(200, Some(2)).unwrap();
+    x.insert_header(header::CONTENT_TYPE, "application/json").unwrap();
+    x.insert_header(header::CONTENT_LENGTH, len).unwrap();
+    x
+}
+
 pub mod premade_errors {
     use once_cell::sync::Lazy;
     use pingora::protocols::http::error_resp;
@@ -144,6 +159,7 @@ pub mod premade_errors {
                 .unwrap();
             header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
             header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
+            header.insert_header("Content-Length", "0").unwrap();
             header
     });
 }

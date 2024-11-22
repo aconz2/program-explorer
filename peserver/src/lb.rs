@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::collections::BTreeMap;
 
-use pingora::prelude::RequestHeader;
+use pingora::prelude::{timeout,RequestHeader};
 use pingora::services::background::{background_service,BackgroundService};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
@@ -17,14 +17,15 @@ use async_trait::async_trait;
 use env_logger;
 use bytes::{Bytes,BytesMut};
 use http::{Method,StatusCode};
-use http::header;
 use arc_swap::ArcSwap;
 use log::{error,info};
 use serde_json;
 use once_cell::sync::Lazy;
+use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 
 use peserver::api::v1 as apiv1;
-use peserver::api::{premade_errors,MAX_REQ_PER_SEC};
+use peserver::api::premade_errors;
+use peserver::api;
 
 // pingora has been mostly fine, I don't know why the caching logic is so baked into their proxy
 // though, it makes it a bit complicated to read
@@ -36,7 +37,6 @@ const TLS_FALSE: bool = false;
 const HASHES: usize = 4;
 const SLOTS: usize = 1024;
 static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
-
 
 async fn read_full_body(session: &mut pingora::protocols::http::v1::client::HttpSession) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
@@ -59,21 +59,38 @@ pub struct ImageData {
     image_map: BTreeMap<String, WorkerId>,
     images: Vec<apiv1::images::Image>,
     premade_json: Bytes,
+    premade_json_response_header: ResponseHeader,
 }
 
 impl ImageData {
     fn from_parts(images: Vec<apiv1::images::Image>,
                   premade_json: Bytes,
                   image_map: BTreeMap<String, WorkerId>,
+                  premade_json_response_header: ResponseHeader,
                   ) -> Self {
-        Self { images, premade_json, image_map }
+        Self { images, premade_json, image_map, premade_json_response_header }
     }
     fn new() -> Self {
+        let premade_json = serde_json::to_vec(&Vec::<apiv1::images::Image>::new()).unwrap();
+        let response_header = api::make_json_response_header(premade_json.len());
         Self::from_parts(
             vec![],
-            Bytes::from(serde_json::to_vec(&Vec::<apiv1::images::Image>::new()).unwrap()),
+            Bytes::from(premade_json),
             BTreeMap::new(),
+            response_header,
         )
+    }
+
+    fn update(&self, id: WorkerId, images: Vec<apiv1::images::Image>) -> Self {
+        let map: BTreeMap<_, _> = {
+            images
+                .iter()
+                .map(|img| (img.info.digest.clone(), id))
+                .collect()
+        };
+        let premade_json = serde_json::to_vec(&images).unwrap();
+        let response_header = api::make_json_response_header(premade_json.len());
+        Self::from_parts(images, premade_json.into(), map, response_header)
     }
 }
 
@@ -88,7 +105,7 @@ type WorkerId = u16;
 
 pub struct Worker {
     peer: HttpPeer,
-    max_conn: usize,
+    max_conn: Arc<Semaphore>,
 }
 
 const _EXPECTED_ARC_WORKER_SIZE: usize = 8;
@@ -121,14 +138,8 @@ impl Images {
 
     fn get_worker(&self, id: WorkerId) -> Option<&Arc<Worker>> { self.workers.get(id as usize) }
 
-    fn update_data(&self, worker_id: WorkerId, body: Bytes, resp: apiv1::images::Response) {
-        let map: BTreeMap<_, _> = {
-            resp.images
-                .iter()
-                .map(|img| (img.info.digest.clone(), worker_id))
-                .collect()
-        };
-        self.data.store(ImageData::from_parts(resp.images, body, map).into());
+    fn update_data(&self, worker_id: WorkerId, resp: apiv1::images::Response) {
+        self.data.store(self.data.load().update(worker_id, resp.images).into());
     }
 
     async fn do_update(&self, worker_id: WorkerId, peer: &HttpPeer) -> Result<(), Box<pingora::Error>> {
@@ -137,6 +148,7 @@ impl Images {
         session.read_timeout = Some(Duration::from_secs(5));
         session.write_timeout = Some(Duration::from_secs(5));
 
+        // TODO: maybe use proper cache headers to only update when changed
         let req = {
             let x = RequestHeader::build(Method::GET, apiv1::images::PATH.as_bytes(), None).unwrap();
             Box::new(x)
@@ -154,7 +166,7 @@ impl Images {
             .map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))?;
         let n_images = resp.images.len();
 
-        self.update_data(worker_id, body, resp);
+        self.update_data(worker_id, resp);
 
         info!("updated images for backend {}, {} images", peer, n_images);
         Ok(())
@@ -186,16 +198,27 @@ impl BackgroundService for Images {
 
 pub struct LB {
     images: Arc<Images>,
+    max_conn: Arc<Semaphore>,
 }
 
-// A bit hacky, but we use the Arc::strong_count as the number of active connections to the worker
-pub struct LBCtx(Option<Arc<Worker>>);
+pub struct LBCtxInner {
+    lb_permit: OwnedSemaphorePermit,
+    worker_permit: OwnedSemaphorePermit,
+    worker: Arc<Worker>,
+}
+
+pub struct LBCtx(Option<Arc<LBCtxInner>>);
 
 impl LBCtx {
     fn new() -> Self { Self(None) }
     fn is_some(&self) -> bool { self.0.is_some() }
-    fn map<U, F: FnOnce(&Arc<Worker>) -> U>(&self, f: F) -> Option<U> { self.0.as_ref().map(f) }
-    fn replace(&mut self, worker: Arc<Worker>) -> Option<Arc<Worker>> { self.0.replace(worker) }
+    fn map<U, F: FnOnce(&Arc<LBCtxInner>) -> U>(&self, f: F) -> Option<U> { self.0.as_ref().map(f) }
+    //fn peer(&self) -> Option<HttpPeer> { (&self.0).map(|inner| inner.worker.peer.clone()) }
+    fn replace(&mut self, inner: LBCtxInner) {
+        //assert!(self.0.is_none());
+        //self.0.replace(inner.into());
+        todo!()
+    }
 }
 
 //impl Drop for LBCtx {
@@ -205,25 +228,16 @@ impl LBCtx {
 //}
 
 impl LB {
-    fn new(images: Arc<Images>) -> Self {
-        Self { images }
+    fn new(max_conn: usize, images: Arc<Images>) -> Self {
+        Self { images, max_conn: Semaphore::new(max_conn).into() }
     }
 
     async fn apiv1_images(&self, session: &mut Session, _ctx: &mut LBCtx) -> Result<()> {
         let downstream_session = &mut session.downstream_session;
-
-        let buf = self.images.data.load().premade_json.clone();
-
-        let response_header = {
-            let mut x = ResponseHeader::build(200, Some(2)).unwrap();
-            x.insert_header(header::CONTENT_TYPE, "application/json")?;
-            x.insert_header(header::CONTENT_LENGTH, buf.len())?;
-            Box::new(x)
-        };
-
+        let data = self.images.data.load();
         // NOTE these skip any filter modules
-        downstream_session.write_response_header(response_header).await?;
-        downstream_session.write_response_body(buf, true).await?;
+        downstream_session.write_response_header_ref(&data.premade_json_response_header).await?;
+        downstream_session.write_response_body(data.premade_json.clone(), true).await?;
         Ok(())
     }
 
@@ -240,20 +254,34 @@ impl LB {
 
         match worker {
             Some((_worker_id, worker)) => {
-                // TODO we might walk through possible servers and choose one with least conn
-                // here we bail immediately, but maybe we should join a queue? who will wake
-                // us from that queue? maybe use a channel? semaphore?
-                // who will wake us if the user disconnects and we are waiting?
-                // we can't know if the user disconnects unfortunately...
-                if Arc::strong_count(worker) > worker.max_conn {
-                    session.downstream_session
-                        .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
-                        .await
-                        .map(|_| true)
-                } else {
-                    let _ = ctx.replace(worker.clone());
-                    Ok(false)
-                }
+                let lb_permit = {
+                    match self.max_conn.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            return session.downstream_session
+                                .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
+                                .await
+                                .map(|_| true)
+                        }
+                    }
+                };
+                let worker_permit = {
+                    match timeout(
+                        api::MAX_WAIT_TIMEOUT,
+                        worker.max_conn.clone().acquire_owned()
+                    ).await
+                        {
+                        Ok(Ok(permit)) => permit,
+                        _ => {  // either timeout or error acquiring
+                            return session.downstream_session
+                                .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
+                                .await
+                                .map(|_| true)
+                        }
+                    }
+                };
+                ctx.replace(LBCtxInner{ lb_permit, worker_permit, worker: worker.clone() });
+                Ok(false)
             }
             None => {
                 session.downstream_session
@@ -268,12 +296,12 @@ impl LB {
         let ip = session
             .client_addr()
             .and_then(|x| x.as_inet())
-            .map(|x| format!("{}", x.ip()));
+            .map(|x| x.ip());
         let curr_window_requests = match ip {
             Some(s) => RATE_LIMITER.observe(&s, 1),
-            None => RATE_LIMITER.observe(&"unk", 1),
+            None => RATE_LIMITER.observe(&42, 1),
         };
-        curr_window_requests > MAX_REQ_PER_SEC
+        curr_window_requests > api::MAX_REQ_PER_SEC
     }
 }
 
@@ -320,8 +348,13 @@ impl ProxyHttp for LB {
 
     // TODO support multiple backends
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut LBCtx) -> Result<Box<HttpPeer>> {
-        ctx.map(|worker| Box::new(worker.peer.clone()))
-           .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
+        //ctx.map(|ctx| Box::new(ctx.worker.peer.clone()))
+        //   .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
+        //ctx.peer()
+        //   .map(Box::new)
+        //   .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
+        todo!()
+
     }
 }
 
@@ -354,7 +387,7 @@ fn main() {
     let peers = vec![
         Worker {
             peer: HttpPeer::new("127.0.0.1:1234", TLS_FALSE, "".to_string()),
-            max_conn: 4,
+            max_conn: Semaphore::new(4).into(),
         }
     ];
 
@@ -366,7 +399,8 @@ fn main() {
     let images_background = background_service("images", images);
     let images = images_background.task();
 
-    let lb = LB::new(images);
+    let lb_maxconn = 1024;
+    let lb = LB::new(lb_maxconn, images);
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
     lb_service.add_tcp("127.0.0.1:6188");
 

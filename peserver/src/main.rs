@@ -53,10 +53,10 @@ struct HttpRunnerApp {
     pub kernel: OsString,
 }
 
-async fn read_full_body(http_stream: &mut ServerSession) -> Result<Bytes, Box<pingora::Error>> {
+async fn read_full_body(session: &mut ServerSession) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
     loop {
-        match http_stream.read_request_body().await? {
+        match session.read_request_body().await? {
             Some(bytes) => {
                 acc.extend_from_slice(&bytes);
             }
@@ -128,8 +128,8 @@ impl Into<Response<Vec<u8>>> for Error {
 }
 
 impl HttpRunnerApp {
-    async fn apiv1_runi(&self, http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
-        let req_parts: &http::request::Parts = http_stream.req_header();
+    async fn apiv1_runi(&self, session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+        let req_parts: &http::request::Parts = session.req_header();
 
         let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path())
             .ok_or(Error::BadImagePath)?;
@@ -137,7 +137,7 @@ impl HttpRunnerApp {
         let image_entry = self.index.get(&uri_path_image)
             .ok_or(Error::NoSuchImage)?;
 
-        let content_type = http_stream.req_header()
+        let content_type = session.req_header()
             .headers
             .get("Content-Type")
             .and_then(|x| x.to_str().ok())
@@ -150,10 +150,10 @@ impl HttpRunnerApp {
             ContentType::PeArchiveV1 => peinit::ResponseFormat::PeArchiveV1,
         };
 
-        // TODO why aren't we using the bulitin read timeout on the http_stream?
+        // TODO this is a timeout on the reading the entire body, session.read_timeout
         let read_timeout = Duration::from_millis(2000);
         // TODO ideally could read this in two parts to send the rest to the file
-        let body = timeout(read_timeout, read_full_body(http_stream))
+        let body = timeout(read_timeout, read_full_body(session))
             .await
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::ReadError)?;
@@ -256,7 +256,7 @@ impl HttpRunnerApp {
         }
     }
 
-    async fn apiv1_images(&self, _http_stream: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+    async fn apiv1_images(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&self.index))
             .map_err(|_| Error::Serialize)
     }
@@ -264,12 +264,12 @@ impl HttpRunnerApp {
 
 #[async_trait]
 impl ServeHttp for HttpRunnerApp {
-    async fn response(&self, http_stream: &mut ServerSession) -> Response<Vec<u8>> {
-        let req_parts: &http::request::Parts = http_stream.req_header();
+    async fn response(&self, session: &mut ServerSession) -> Response<Vec<u8>> {
+        let req_parts: &http::request::Parts = session.req_header();
         //trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
-            (Method::GET,  apiv1::images::PATH) => self.apiv1_images(http_stream).await,
-            (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(http_stream).await,
+            (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session).await,
+            (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)
             }
