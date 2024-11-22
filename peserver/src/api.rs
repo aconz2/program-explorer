@@ -12,6 +12,9 @@ pub const MAX_REQ_PER_SEC: isize = 1;
 // browsers are maybe a 60s total timeout so we have to get in there pretty quick to then hope to
 // actually get our request through
 pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+// these are per read/write call
+pub const DOWNSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DOWNSTREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum ContentType {
     ApplicationJson,

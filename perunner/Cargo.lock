@@ -615,6 +615,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "libc",
+ "log",
  "memmap2",
  "nix",
  "oci-spec",

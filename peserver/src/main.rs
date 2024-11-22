@@ -313,7 +313,7 @@ fn main() {
     assert_file_exists(&app.initramfs);
     assert_file_exists(&app.cloud_hypervisor);
 
-    let mut runner_service_http = Service::new("Echo Service HTTP".to_string(), app);
+    let mut runner_service_http = Service::new("Program Explorer Worker".to_string(), app);
     runner_service_http.add_tcp("127.0.0.1:1234");
 
     let services: Vec<Box<dyn IService>> = vec![

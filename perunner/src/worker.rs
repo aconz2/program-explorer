@@ -6,6 +6,7 @@ use crossbeam::channel::{Receiver,Sender};
 use std::time::Duration;
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 use std::path::PathBuf;
+use log::{trace};
 
 use nix;
 use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
@@ -35,6 +36,7 @@ pub type OutputResult = Result<Output, CloudHypervisorPostMortem>;
 pub struct Pool {
     sender: Sender<Input>,
     receiver: Receiver<OutputResult>,
+    #[allow(dead_code)]
     handles: Vec<JoinHandleT>,
 }
 
@@ -68,6 +70,7 @@ impl Pool {
 }
 
 impl PoolShuttingDown {
+    pub fn receiver(&mut self) -> &Receiver<OutputResult> { &self.receiver }
     pub fn shutdown(self) -> Vec<thread::Result<()>> {
         // do we need to do anything with receiver?
         self.handles.into_iter().map(|h| h.join()).collect()
@@ -140,19 +143,19 @@ fn spawn_worker(id: usize,
                )
     -> JoinHandleT {
     spawn(move || {
-        println!("starting worker {id}");
+        trace!("starting worker {id}");
         sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
         for msg in input.iter() {
             match output.send(run(msg)) {
                 Ok(_) => { },
                 Err(_) => {
                     // output got disconnected somehow
-                    println!("worker {id} got disconnected");
+                    trace!("worker {id} got disconnected");
                     return;
                 },
             }
         }
-        println!("worker {id} shutting down");
+        trace!("worker {id} shutting down");
     })
 }
 
@@ -165,6 +168,8 @@ pub mod asynk {
 
     pub struct Pool {
         sender: Sender<SenderElement>,
+        // TODO are these even useful?
+        #[allow(dead_code)]
         handles: Vec<JoinHandleT>,
     }
 
@@ -191,19 +196,19 @@ pub mod asynk {
                    )
         -> JoinHandleT {
         spawn(move || {
-            println!("starting worker {id}");
+            trace!("starting worker {id}");
             sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
             for (msg, output) in input.iter() {
                 match output.send(run(msg)) {
                     Ok(_) => { },
                     Err(_) => {
                         // output got disconnected somehow
-                        println!("worker {id} got disconnected");
+                        trace!("worker {id} got disconnected");
                         return;
                     },
                 }
             }
-            println!("worker {id} shutting down");
+            trace!("worker {id} shutting down");
         })
     }
 }
