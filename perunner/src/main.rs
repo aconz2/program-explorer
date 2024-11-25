@@ -10,19 +10,18 @@ use serde_json;
 use byteorder::{WriteBytesExt,LE};
 use memmap2::{Mmap,MmapOptions};
 use clap::{Parser};
-// use tracing::{info,error,Level};
-// use tracing_subscriber::FmtSubscriber;
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit;
 use peinit::{ResponseFormat};
 use peimage::{PEImageMultiIndex,PEImageMultiIndexKeyType};
 
-mod cloudhypervisor;
-use cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
+use perunner::create_runtime_spec;
 
-mod worker;
-use perunner::{UID,NIDS,create_runtime_spec};
+//mod worker;
+//mod cloudhypervisor;
+use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
+use perunner::worker;
 
 fn sha2_hex(buf: &[u8]) -> String {
     use sha2::{Sha256,Digest};
@@ -34,7 +33,7 @@ fn sha2_hex(buf: &[u8]) -> String {
 // this is kinda dupcliated with pearchive::packdev
 fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &Option<P1>, file: P2, config: &peinit::Config) {
     let mut f = File::create(file).unwrap();
-    () = peinit::write_io_file_config(&mut f, config).unwrap();
+    () = peinit::write_io_file_config(&mut f, config, 0).unwrap();
     let mut f = if let Some(dir) = dir {
         let archive_start_pos = f.stream_position().unwrap();
         let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
@@ -83,7 +82,7 @@ impl UnpackVisitor for UnpackVisitorPrinter {
         if self.stdout && AsRef::<Path>::as_ref(name) == AsRef::<Path>::as_ref("stdout") {
             write_escaped(&data, &mut io::stdout());
         } else {
-            eprintln!("=== {:?} ===", name);
+            eprintln!("=== {:?} ({}) ===", name, data.len());
             write_escaped(&data, &mut io::stderr());
         }
         true
@@ -198,7 +197,6 @@ struct Args {
 
     #[arg(long, default_value_t = 0, help = "num workers to run")]
     parallel: u64,
-
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,

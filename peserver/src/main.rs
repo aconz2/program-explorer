@@ -1,5 +1,5 @@
 use std::time::Duration;
-use std::io::{Read};
+use std::io::{Read,Write};
 use std::ffi::OsString;
 
 use pingora_timeout::timeout;
@@ -18,7 +18,7 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
-use log::{info,error};
+use log::{error};
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -26,7 +26,7 @@ use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size
 use peimage::PEImageMultiIndex;
 
 use peserver::api::v1 as apiv1;
-use peserver::api::{ContentType,APPLICATION_JSON};
+use peserver::api::{ContentType,APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
 
 #[derive(Debug)]
 enum Error {
@@ -86,6 +86,16 @@ fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
+        .header(http::header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap()
+}
+
+fn response_pearchivev1(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
+    // TODO presize headermap
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, APPLICATION_X_PE_ARCHIVEV1)
         .header(http::header::CONTENT_LENGTH, body.len())
         .body(body)
         .unwrap()
@@ -161,7 +171,8 @@ impl HttpRunnerApp {
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::ReadError)?;
 
-        let api_req = apiv1::runi::parse_request(&body, &content_type).ok_or(Error::BadRequest)?;
+        let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
+            .ok_or(Error::BadRequest)?;
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
             .ok_or(Error::OciSpec)?;
 
@@ -194,13 +205,16 @@ impl HttpRunnerApp {
         match content_type {
             ContentType::ApplicationJson => {
                 // this is blocking, but is going to tmpfs so I don't think its bad to do this?
-                peinit::write_io_file_config(io_file.as_file_mut(), &pe_config).map_err(|_| Error::Internal)?;
-                let _ = round_up_file_to_pmem_size(io_file.as_file_mut()).map_err(|_| Error::Internal)?;
+                peinit::write_io_file_config(io_file.as_file_mut(), &pe_config, 0).map_err(|_| Error::Internal)?;
             }
             ContentType::PeArchiveV1 => {
-                todo!("need offset of archive buf from when we parse");
+                // this is blocking but should be fine, right?
+                let archive_size: u32 = (body.len() - body_offset).try_into().map_err(|_| Error::Internal)?;
+                peinit::write_io_file_config(io_file.as_file_mut(), &pe_config, archive_size).map_err(|_| Error::Internal)?;
+                io_file.write_all(&body[body_offset..]).map_err(|_| Error::Internal)?;
             }
         }
+        let _ = round_up_file_to_pmem_size(io_file.as_file_mut()).map_err(|_| Error::Internal)?;
 
         let worker_input = worker::Input {
             id         : 42, // id is useless because we are passing a return channel
@@ -249,12 +263,18 @@ impl HttpRunnerApp {
             peinit::ResponseFormat::JsonV1 => {
                 let response_json_serialized = {
                     peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
-                        .map_err(|_| Error::ResponseRead)
-                        .map(|(_, x)| x)?
+                        .map(|(_, x)| x)
+                        .map_err(|_| Error::ResponseRead)?
                 };
                 Ok(response_json_vec(StatusCode::OK, response_json_serialized))
             }
-            _ => todo!()
+            peinit::ResponseFormat::PeArchiveV1 => {
+                let response_json_archive = {
+                    peinit::read_io_file_response_archive_bytes(worker_output.io_file.as_file_mut())
+                        .map_err(|_| Error::ResponseRead)?
+                };
+                Ok(response_pearchivev1(StatusCode::OK, response_json_archive))
+            }
         }
     }
 

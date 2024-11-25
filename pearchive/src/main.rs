@@ -10,14 +10,13 @@ use pearchive::{
 };
 
 use memmap2::MmapOptions;
-use byteorder::{WriteBytesExt,ReadBytesExt,LE};
+use byteorder::{WriteBytesExt,LE};
 
 #[derive(Debug)]
 enum Error {
     MissingArg,
     Mmap,
 }
-
 
 /// args: <input dir> <output file>
 fn pack(args: &[String]) {

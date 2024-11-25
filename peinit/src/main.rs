@@ -19,13 +19,14 @@ const STDOUT_FILE: &str = "/run/output/stdout";
 const STDERR_FILE: &str = "/run/output/stderr";
 const RESPSONSE_JSON_STDOUT_SIZE: u64 = 1024;
 
-fn sha2_hex(buf: &[u8]) -> String {
-    use sha2::{Sha256,Digest};
-    use base16ct;
-    let hash = Sha256::digest(&buf);
-    base16ct::lower::encode_string(&hash)
-}
+//fn sha2_hex(buf: &[u8]) -> String {
+//    use sha2::{Sha256,Digest};
+//    use base16ct;
+//    let hash = Sha256::digest(&buf);
+//    base16ct::lower::encode_string(&hash)
+//}
 
+#[allow(dead_code)]
 fn kernel_panic() {
     fs::write("/proc/sys/kernel/sysrq", b"1").unwrap();
     fs::write("/proc/sysrq-trigger", b"c").unwrap();
@@ -33,7 +34,6 @@ fn kernel_panic() {
 
 fn exit() {
     //kernel_panic();
-
     //unsafe { core::arch::asm!("hlt", options(att_syntax, nomem, nostack)); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF); }
@@ -127,7 +127,7 @@ fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe 
 //}
 
 // this lets crun do pivot_root even though we're running from initramfs
-fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
+fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
     // this is the thing from https://github.com/containers/bubblewrap/issues/592#issuecomment-2243087731
     //unshare(libc::CLONE_NEWNS)?;  // seems to be fine without this
     //mount(c"/", pivot_dir, None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
@@ -143,7 +143,7 @@ fn parent_rootfs(pivot_dir: &CStr) -> io::Result<()> {
     chdir(c"/..")?; // TODO: what??
     //mountinfo("chdir /.."); println!();
     chroot(c".")?;
-    mountinfo("chroot ."); println!();
+    //mountinfo("chroot ."); println!();
     Ok(())
 }
 

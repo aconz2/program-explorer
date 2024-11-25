@@ -70,18 +70,32 @@ pub mod v1 {
             Some(x)
         }
 
-        pub fn parse_request(body: &[u8], content_type: &ContentType) -> Option<Request> {
+        pub fn parse_request(body: &[u8], content_type: &ContentType) -> Option<(usize, Request)> {
             match content_type {
                 ContentType::ApplicationJson => {
-                    serde_json::from_slice(&body).ok()
+                    let req = serde_json::from_slice(&body).ok()?;
+                    Some((0, req))
                 }
                 ContentType::PeArchiveV1 => {
                     if body.len() < 4 { return None; }
                     let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                     // todo panic on out of bounds
-                    serde_json::from_slice(&body[4..4+json_size]).ok()
+                    let slice = body.get(4..4+json_size)?;
+                    let req = serde_json::from_slice(slice).ok()?;
+                    Some((4+json_size, req))
                 }
             }
+        }
+
+        // assumes pearchivev1 format
+        // <u32: response size> <response json> <archive>
+        pub fn parse_response(body: &[u8]) -> Option<(Response, &[u8])> {
+            if body.len() < 4 { return None; }
+            let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+            let slice = body.get(4..4+json_size)?;
+            let response: Response = serde_json::from_slice(slice).ok()?;
+            let rem = body.get(4+json_size..)?;
+            Some((response, rem))
         }
 
     }

@@ -193,7 +193,7 @@ fn read_u32_le_slice(file: &mut File, xs: &mut [u32]) -> std::io::Result<()> {
     file.read_u32_into::<LE>(xs)
 }
 
-fn read_u32_le_pair<const N: usize>(file: &mut File) -> std::io::Result<(u32, u32)> {
+fn read_u32_le_pair(file: &mut File) -> std::io::Result<(u32, u32)> {
     let mut buf = [0; 2];
     read_u32_le_slice(file, &mut buf)?;
     Ok((buf[0], buf[1]))
@@ -205,16 +205,16 @@ fn read_u32_le_pair<const N: usize>(file: &mut File) -> std::io::Result<(u32, u3
 // file is left with cursor at beginning of archive but you then must
 // seek back to 0 to write the archive size
 // file should be at 0, but we don't seek it so
-pub fn write_io_file_config(file: &mut File, config: &Config) -> Result<(), Error> {
+pub fn write_io_file_config(file: &mut File, config: &Config, archive_size: u32) -> Result<(), Error> {
     let config_bytes = bincode::serialize(&config).map_err(|_| Error::Ser)?;
     let config_size: u32 = config_bytes.len().try_into().unwrap();
-    write_u32_le_slice(file, &[0, config_size]).map_err(|_| Error::Io)?;
+    write_u32_le_slice(file, &[archive_size, config_size]).map_err(|_| Error::Io)?;
     file.write_all(&config_bytes).map_err(|_| Error::Io)?;
     Ok(())
 }
 
 pub fn read_io_file_config(file: &mut File) -> Result<(u32, Config), Error> {
-    let (archive_size, response_size) = read_u32_le_pair::<2>(file).map_err(|_| Error::Io)?;
+    let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     let mut buf = vec![0; response_size as usize];
     file.read_exact(&mut buf).map_err(|_| Error::Io)?;
     let config = bincode::deserialize(&buf).map_err(|_| Error::Ser)?;
@@ -222,7 +222,7 @@ pub fn read_io_file_config(file: &mut File) -> Result<(u32, Config), Error> {
 }
 
 // coming out of the guest, we have
-// <u32: archive size> <u32: response size> <response> <archive>
+// <u32: archive end (absolute)> <u32: response size> <response> <archive>
 // response is always in json format and archive_size may be 0
 pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<(), Error> {
     let response_bytes = serde_json::to_vec(&response).map_err(|_| Error::Ser)?;
@@ -233,16 +233,30 @@ pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<()
 }
 
 // coming out of the guest, we have
-// <u32: archive size> <u32: response size> <response> <archive>
+// <u32: archive end (absolute)> <u32: response size> <response> <archive>
 // response is always in json format and archive_size may be 0
 // we return the archive size and bytes of the response json
 // file cursor is left at beginning of archive
 pub fn read_io_file_response_bytes(file: &mut File) -> Result<(u32, Vec<u8>), Error> {
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
-    let (archive_size, response_size) = read_u32_le_pair::<2>(file).map_err(|_| Error::Io)?;
+    let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     let mut ret = vec![0; response_size as usize];
     file.read_exact(&mut ret).map_err(|_| Error::Io)?;
     Ok((archive_size, ret))
+}
+
+pub fn read_io_file_response_archive_bytes(file: &mut File) -> Result<Vec<u8>, Error> {
+    file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+    let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
+    // could also truncate to archive_end and read_to_end to avoid the zero initialize
+    let mut ret = vec![0u8; (4 + archive_size + response_size) as usize];
+    // ret[0..4] = &response_size.to_le_bytes(); // wish this would work
+    {
+        let b = response_size.to_le_bytes();
+        for i in 0..4 { ret[i] = b[i]; }
+    }
+    file.read_exact(&mut ret[4..]).map_err(|_| Error::Io)?;
+    Ok(ret)
 }
 
 pub fn read_io_file_response(file: &mut File) -> Result<(u32, Response), Error> {

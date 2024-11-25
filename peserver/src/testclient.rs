@@ -1,4 +1,5 @@
-//use std::net::{TcpStream,SocketAddr};
+use std::path::PathBuf;
+
 use http::Method;
 use std::time::Duration;
 use pingora::prelude::{RequestHeader,HttpPeer};
@@ -6,7 +7,7 @@ use clap::Parser;
 
 use peserver::api;
 use peserver::api::v1 as apiv1;
-use pearchive::{PackMemToVec,PackMemVisitor};
+use pearchive::{PackMemToVec,PackMemVisitor,UnpackVisitor,unpack_visitor};
 
 mod util;
 use util::read_full_body;
@@ -21,6 +22,16 @@ fn escape_dump(input: &[u8]) {
     }
     let _ = std::io::stdout().write_all(output.as_slice()).unwrap();
     println!("");
+}
+
+struct UnpackVisitorPrinter {}
+
+impl UnpackVisitor for UnpackVisitorPrinter {
+    fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
+        println!("=== {:?} ({}) ===", name, data.len());
+        escape_dump(&data);
+        true
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -70,15 +81,17 @@ async fn main() {
         x.insert_header("Content-Length", buf.len()).unwrap();
         Box::new(x)
     };
-    println!("request {:?}", req);
+    println!("http request {:?}", req);
     let _ = session.write_request_header(req).await.unwrap();
     let _ = session.write_body(&buf).await.unwrap();
     let _ = session.read_response().await.unwrap();
     let res_parts: &http::response::Parts = session.resp_header().unwrap();
-    println!("response {:?}", res_parts);
+    println!("http response {:?}", res_parts);
 
     let body = read_full_body(&mut session).await.unwrap();
+    let (response, archive) = apiv1::runi::parse_response(&body).unwrap();
+    println!("api  response {:#?}", response);
 
-    //
-    escape_dump(&body);
+    let mut unpacker = UnpackVisitorPrinter{};
+    unpack_visitor(&archive, &mut unpacker).unwrap();
 }
