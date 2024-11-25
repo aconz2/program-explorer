@@ -2,13 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::collections::BTreeMap;
 
-use pingora::prelude::{timeout,RequestHeader};
+use pingora::prelude::{timeout,RequestHeader,HttpPeer};
 use pingora::services::background::{background_service,BackgroundService};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
-use pingora::upstreams::peer::HttpPeer;
 use pingora::Result;
-//use pingora::lb::{health_check, selection::RoundRobin, LoadBalancer};
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::http::{ResponseHeader};
 use pingora_limits::rate::Rate;
@@ -84,9 +82,6 @@ pub struct Worker {
     peer: HttpPeer,
     max_conn: Arc<Semaphore>,
 }
-
-const _EXPECTED_ARC_WORKER_SIZE: usize = 8;
-const _TEST_ARC_WORKER_SIZE: [u8; _EXPECTED_ARC_WORKER_SIZE] = [0; std::mem::size_of::<Arc<Worker>>()];
 
 // peers could be dynamic in the future, but always have to maintain the same id
 pub struct Images {
@@ -191,19 +186,12 @@ pub struct LBCtx(Option<LBCtxInner>);
 impl LBCtx {
     fn new() -> Self { Self(None) }
     fn is_some(&self) -> bool { self.0.is_some() }
-    //fn map<U, F: FnOnce(&LBCtxInner) -> U>(&self, f: F) -> Option<U> { self.0.as_ref().map(f) }
     fn peer(&self) -> Option<HttpPeer> { self.0.as_ref().map(|inner| inner.worker.peer.clone()) }
     fn replace(&mut self, inner: LBCtxInner) {
         assert!(self.0.is_none());
         self.0.replace(inner.into());
     }
 }
-
-//impl Drop for LBCtx {
-//    fn drop(&mut self) {
-//        info!("dropping lbctx");
-//    }
-//}
 
 impl LB {
     fn new(max_conn: usize, images: Arc<Images>) -> Self {
@@ -277,7 +265,7 @@ impl LB {
         let ip = session
             .client_addr()
             .and_then(|x| x.as_inet())
-            .map(|x| x.ip());
+            .map(|x| x.ip()); // TODO should ipv6 use a prefix? what about nat?
         let curr_window_requests = match ip {
             Some(ip) => RATE_LIMITER.observe(&ip, 1),
             None => RATE_LIMITER.observe(&42, 1),
@@ -302,6 +290,7 @@ impl ProxyHttp for LB {
 
     // Ok(true) means request is done
     async fn request_filter(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
+        session.set_keepalive(Some(1));
         if self.rate_limit(session, ctx) {
             return session.downstream_session
                 .write_response_header_ref(&*premade_errors::TOO_MANY_REQUESTS)
@@ -321,8 +310,6 @@ impl ProxyHttp for LB {
                     .map(|_| true)
             }
         };
-        use log::trace;
-        trace!("request_filter is returning");
         ret
     }
 
@@ -352,17 +339,6 @@ fn main() {
     println!("server config {:#?}", my_server.configuration);
     my_server.bootstrap();
 
-    //let mut upstreams =
-    //    LoadBalancer::try_from_iter(["127.0.0.1:1234"]).unwrap();
-    //
-    //assert!(upstreams.backends().get_backend().len() == 1, "only one backend supported right now");
-    //
-    //upstreams.set_health_check(health_check::TcpHealthCheck::new());
-    //upstreams.health_check_frequency = Some(Duration::from_secs(10));
-    //
-    //let upstreams_background = background_service("health check", upstreams);
-
-    //let upstreams = lb_background.task();
     let peers = vec![
         Worker {
             peer: HttpPeer::new("127.0.0.1:1234", TLS_FALSE, "".to_string()),

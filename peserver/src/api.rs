@@ -45,12 +45,12 @@ impl Into<&str> for ContentType {
 pub mod v1 {
     pub mod runi {
         use super::super::ContentType;
-        use serde::{Deserialize};
+        use serde::{Serialize,Deserialize};
         use peinit;
 
         pub const PREFIX: &str = "/api/v1/runi/";
 
-        #[derive(Deserialize)]
+        #[derive(Serialize,Deserialize)]
         pub struct Request {
             pub stdin      : Option<String>,       // filename that will be set as stdin, noop
                                                    // for content-type: application/json
@@ -78,6 +78,7 @@ pub mod v1 {
                 ContentType::PeArchiveV1 => {
                     if body.len() < 4 { return None; }
                     let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+                    // todo panic on out of bounds
                     serde_json::from_slice(&body[4..4+json_size]).ok()
                 }
             }

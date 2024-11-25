@@ -18,7 +18,7 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
-use log::{error};
+use log::{info,error};
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -43,6 +43,7 @@ enum Error {
     WorkerError,
     Internal,
     Serialize,
+    OciSpec,
 }
 
 struct HttpRunnerApp {
@@ -101,6 +102,7 @@ fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
 
 impl Into<StatusCode> for Error {
     fn into(self: Error) -> StatusCode {
+        error!("error is {:?}", self);
         use Error::*;
         match self {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -108,6 +110,7 @@ impl Into<StatusCode> for Error {
             NoSuchImage |
             BadContentType |
             BadImagePath |
+            OciSpec |
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv |
@@ -159,9 +162,8 @@ impl HttpRunnerApp {
             .map_err(|_| Error::ReadError)?;
 
         let api_req = apiv1::runi::parse_request(&body, &content_type).ok_or(Error::BadRequest)?;
-
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
-            .ok_or(Error::BadRequest)?;
+            .ok_or(Error::OciSpec)?;
 
         let timeout = Duration::from_millis(1000);
         let ch_timeout = timeout + Duration::from_millis(500);

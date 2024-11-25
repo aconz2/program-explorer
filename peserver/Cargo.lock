@@ -1271,6 +1271,7 @@ dependencies = [
  "log",
  "oci-spec",
  "once_cell",
+ "pearchive",
  "peimage",
  "peinit",
  "perunner",

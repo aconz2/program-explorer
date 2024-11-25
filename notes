@@ -437,3 +437,4 @@ podman run --rm -it --network=none gcc:14.1.0
 podman-oci-config | jq -S
 ./build.sh && (cd perunner && target/debug/perunner --spec --console echo hi) | jq -S
 
+pingora write timeouts don't work great because the write completes instantly and then the kernel holds the buffer, interestingly curl --limit-rate 1 keeps reading even after the process is shut down. not sure why the keepalive timeout isn't getting kicked though
