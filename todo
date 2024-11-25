@@ -1,19 +1,7 @@
+* image location & update procedure
 * logging
-  * in peinit
-    * currently these written on the console and go through hvc0
-    * they get collected by the cloud-hypervisor  --console file=blah
-    * when run by a webserver, we want these to go _____
-  * in perunner
-    * currently these are just written to stdout
+* tls
+* vps setup & update procedure
+* server rate/time limiting more
 
-* perunner worker pool
-  * spin up N workers
-  * accept jobs from a queue
-  * put finished jobs on a queue
-
-* webserver
-  * accept requests
-  * lookup container id -> image config
-  * create packed input file of peinit::Config + pearchive
-  * put into worker pool (with id for connection)
-  * take from result queue and send these back
+* metrics

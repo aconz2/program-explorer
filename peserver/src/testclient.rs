@@ -29,7 +29,9 @@ struct UnpackVisitorPrinter {}
 impl UnpackVisitor for UnpackVisitorPrinter {
     fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
         println!("=== {:?} ({}) ===", name, data.len());
-        escape_dump(&data);
+        if !data.is_empty() {
+            escape_dump(&data);
+        }
         true
     }
 }
@@ -43,13 +45,15 @@ struct Args {
     #[arg(long, default_value = "sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564")]
     image: String,
 
+    #[arg(long)]
+    stdin: Option<String>,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
 
 #[tokio::main]
 async fn main() {
-
     let args = Args::parse();
 
     let connector = pingora::connectors::http::v1::Connector::new(None);
@@ -61,7 +65,7 @@ async fn main() {
     let api_req = apiv1::runi::Request {
         cmd: Some(args.args),
         entrypoint: Some(vec![]),
-        stdin: None,
+        stdin: args.stdin,
     };
 
     let buf = {
