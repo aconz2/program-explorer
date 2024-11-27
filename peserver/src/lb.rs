@@ -189,15 +189,18 @@ pub struct LBCtxInner {
     worker_permit: OwnedSemaphorePermit,
 }
 
-pub struct LBCtx(Option<LBCtxInner>);
+pub struct LBCtx{
+    inner: Option<LBCtxInner>,
+    body_len: usize,
+}
 
 impl LBCtx {
-    fn new() -> Self { Self(None) }
-    fn is_some(&self) -> bool { self.0.is_some() }
-    fn peer(&self) -> Option<HttpPeer> { self.0.as_ref().map(|inner| inner.worker.peer.clone()) }
+    fn new() -> Self { Self{ inner: None, body_len: 0 } }
+    fn is_some(&self) -> bool { self.inner.is_some() }
+    fn peer(&self) -> Option<HttpPeer> { self.inner.as_ref().map(|inner| inner.worker.peer.clone()) }
     fn replace(&mut self, inner: LBCtxInner) {
-        assert!(self.0.is_none());
-        self.0.replace(inner.into());
+        assert!(self.inner.is_none());
+        self.inner.replace(inner.into());
     }
 }
 
