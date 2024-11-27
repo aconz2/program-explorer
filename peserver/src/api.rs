@@ -11,6 +11,7 @@ pub const MAX_REQ_PER_SEC: isize = 1;
 // max time we will wait trying to get a place in line for the worker
 // browsers are maybe a 60s total timeout so we have to get in there pretty quick to then hope to
 // actually get our request through
+pub const MAX_BODY_SIZE: usize = 65536;
 pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 // these are per read/write call
 pub const DOWNSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,7 +80,6 @@ pub mod v1 {
                 ContentType::PeArchiveV1 => {
                     if body.len() < 4 { return None; }
                     let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
-                    // todo panic on out of bounds
                     let slice = body.get(4..4+json_size)?;
                     let req = serde_json::from_slice(slice).ok()?;
                     Some((4+json_size, req))
@@ -133,7 +133,7 @@ pub mod v1 {
                     .map(|(_k, v)| {
                         Image {
                             links: ImageLinks {
-                                runi: format!("{}/{}", runi::PREFIX, v.image.id.digest),
+                                runi: format!("{}{}", runi::PREFIX, v.image.id.digest),
                                 upstream: v.image.id.upstream_link(),
                             },
                             info: v.image.id.clone(),
@@ -153,32 +153,3 @@ pub fn make_json_response_header(len: usize) -> ResponseHeader {
     x.insert_header(header::CONTENT_LENGTH, len).unwrap();
     x
 }
-
-pub mod premade_errors {
-    use once_cell::sync::Lazy;
-    use pingora::protocols::http::error_resp;
-    use pingora::http::ResponseHeader;
-    use http::StatusCode;
-    use super::MAX_REQ_PER_SEC;
-
-    // annoyingly this doesn't work because status gets captured
-    //fn e(status: StatusCode) -> Lazy<ResponseHeader> {
-    //    Lazy::new(move || error_resp::gen_error_response(status.into()))
-    //}
-
-    pub static NOT_FOUND: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::NOT_FOUND.into()));
-    pub static INTERNAL_SERVER_ERROR: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::INTERNAL_SERVER_ERROR.into()));
-    pub static SERVICE_UNAVAILABLE: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::SERVICE_UNAVAILABLE.into()));
-
-    pub static TOO_MANY_REQUESTS: Lazy<ResponseHeader> = Lazy::new(|| {
-            let mut header = ResponseHeader::build(StatusCode::TOO_MANY_REQUESTS, Some(3)).unwrap();
-            header
-                .insert_header("X-Rate-Limit-Limit", MAX_REQ_PER_SEC.to_string())
-                .unwrap();
-            header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
-            header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
-            header.insert_header("Content-Length", "0").unwrap();
-            header
-    });
-}
-

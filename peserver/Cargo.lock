@@ -1267,6 +1267,7 @@ dependencies = [
  "bytes",
  "clap 4.5.21",
  "env_logger",
+ "flate2",
  "http",
  "log",
  "oci-spec",

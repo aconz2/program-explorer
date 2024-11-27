@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use pingora::prelude::{timeout,RequestHeader,HttpPeer};
 use pingora::services::background::{background_service,BackgroundService};
-use pingora::server::configuration::Opt;
+use pingora::modules::http::compression::ResponseCompressionBuilder;
+use pingora::modules::http::HttpModules;
+use pingora::server::configuration::{Opt,ServerConf};
 use pingora::server::Server;
 use pingora::Result;
 use pingora::proxy::{ProxyHttp, Session};
@@ -22,16 +24,17 @@ use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 
 use peserver::api::v1 as apiv1;
-use peserver::api::premade_errors;
 use peserver::api;
 
-mod util;
-use util::read_full_body;
+use peserver::util::{read_full_body,session_ip_id};
+use peserver::util::premade_errors;
 
 // pingora has been mostly fine, I don't know why the caching logic is so baked into their proxy
 // though, it makes it a bit complicated to read
 // argh: write_response_header_ref makes a Box::new(x.clone()) internally! I guess it has to but
 // maybe there could be a path to take an Arc so that you don't actually have to copy?
+// and I wish I could preload the downstream request body so that it is in memory before sending it
+// upstream
 
 const TLS_FALSE: bool = false;
 
@@ -40,6 +43,8 @@ const TLS_FALSE: bool = false;
 const HASHES: usize = 4;
 const SLOTS: usize = 1024;
 static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
+
+type WorkerId = u16;
 
 // TODO images probably needs the images kept per worker, image_map might have a list of workerids
 // premade_json should store a merged view of all images
@@ -76,23 +81,26 @@ impl ImageData {
     }
 }
 
-type WorkerId = u16;
-
 pub struct Worker {
     peer: HttpPeer,
     max_conn: Arc<Semaphore>,
 }
 
+impl Worker {
+    fn new(peer: HttpPeer, max_conn: usize) -> Self {
+        Self { peer, max_conn: Semaphore::new(max_conn).into() }
+    }
+}
+
 // peers could be dynamic in the future, but always have to maintain the same id
-pub struct Images {
+pub struct Workers {
     peers: Vec<HttpPeer>,
     workers: Vec<Arc<Worker>>,
-    //upstreams: Arc<LoadBalancer<RoundRobin>>,
     data: ArcSwap<ImageData>,
     image_check_frequency: Duration,
 }
 
-impl Images {
+impl Workers {
     fn new(workers: Vec<Worker>, image_check_frequency: Duration) -> Option<Self> {
         if workers.is_empty() { return None; }
         if workers.len() > WorkerId::MAX.into() { return None; }
@@ -146,7 +154,7 @@ impl Images {
 }
 
 #[async_trait]
-impl BackgroundService for Images {
+impl BackgroundService for Workers {
     async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
         let mut interval = tokio::time::interval(self.image_check_frequency);
         loop {
@@ -169,7 +177,7 @@ impl BackgroundService for Images {
 }
 
 pub struct LB {
-    images: Arc<Images>,
+    images: Arc<Workers>,
     max_conn: Arc<Semaphore>,
 }
 
@@ -194,7 +202,7 @@ impl LBCtx {
 }
 
 impl LB {
-    fn new(max_conn: usize, images: Arc<Images>) -> Self {
+    fn new(max_conn: usize, images: Arc<Workers>) -> Self {
         Self { images, max_conn: Semaphore::new(max_conn).into() }
     }
 
@@ -217,59 +225,47 @@ impl LB {
 
         let worker = uri_path_image
             .and_then(|image_id| image_map.get(image_id).map(|x| *x))
-            .and_then(|worker_id| self.images.get_worker(worker_id).map(|x| (worker_id, x)));
+            .and_then(|worker_id| self.images.get_worker(worker_id));
 
-        match worker {
-            Some((_worker_id, worker)) => {
-                // TODO maybe both these semaphores should be sharded and then picked by hash
-                // of user or something
-                let lb_permit = {
-                    match self.max_conn.clone().try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            return session.downstream_session
-                                .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
-                                .await
-                                .map(|_| true)
-                        }
-                    }
-                };
-                let worker_permit = {
-                    match timeout(
-                        api::MAX_WAIT_TIMEOUT,
-                        worker.max_conn.clone().acquire_owned()
-                    ).await
-                        {
-                        Ok(Ok(permit)) => permit,
-                        _ => {  // either timeout or error acquiring
-                            return session.downstream_session
-                                .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
-                                .await
-                                .map(|_| true)
-                        }
-                    }
-                };
-                ctx.replace(LBCtxInner{ lb_permit, worker_permit, worker: worker.clone() });
+        let worker = match worker {
+            Some(worker) => worker,
+            None => {
+                return session.downstream_session
+                    .write_response_header_ref(&*premade_errors::NOT_FOUND)
+                    .await
+                    .map(|_| true);
+            }
+        };
+
+        match self.get_permits(worker).await {
+            Some(ctx_inner) => {
+                ctx.replace(ctx_inner);
                 Ok(false)
             }
             None => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_errors::NOT_FOUND)
+                    .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
                     .await
                     .map(|_| true)
             }
         }
     }
 
-    fn rate_limit(&self, session: &mut Session, _ctx: &mut LBCtx) -> bool {
-        let ip = session
-            .client_addr()
-            .and_then(|x| x.as_inet())
-            .map(|x| x.ip()); // TODO should ipv6 use a prefix? what about nat?
-        let curr_window_requests = match ip {
-            Some(ip) => RATE_LIMITER.observe(&ip, 1),
-            None => RATE_LIMITER.observe(&42, 1),
+    async fn get_permits(&self, worker: &Arc<Worker>) -> Option<LBCtxInner> {
+        let lb_permit = self.max_conn.clone().try_acquire_owned().ok()?;
+        let worker_permit = {
+            match timeout(api::MAX_WAIT_TIMEOUT, worker.max_conn.clone().acquire_owned()).await {
+                Ok(Ok(permit)) => permit,
+                _ => {  // either timeout or error acquiring
+                    return None;
+                }
+            }
         };
+        Some(LBCtxInner{ lb_permit, worker_permit, worker: worker.clone() })
+    }
+
+    fn rate_limit(&self, session: &mut Session, _ctx: &mut LBCtx) -> bool {
+        let curr_window_requests = RATE_LIMITER.observe(&session_ip_id(session), 1);
         curr_window_requests > api::MAX_REQ_PER_SEC
     }
 }
@@ -288,9 +284,14 @@ impl ProxyHttp for LB {
 
     fn new_ctx(&self) -> LBCtx { LBCtx::new() }
 
+    // This function is only called once when the server starts
+    // for some reason the default has a downstream response compression builder that is disabled
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        modules.add_module(ResponseCompressionBuilder::enable(5));
+    }
+
     // Ok(true) means request is done
     async fn request_filter(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
-        session.set_keepalive(Some(1));
         if self.rate_limit(session, ctx) {
             return session.downstream_session
                 .write_response_header_ref(&*premade_errors::TOO_MANY_REQUESTS)
@@ -334,29 +335,27 @@ fn main() {
         test: false,
         conf: None // path to configuration file
     });
+    let conf = ServerConf::default();
 
-    let mut my_server = Server::new(opt).unwrap();
+    let mut my_server = Server::new_with_opt_and_conf(opt, conf);
     println!("server config {:#?}", my_server.configuration);
     my_server.bootstrap();
 
     let peers = vec![
-        Worker {
-            peer: HttpPeer::new("127.0.0.1:1234", TLS_FALSE, "".to_string()),
-            max_conn: Semaphore::new(4).into(),
-        }
+        Worker::new(HttpPeer::new("127.0.0.1:1234", TLS_FALSE, "".to_string()), 4),
     ];
 
     let image_check_frequency = Duration::from_secs(120);
-    let images = Images::new(peers, image_check_frequency).unwrap();
+    let workers = Workers::new(peers, image_check_frequency).unwrap();
 
-    for (worker_id, worker) in images.workers.iter().enumerate() {
+    for (worker_id, worker) in workers.workers.iter().enumerate() {
         info!("worker {} {:?}", worker_id, Arc::as_ptr(worker));
     }
-    let images_background = background_service("images", images);
-    let images = images_background.task();
+    let workers_background = background_service("workers", workers);
+    let workers = workers_background.task();
 
     let lb_maxconn = 1024;
-    let lb = LB::new(lb_maxconn, images);
+    let lb = LB::new(lb_maxconn, workers);
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
     lb_service.add_tcp("127.0.0.1:6188");
 
@@ -370,7 +369,7 @@ fn main() {
 
     my_server.add_service(lb_service);
     //my_server.add_service(upstreams_background);
-    my_server.add_service(images_background);
+    my_server.add_service(workers_background);
 
     my_server.run_forever();
 }

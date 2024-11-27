@@ -25,6 +25,7 @@ use perunner::{worker,create_runtime_spec};
 use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size};
 use peimage::PEImageMultiIndex;
 
+use peserver::api;
 use peserver::api::v1 as apiv1;
 use peserver::api::{ContentType,APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
 
@@ -54,12 +55,15 @@ struct HttpRunnerApp {
     pub kernel: OsString,
 }
 
-async fn read_full_body(session: &mut ServerSession) -> Result<Bytes, Box<pingora::Error>> {
+async fn read_full_body(session: &mut ServerSession, max_len: usize) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
     loop {
         match session.read_request_body().await? {
             Some(bytes) => {
                 acc.extend_from_slice(&bytes);
+                if acc.len() > max_len {
+                    return Err(pingora::Error::new(pingora::ErrorType::ReadError).into());
+                }
             }
             None => {
                 break;
@@ -166,7 +170,7 @@ impl HttpRunnerApp {
         // TODO this is a timeout on the reading the entire body, session.read_timeout
         let read_timeout = Duration::from_millis(2000);
         // TODO ideally could read this in two parts to send the rest to the file
-        let body = timeout(read_timeout, read_full_body(session))
+        let body = timeout(read_timeout, read_full_body(session, api::MAX_BODY_SIZE))
             .await
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::ReadError)?;
@@ -229,7 +233,6 @@ impl HttpRunnerApp {
         () = self.pool.sender()
             .try_send((worker_input, resp_sender))
             .map_err(|_| {
-                error!("todo, queue was full, we probably shouldn't have gotten this work item, or maybe somehow interface better with the sync thread pool so we can wait");
                 Error::QueueFull
             })?;
 
