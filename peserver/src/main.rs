@@ -11,9 +11,8 @@ use pingora::apps::http_app::ServeHttp;
 use pingora::protocols::http::ServerSession;
 
 use async_trait::async_trait;
-use bytes::{Bytes,BytesMut};
 use http;
-use http::{Method, Response, StatusCode};
+use http::{Method,Response,StatusCode,header};
 use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
@@ -28,8 +27,9 @@ use peimage::PEImageMultiIndex;
 use peserver::api;
 use peserver::api::v1 as apiv1;
 use peserver::api::{ContentType,APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
+use peserver::util::{read_full_server_request_body};
 
-#[derive(Debug)]
+#[derive(Debug,Serialize,Clone)]
 enum Error {
     ReadTimeout,
     ReadError,
@@ -47,30 +47,17 @@ enum Error {
     OciSpec,
 }
 
+#[derive(Serialize)]
+struct ErrorBody {
+    error: Error,
+}
+
 struct HttpRunnerApp {
     pub pool: worker::asynk::Pool,
     pub index: PEImageMultiIndex,
     pub cloud_hypervisor: OsString,
     pub initramfs: OsString,
     pub kernel: OsString,
-}
-
-async fn read_full_body(session: &mut ServerSession, max_len: usize) -> Result<Bytes, Box<pingora::Error>> {
-    let mut acc = BytesMut::with_capacity(4096);
-    loop {
-        match session.read_request_body().await? {
-            Some(bytes) => {
-                acc.extend_from_slice(&bytes);
-                if acc.len() > max_len {
-                    return Err(pingora::Error::new(pingora::ErrorType::ReadError).into());
-                }
-            }
-            None => {
-                break;
-            }
-        }
-    }
-    Ok(acc.freeze())
 }
 
 fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
@@ -140,7 +127,8 @@ impl Into<StatusCode> for Error {
 // TODO use lazy static for most cmmon responses
 impl Into<Response<Vec<u8>>> for Error {
     fn into(self: Error) -> Response<Vec<u8>> {
-        response_no_body(self.into())
+        // response_no_body(self.into())
+        response_json(self.clone().into(), ErrorBody{ error: self}).unwrap()
     }
 }
 
@@ -156,7 +144,7 @@ impl HttpRunnerApp {
 
         let content_type = session.req_header()
             .headers
-            .get("Content-Type")
+            .get(header::CONTENT_TYPE)
             .and_then(|x| x.to_str().ok())
             .and_then(|x| x.try_into().ok())
             .ok_or(Error::BadContentType)?;
@@ -170,7 +158,7 @@ impl HttpRunnerApp {
         // TODO this is a timeout on the reading the entire body, session.read_timeout
         let read_timeout = Duration::from_millis(2000);
         // TODO ideally could read this in two parts to send the rest to the file
-        let body = timeout(read_timeout, read_full_body(session, api::MAX_BODY_SIZE))
+        let body = timeout(read_timeout, read_full_server_request_body(session, api::MAX_BODY_SIZE))
             .await
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::ReadError)?;

@@ -12,7 +12,7 @@ use peserver::api;
 use peserver::api::v1 as apiv1;
 use pearchive::{PackMemToVec,PackMemVisitor,UnpackVisitor,unpack_visitor};
 
-use peserver::util::read_full_body;
+use peserver::util::read_full_client_response_body;
 
 fn escape_dump(input: &[u8]) {
     let mut output = Vec::<u8>::with_capacity(1024);
@@ -59,6 +59,14 @@ struct Args {
     #[arg(long)]
     gzip: bool,
 
+    #[arg(long)]
+    body_too_big: bool,
+
+    #[arg(long)]
+    header_too_many: bool,
+    #[arg(long)]
+    header_too_big: bool,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -92,6 +100,10 @@ async fn main() {
         buf.extend_from_slice(&json);
         let mut v = PackMemToVec::with_vec(buf);
         v.file("file1", b"data1").unwrap();
+        if args.body_too_big {
+            let too_much_data = vec![0; 65536];
+            v.file("file2", &too_much_data).unwrap();
+        }
         v.into_vec().unwrap()
     };
 
@@ -103,6 +115,17 @@ async fn main() {
         if args.gzip {
             x.insert_header("Accept-Encoding", "gzip").unwrap();
         }
+        if args.header_too_many {
+            for i in 0..1000 {
+                x.insert_header(format!("my-header-{}", i), "blah-blah-blah").unwrap();
+            }
+        }
+        if args.header_too_big {
+            // okay doesn't seem like there is an upper limit yet...
+            let mut s = String::with_capacity(4096 * 16);
+            for _ in 0..s.capacity() { s.push('x'); }
+            x.insert_header("my-big-header", s).unwrap();
+        }
         Box::new(x)
     };
 
@@ -113,8 +136,9 @@ async fn main() {
     let _ = session.write_body(&buf).await.unwrap();
     let _ = session.read_response().await.unwrap();
     let res_parts: &http::response::Parts = session.resp_header().unwrap();
+    let status = res_parts.status;
 
-    println!("{} {:?}", res_parts.status, res_parts.version);
+    println!("{} {:?}", status, res_parts.version);
     print_headers("< ", &res_parts.headers);
 
     if args.gzip && res_parts.headers.get("Content-encoding").and_then(|x| x.to_str().ok()) != Some("gzip") {
@@ -122,13 +146,17 @@ async fn main() {
     }
 
     let body = {
-        let body = read_full_body(&mut session).await.unwrap();
+        let body = read_full_client_response_body(&mut session).await.unwrap();
         if args.gzip {
             Bytes::from(zcat(&body).unwrap())
         } else {
             body
         }
     };
+    if status != 200 {
+        println!("ERROR {:?}", body);
+        return;
+    }
     let (response, archive) = apiv1::runi::parse_response(&body).unwrap();
     println!("api  response {:#?}", response);
 

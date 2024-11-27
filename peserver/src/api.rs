@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use pingora::http::ResponseHeader;
-use http::header;
 
 pub const APPLICATION_JSON: &str = "application/json";
 pub const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
@@ -145,11 +143,4 @@ pub mod v1 {
             }
         }
     }
-}
-
-pub fn make_json_response_header(len: usize) -> ResponseHeader {
-    let mut x = ResponseHeader::build(200, Some(2)).unwrap();
-    x.insert_header(header::CONTENT_TYPE, "application/json").unwrap();
-    x.insert_header(header::CONTENT_LENGTH, len).unwrap();
-    x
 }

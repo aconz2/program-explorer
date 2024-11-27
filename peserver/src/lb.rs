@@ -12,11 +12,12 @@ use pingora::Result;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::http::{ResponseHeader};
 use pingora_limits::rate::Rate;
+use pingora::protocols::http::v1::common::header_value_content_length;
 
 use async_trait::async_trait;
 use env_logger;
 use bytes::Bytes;
-use http::{Method,StatusCode};
+use http::{Method,StatusCode,header};
 use arc_swap::ArcSwap;
 use log::{error,info};
 use serde_json;
@@ -26,7 +27,7 @@ use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 use peserver::api::v1 as apiv1;
 use peserver::api;
 
-use peserver::util::{read_full_body,session_ip_id};
+use peserver::util::{read_full_client_response_body,session_ip_id,make_json_response_header};
 use peserver::util::premade_errors;
 
 // pingora has been mostly fine, I don't know why the caching logic is so baked into their proxy
@@ -58,7 +59,7 @@ impl ImageData {
     fn from_parts(image_map: BTreeMap<String, WorkerId>,
                   premade_json: Bytes,
                   ) -> Self {
-        let premade_json_response_header = api::make_json_response_header(premade_json.len());
+        let premade_json_response_header = make_json_response_header(premade_json.len());
         Self { image_map, premade_json, premade_json_response_header }
     }
     fn new() -> Self {
@@ -141,7 +142,7 @@ impl Workers {
             return Err(pingora::Error::new(pingora::ErrorType::InternalError));
         }
 
-        let body = read_full_body(&mut session).await?;
+        let body = read_full_client_response_body(&mut session).await?;
         let resp: apiv1::images::Response = serde_json::from_slice(&body)
             .map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))?;
         let n_images = resp.images.len();
@@ -177,7 +178,7 @@ impl BackgroundService for Workers {
 }
 
 pub struct LB {
-    images: Arc<Workers>,
+    workers: Arc<Workers>,
     max_conn: Arc<Semaphore>,
 }
 
@@ -189,30 +190,37 @@ pub struct LBCtxInner {
     worker_permit: OwnedSemaphorePermit,
 }
 
-pub struct LBCtx{
+pub struct LBCtx {
     inner: Option<LBCtxInner>,
-    body_len: usize,
+    //body_len: usize
 }
 
 impl LBCtx {
-    fn new() -> Self { Self{ inner: None, body_len: 0 } }
+    //fn new() -> Self { Self{ inner: None, body_len: 0 } }
+    fn new() -> Self { Self{ inner: None } }
     fn is_some(&self) -> bool { self.inner.is_some() }
     fn peer(&self) -> Option<HttpPeer> { self.inner.as_ref().map(|inner| inner.worker.peer.clone()) }
     fn replace(&mut self, inner: LBCtxInner) {
         assert!(self.inner.is_none());
         self.inner.replace(inner.into());
     }
+    //fn add_body_len(&mut self, len: Option<usize>) -> usize {
+    //    if let Some(l) = len {
+    //        self.body_len += l;
+    //    }
+    //    self.body_len
+    //}
 }
 
 impl LB {
-    fn new(max_conn: usize, images: Arc<Workers>) -> Self {
-        Self { images, max_conn: Semaphore::new(max_conn).into() }
+    fn new(max_conn: usize, workers: Arc<Workers>) -> Self {
+        Self { workers, max_conn: Semaphore::new(max_conn).into() }
     }
 
     async fn apiv1_images(&self, session: &mut Session, _ctx: &mut LBCtx) -> Result<()> {
         session.set_write_timeout(api::DOWNSTREAM_WRITE_TIMEOUT);
         let downstream_session = &mut session.downstream_session;
-        let data = self.images.data.load();
+        let data = self.workers.data.load();
         // NOTE these skip any filter modules
         downstream_session.write_response_header_ref(&data.premade_json_response_header).await?;
         downstream_session.write_response_body(data.premade_json.clone(), true).await?;
@@ -222,13 +230,26 @@ impl LB {
     // Ok(true) means request done, ie the image was missed
     async fn apiv1_runi(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
+
+        // if there is no content-length (maybe it is chunked), the worker server will throw an
+        // error and that will get propagated back; though it will just be a 500, not 413
+        match header_value_content_length(req_parts.headers.get(header::CONTENT_LENGTH)) {
+            Some(l) if l > api::MAX_BODY_SIZE => {
+                session.downstream_session
+                    .write_response_header_ref(&*premade_errors::PAYLOAD_TOO_LARGE)
+                    .await?;
+                return Err(pingora::Error::new(pingora::ErrorType::ReadError).into())
+            }
+            _ => {}
+        }
+
         let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path());
 
-        let image_map = &self.images.data.load().image_map;
+        let image_map = &self.workers.data.load().image_map;
 
         let worker = uri_path_image
             .and_then(|image_id| image_map.get(image_id).map(|x| *x))
-            .and_then(|worker_id| self.images.get_worker(worker_id));
+            .and_then(|worker_id| self.workers.get_worker(worker_id));
 
         let worker = match worker {
             Some(worker) => worker,
@@ -316,6 +337,14 @@ impl ProxyHttp for LB {
         };
         ret
     }
+
+    //async fn request_body_filter(&self, session: &mut Session, body: &mut Option<Bytes>, _end_of_stream: bool, ctx: &mut LBCtx) -> Result<()> {
+    //    if ctx.add_body_len(body.as_ref().map(|b| b.len())) > api::MAX_BODY_SIZE {
+    //        info!("content length too big, terminating");
+    //        session.shutdown().await;
+    //    }
+    //    Ok(())
+    //}
 
     async fn proxy_upstream_filter(&self, _session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         Ok(ctx.is_some())
