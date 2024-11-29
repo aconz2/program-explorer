@@ -231,8 +231,9 @@ impl LB {
     async fn apiv1_runi(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
-        // if there is no content-length (maybe it is chunked), the worker server will throw an
-        // error and that will get propagated back; though it will just be a 500, not 413
+        // if there is no content-length (maybe it is chunked), and the body is too large
+        // the worker server will throw an error and that will get propagated back; though it
+        // will just be a 500, not 413
         match header_value_content_length(req_parts.headers.get(header::CONTENT_LENGTH)) {
             Some(l) if l > api::MAX_BODY_SIZE => {
                 session.downstream_session
@@ -346,11 +347,14 @@ impl ProxyHttp for LB {
     //    Ok(())
     //}
 
+    // is it okay to send request upstream?
     async fn proxy_upstream_filter(&self, _session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         Ok(ctx.is_some())
     }
 
+    // what peer should we send the request to?
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut LBCtx) -> Result<Box<HttpPeer>> {
+        // should be Some because proxy_upstream_filter should filter those which are None
         ctx.peer()
            .map(Box::new)
            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))

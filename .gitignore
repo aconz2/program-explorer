@@ -7,4 +7,4 @@ pearchive/target
 waitid_timeout/target
 peimage/target
 peserver/target
-peserver/peserver
+pefrontend/target

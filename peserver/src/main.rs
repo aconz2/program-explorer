@@ -17,7 +17,6 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
-use log::{error};
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -103,7 +102,6 @@ fn response_pearchivev1(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> 
 
 impl Into<StatusCode> for Error {
     fn into(self: Error) -> StatusCode {
-        error!("error is {:?}", self);
         use Error::*;
         match self {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -128,7 +126,7 @@ impl Into<StatusCode> for Error {
 impl Into<Response<Vec<u8>>> for Error {
     fn into(self: Error) -> Response<Vec<u8>> {
         // response_no_body(self.into())
-        response_json(self.clone().into(), ErrorBody{ error: self}).unwrap()
+        response_json(self.clone().into(), ErrorBody{ error: self }).unwrap()
     }
 }
 
