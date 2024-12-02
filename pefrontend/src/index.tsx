@@ -36,88 +36,11 @@ type File = {
     data: string,
 };
 
-const images = signal({});
-const chosenImage = signal(null);
-
-function getOrCeateFile(path, text) {
-    let uri = monaco.Uri.file(path);
-    return monaco.editor.getModel(uri) || monaco.editor.createModel(text, undefined, uri);
-}
-
-class Editor extends Component {
-    ref = createRef();
-    editor: any;
-    state = {
-        models: [], // model.ITextModel[]
-    };
-
-    constructor({initialFiles}) {
-        super();
-        this.state.models = initialFiles.map(({name, data}) => getOrCeateFile(name, data));
-    }
-
-    componentDidMount() {
-        this.editor = monaco.editor.create(this.ref.current, {
-            placeholder: 'hello enter your text here',
-        });
-        if (this.state.models) {
-            this.editFile(this.state.models[0].uri);
-        }
-    }
-
-    editFile(uri) {
-        this.editor.updateOptions({placeholder: ''});
-        this.editor.setModel(monaco.editor.getModel(uri));
-    }
-
-    // this.props, this.state
-    render({}, {models}) {
-        let tabs = models.map((model) => {
-            return (<button key={model.id} onClick={() => this.editFile(model.uri)}>{model.uri.path}</button>);
-        });
-        return <div>
-            {tabs}
-            <div class="editorContainer" ref={this.ref}></div>
-        </div>;
-    }
-}
-
-class ImagePicker extends Component {
-    render() {
-        const curImages = images.value;
-        console.log('rendering imagePicker', curImages);
-        let options = curImages.images?.map(({info,links}) => {
-            let name = `${info.registry}/${info.repository}/${info.tag}`;
-            return <option key={links.runi} value={links.runi}>{name}</option>;
-        });
-        console.log('rendering imagePicker', options);
-        return (
-            <select onChange={(event) => { chosenImage.value = event.currentTarget.value; }}>
-            {options}
-            </select>
-        );
-    }
-}
-
-class App extends Component {
-    constructor({initialFiles}) {
-        super();
-    }
-
-    // this.props, this.state
-    render({initialFiles}, {}) {
-        return <div>
-          <ImagePicker />
-          <Editor
-            initialFiles={initialFiles}
-          />
-        </div>
-    }
-}
-
-const files: File[] = [
+const PLACEHOLDER_DIRECTIONS = `Run something to see the output...
+`;
+const initialFiles: File[] = [
   {
-    name: 'script.js',
+    name: 'f1/script.js',
     data: 'let a = 10;',
   },
   {
@@ -130,18 +53,218 @@ const files: File[] = [
   },
 ];
 
+class ModelStore {
+    models = signal([]); // monaco models
+    prefix: string;
+
+    constructor(prefix) {
+        this.prefix = prefix || '/';
+        // on reload we populate from the global list of models
+        this.models.value = monaco.editor.getModels().filter(m => m.uri.path.startsWith(prefix));
+    }
+
+    getOrCreateModel(name, text) {
+        let m = this.getModel(name);
+        if (m) {
+            m.setValue(text);
+            return m;
+        }
+        let uri = monaco.Uri.file(this.prefix + name);
+        m = monaco.editor.createModel(text, undefined, uri);
+        this.models.value = [...this.models.value, m];
+        return m;
+    }
+
+    getModel(name) {
+        let uri = monaco.Uri.file(this.prefix + name);
+        return monaco.editor.getModel(uri);
+    }
+
+    clear() {
+        for (let model in this.models.value) {
+            model.dispose();
+        }
+        this.models.value = [];
+    }
+
+    deleteModel(name) {
+        let model = this.getModel(name);
+        if (m) {
+            this.models.value = this.models.value.filter(m => m !== model);
+            model.dispose();
+        } else {
+            console.warn(`tried deleting model on ${this.prefix}/${name}`);
+        }
+    }
+
+    modelName(model) {
+        return model.uri.path.slice(this.prefix.length);
+    }
+}
+
+// signals.
+// is this good or terrible? I don't know
+const s_images = signal({});
+const s_chosenImage = signal(null);
+const s_entrypoint = signal('');
+const s_cmd = signal('');
+const inputModelStore = new ModelStore("/input/")
+const outputModelStore = new ModelStore("/output/")
+
+if (inputModelStore.models.value.length === 0) {
+    for (let f of initialFiles) {
+        inputModelStore.getOrCreateModel(f.name, f.data);
+    }
+}
+
+class Editor extends Component {
+    ref = createRef();
+    editor: any;
+    store: ModelStore;
+    readOnly: bool;
+
+    constructor({readOnly,placeholder,store}) {
+        super();
+        this.placeholder = placeholder ?? null;
+        this.readOnly = readOnly ?? false;
+        this.store = store;
+        console.log(this.store.prefix, this.readOnly)
+    }
+
+    componentDidMount() {
+        this.editor = monaco.editor.create(this.ref.current, {
+            placeholder: this.placeholder,
+            readOnly: this.readOnly,
+        });
+        if (this.store.models.value.length > 0) {
+            this.editFile(this.store.models.value[0].uri);
+        }
+    }
+
+    editFile(uri) {
+        this.editor.updateOptions({placeholder: ''});
+        this.editor.setModel(monaco.editor.getModel(uri));
+    }
+
+    // this.props, this.state
+    render() {
+        let models = this.store.models.value;
+        let tabs = models.map((model) => {
+            return (
+                <button key={model.id} onClick={() => this.editFile(model.uri)}>
+                    {this.store.modelName(model)}
+                </button>);
+        });
+        return (
+            <div class="editorContainer">
+                {tabs}
+                <div class="monacoContainer" ref={this.ref}></div>
+            </div>
+        );
+    }
+}
+
+class ImageForm extends Component {
+    render() {
+        let imageOptions = s_images.value.images?.map(({info,links}) => {
+            let name = `${info.registry}/${info.repository}/${info.tag}`;
+            return <option key={links.runi} value={links.runi}>{name}</option>;
+        });
+        let stdinOptions = inputModelStore.models.value.map(m => {
+            let name = inputModelStore.modelName(m);
+            return <option key={m.uri.path} value={name}>{name}</option>;
+        });
+        //let entrypoint = s_chosenImage.value?.config.config.Entrypoint || 'Entrypoint';
+        //let cmd = s_chosenImage.value?.config.config.cmd || 'Cmd';
+
+        let entrypoint = 'Entrypoint';
+        let cmd = 'Cmd';
+        return (
+            <>
+            <select name="image" onChange={(event) => { s_chosenImage.value = event.currentTarget.value; }}>
+                {imageOptions}
+            </select>
+            <input type="text" name="entrypoint" placeholder={entrypoint} />
+            <input type="text" name="cmd" placeholder={cmd} />
+            <select name="stdin" onChange={(event) => { s_chosenImage.value = event.currentTarget.value; }}>
+                <option value="">/dev/null</option>
+                {stdinOptions}
+            </select>
+            </>
+        );
+    }
+}
+
+class App extends Component {
+    constructor({initialFiles}) {
+        super();
+    }
+
+    async run(event) {
+        event.preventDefault();
+        console.log('hi this should run');
+        // okay I need to get the current image, entrypoint, cmd, stdin
+        // the image should already be the uri
+
+        if (s_chosenImage.value !== null) {
+            let data = {};
+            // TODO get entrypoint and cmd from child
+            data.cmd = ["sh", "-c", "echo hi"];
+            let req = new Request(window.location.origin + s_chosenImage.value, {
+                method: 'POST',
+                body: JSON.stringify(data),
+                headers: {
+                    'Content-type': 'application/json',
+                }
+            });
+            const response = await fetch(req);
+            if (response.ok) {
+                const json = await response.json();
+                let m = outputModelStore.getOrCreateModel('output.json', JSON.stringify(json, null, '  '));
+                outputEditor.editFile(m.uri);
+            } else {
+                console.error(response);
+            }
+        } else {
+            console.warn('cannot execute without a chosen image');
+        }
+    }
+
+    // this.props, this.state
+    render({}, {}) {
+        return <div>
+            <form>
+                <ImageForm />
+                <button onClick={this.run}>Run</button>
+            </form>
+
+            <div id="editorSideBySide">
+                <Editor
+                    store={inputModelStore}
+                />
+                <Editor
+                    store={outputModelStore}
+                    placeholder={PLACEHOLDER_DIRECTIONS}
+                    readOnly={true}
+                />
+            </div>
+        </div>
+    }
+}
 
 // TODO something about the args going in not being compat with the Component type signature
-render(<App initialFiles={files} />, document.getElementById('app'));
+render(<App/>, document.getElementById('app'));
 
 const response = await fetch(window.location.origin + '/api/v1/images');
 console.log(response);
 if (response.ok) {
     const json = await response.json();
-    images.value = json;
-    console.log(json);
+    s_images.value = json;
+    if (json.images?.length > 0) {
+        s_chosenImage.value = json.images[0].links.runi;
+    }
 } else {
-    console.log('oh no error');
+    console.error(response);
 }
 //<Editor
 //  height="80vh"
@@ -150,3 +273,8 @@ if (response.ok) {
 //  defaultLanguage={file.language}
 //  defaultValue={file.value}
 ///>
+//function getOrCeateFile(path, text) {
+//    let uri = monaco.Uri.file(path);
+//    return monaco.editor.getModel(uri) || monaco.editor.createModel(text, undefined, uri);
+//}
+
