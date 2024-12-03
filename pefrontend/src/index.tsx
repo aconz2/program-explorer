@@ -1,5 +1,5 @@
-import { render, createRef, Component } from 'preact';
-import { signal, Signal } from '@preact/signals';
+import { render, createRef, Component, RefObject } from 'preact';
+//import { signal, Signal } from '@preact/signals';
 import { EditorState } from '@codemirror/state';
 import { EditorView, basicSetup } from 'codemirror';
 
@@ -11,6 +11,39 @@ enum FileKind {
 
 type FileId = string;
 type ImageId = string;
+
+namespace Api {
+    export type Image = {
+        links: {
+            runi: string,
+            upstream: string,
+        },
+        info: {
+            digest: string,
+            repository: string,
+            registry: string,
+            tag: string,
+        },
+        config: {
+            created: string,
+            architecture: string,
+            os: string,
+            config: {
+                Cmd?: string[],
+                Entrypoint?: string[],
+                Env?: string[],
+            },
+            rootfs: {type: string, diff_ids: string[]}[],
+            history: any, // todo
+        },
+    };
+}
+
+type AppState = {
+    images: Map<ImageId, Api.Image>,
+    selectedImage?: ImageId,
+    stdin?: FileId,
+}
 
 class File {
     static _id = 0;
@@ -47,32 +80,6 @@ class File {
     }
 };
 
-namespace Api {
-    export type Image = {
-        links: {
-            runi: string,
-            upstream: string,
-        },
-        info: {
-            digest: string,
-            repository: string,
-            registry: string,
-            tag: string,
-        },
-        config: {
-            created: string,
-            architecture: string,
-            os: string,
-            config: {
-                Cmd?: string[],
-                Entrypoint?: string[],
-                Env?: string[],
-            },
-            rootfs: {type: string, diff_ids: string[]}[],
-            history: any, // todo
-        },
-    };
-}
 
 class FileStore {
     files: Map<FileId, File> = new Map();
@@ -85,11 +92,21 @@ class FileStore {
 
     addTextFile(path, data): FileStore {
         let f = File.makeTextFile(path, data);
-        console.log('before', this.files);
         let files = new Map(this.files);
         files.set(f.id, f);
-        console.log('after', this.files);
-        return new FileStore(files, this.active);
+        let active = this.active ?? f.id;
+        return new FileStore(files, active);
+    }
+
+    addTextFiles(inputs: {path: string, data: string}[]): FileStore {
+        if (inputs.length === 0) return this;
+        let fs = inputs.map(({path,data}) => File.makeTextFile(path, data));
+        let files = new Map(this.files);
+        for (let f of fs) {
+            files.set(f.id, f);
+        }
+        let active = this.active ?? files.keys().next().value;
+        return new FileStore(files, active);
     }
 
     setActive(file: File): FileStore {
@@ -97,13 +114,6 @@ class FileStore {
         this.active = file.id;
         return this;
     }
-}
-
-type AppState = {
-    images: Api.Image[],
-    imagesMap: Map<ImageId, Api.Image>,
-    stdin?: FileId,
-    selectedImage?: ImageId,
 }
 
 //const initialFiles: File[] = [
@@ -143,10 +153,16 @@ class Editor extends Component {
         });
     }
 
-    addTextFileAndActivate(path, data) {
+    activate(path: string | number) {
+    }
+
+    addTextFile(path, data) {
         let store = this.state.store.addTextFile(path, data);
-        store.active = store.files.keys().next().value;
-        console.log(store);
+        this.setState({store: store});
+    }
+
+    addTextFiles(files: {path: string, data: string}[]) {
+        let store = this.state.store.addTextFiles(files);
         this.setState({store: store});
     }
 
@@ -157,7 +173,7 @@ class Editor extends Component {
     // this.props, this.state
     render({placeholder,readOnly}, {store}) {
         let tabs = Array.from(store.files.values().map(file => {
-            let className = 'tab';
+            let className = 'tab mono';
             if (store.active == file.id) {
                 className += ' selected';
             }
@@ -218,14 +234,13 @@ class Editor extends Component {
 
 class App extends Component {
     state: AppState;
-    inputEditor = createRef();
-    outputEditor = createRef();
+    inputEditor: RefObject<Editor> = createRef();
+    outputEditor: RefObject<Editor> = createRef();
 
     constructor() {
         super();
         this.state = {
-            images: [],
-            imagesMap: new Map(),
+            images: new Map(),
             selectedImage: null,
             stdin: null,
         };
@@ -238,11 +253,12 @@ class App extends Component {
 
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
-        this.inputEditor.current.addTextFileAndActivate('test.sh', 'echo "hello world"');
-        setTimeout(
-            () => {
-                this.inputEditor.current.addTextFileAndActivate('test2.sh', 'echo "boooo"');
-            }, 1000);
+        this.inputEditor.current.addTextFiles([
+            {path:'test.sh', data:'echo "hello world"\ncat data.txt > output/data.txt'},
+            {path:'data.txt', data:'hi this is some data'},
+        ]);
+
+        this.fetchImages();
     }
 
     async run(event) {
@@ -275,12 +291,64 @@ class App extends Component {
         //}
     }
 
+    async fetchImages() {
+        let response = await fetch(window.location.origin + '/api/v1/images');
+        if (response.ok) {
+            let json = await response.json();
+            if (json.images?.length > 0) {
+                let images = new Map(json.images.map(image => [image.info.digest, image]));
+                this.setState({
+                    images: images,
+                    selectedImage: images.keys().next().value,
+                })
+            }
+        } else {
+            console.error(response);
+        }
+    }
+
+    onImageSelect(event) {
+        this.setState({selectedImage: event.target.value});
+    }
+
     // this.props, this.state
-    render({}, {}) {
+    render({}, {images,selectedImage}) {
+        let imageOptions = Array.from(images.values().map(({info,links}) => {
+            let name = `${info.registry}/${info.repository}/${info.tag}`;
+            return <option key={info.digest} value={links.runi}>{name}</option>;
+
+        }));
+
+        let imageDetails = [];
+        if (selectedImage) {
+            let image = images.get(selectedImage);
+            imageDetails = (
+                <details>
+                    <summary>About this image</summary>
+                    <p>These are a subset of properties defined for this image. See <a href="https://github.com/opencontainers/image-spec/blob/main/config.md#properties" nofollow>the OCI image spec</a> for more information.</p>
+                    <dl>
+                        <dt>Env</dt>
+                        <dd class="mono">{JSON.stringify(image.config.config.Env ?? [])}</dd>
+                        <dt>Entrypoint</dt>
+                        <dd class="mono">{JSON.stringify(image.config.config.Entrypoint ?? [])}</dd>
+                        <dt>Cmd</dt>
+                        <dd class="mono">{JSON.stringify(image.config.config.Cmd ?? [])}</dd>
+                    </dl>
+
+                </details>
+            );
+        }
         return <div>
             <form>
+                <select onChange={e => this.onImageSelect(e)}>
+                    {imageOptions}
+                </select>
                 <input className="mono" type="text" placeholder="env $entrypoint $cmd < /dev/null" />
-                <button onClick={this.run}>Run</button>
+                <button className="mono" onClick={this.run}>Run</button>
+
+                {imageDetails}
+
+
             </form>
 
             <div id="editorSideBySide">
