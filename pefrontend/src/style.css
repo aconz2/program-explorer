@@ -1,4 +1,4 @@
-.monacoContainer {
+.cmContainer {
     height: 100vh;
 }
 
@@ -7,6 +7,14 @@
     width: 50%;
 }
 
+.editorContainer .tab.selected {
+    font-weight: bold;
+}
+
 #editorSideBySide {
     display: flex;
+}
+
+.mono {
+    font-family: monospace;
 }
