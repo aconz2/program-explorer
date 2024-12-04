@@ -2,17 +2,27 @@ import { render, createRef, Component, RefObject } from 'preact';
 //import { signal, Signal } from '@preact/signals';
 import { EditorState } from '@codemirror/state';
 import { EditorView, basicSetup } from 'codemirror';
+import * as pearchive from './pearchive';
 
 import './style.css';
 
 enum FileKind {
     Editor,
+    Blob,
 }
 
 type FileId = string;
 type ImageId = string;
 
 namespace Api {
+    export namespace Runi {
+        export type Request = {
+            stdin?: string,
+            entrypoint?: string[],
+            cmd?: string[],
+        }
+    }
+
     export type Image = {
         links: {
             runi: string,
@@ -42,7 +52,7 @@ namespace Api {
 type AppState = {
     images: Map<ImageId, Api.Image>,
     selectedImage?: ImageId,
-    stdin?: FileId,
+    cmd?: string,
 }
 
 class File {
@@ -52,7 +62,7 @@ class File {
     path: string;
     kind: FileKind;
     editorState?: EditorState;
-    data: string; // TODO or arraybuffer or whatever
+    data: string|ArrayBuffer;
 
     static _next_id(): number {
         File._id += 1;
@@ -71,8 +81,12 @@ class File {
         }
     }
 
-    static makeTextFile(path, data): File {
-        return new File(path, FileKind.Editor, data);
+    static makeFile(path, data: string|ArrayBuffer): File {
+        if (typeof data === 'string') {
+            return new File(path, FileKind.Editor, data);
+        } else {
+            return new File(path, FileKind.Blob, data);
+        }
     }
 
     displayName() {
@@ -80,6 +94,23 @@ class File {
     }
 };
 
+const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
+
+// TODO this just unconditionally overrides Entrypoint and Cmd with a string split of cmd
+function computeFullCommand(image: Api.Image, userCmd: string): {entrypoint?: string[], cmd?: string[]} {
+    // let env = image.config.config.Env ?? [];
+    let parts = userCmd.split(/\s+/); // TODO handle quotes
+    // todo handle env
+    //if (parts[0] === '$entrypoint') {
+    //    acc.extend(image.config.config.Entrypoint ?? []);
+    //    parts = parts.slice(1);
+    //}
+    //if (parts[0] === '$cmd') {
+    //    acc.extend(image.config.config.Cmd ?? []);
+    //    parts = parts.slice(1);
+    //}
+    return {entrypoint: [], cmd: parts};
+}
 
 class FileStore {
     files: Map<FileId, File> = new Map();
@@ -90,17 +121,17 @@ class FileStore {
         this.active = active ?? null;
     }
 
-    addTextFile(path, data): FileStore {
-        let f = File.makeTextFile(path, data);
+    addTextFile(path: string, data: string|ArrayBuffer): FileStore {
+        let f = File.makeFile(path, data);
         let files = new Map(this.files);
         files.set(f.id, f);
         let active = this.active ?? f.id;
         return new FileStore(files, active);
     }
 
-    addTextFiles(inputs: {path: string, data: string}[]): FileStore {
+    addFiles(inputs: {path: string, data: string|ArrayBuffer}[]): FileStore {
         if (inputs.length === 0) return this;
-        let fs = inputs.map(({path,data}) => File.makeTextFile(path, data));
+        let fs = inputs.map(({path,data}) => File.makeFile(path, data));
         let files = new Map(this.files);
         for (let f of fs) {
             files.set(f.id, f);
@@ -116,15 +147,6 @@ class FileStore {
     }
 }
 
-//const initialFiles: File[] = [
-//  {
-//    name: 'main.sh',
-//    data: 'echo "hello world"',
-//  },
-//];
-
-// signals.
-// is this good or terrible? I don't know
 class Editor extends Component {
     ref = createRef();
     editor?: EditorView;
@@ -153,16 +175,13 @@ class Editor extends Component {
         });
     }
 
-    activate(path: string | number) {
-    }
-
-    addTextFile(path, data) {
-        let store = this.state.store.addTextFile(path, data);
+    addFile(path: string, data: string|ArrayBuffer) {
+        let store = this.state.store.addFile(path, data);
         this.setState({store: store});
     }
 
-    addTextFiles(files: {path: string, data: string}[]) {
-        let store = this.state.store.addTextFiles(files);
+    addFiles(files: {path: string, data: string}[]) {
+        let store = this.state.store.addFiles(files);
         this.setState({store: store});
     }
 
@@ -200,95 +219,84 @@ class Editor extends Component {
     }
 }
 
-//class ImageForm extends Component {
-//    render() {
-//        //let imageOptions = s_images.value.images?.map(({info,links}) => {
-//        //    let name = `${info.registry}/${info.repository}/${info.tag}`;
-//        //    return <option key={links.runi} value={links.runi}>{name}</option>;
-//        //});
-//        //let stdinOptions = inputModelStore.models.value.map(m => {
-//        //    let name = inputModelStore.modelName(m);
-//        //    return <option key={m.uri.path} value={name}>{name}</option>;
-//        //});
-//        //let entrypoint = s_chosenImage.value?.config.config.Entrypoint || 'Entrypoint';
-//        //let cmd = s_chosenImage.value?.config.config.cmd || 'Cmd';
-//
-//        let entrypoint = 'Entrypoint';
-//        let cmd = 'Cmd';
-//        return (
-//            <>
-//            <select name="image" onChange={(event) => { s_chosenImage.value = event.currentTarget.value; }}>
-//                {imageOptions}
-//            </select>
-//            <input type="text" name="entrypoint" placeholder={entrypoint} />
-//            <input type="text" name="cmd" placeholder={cmd} />
-//            <select name="stdin" onChange={(event) => { s_chosenImage.value = event.currentTarget.value; }}>
-//                <option value="">/dev/null</option>
-//                {stdinOptions}
-//            </select>
-//            </>
-//        );
-//    }
-//}
-
-
 class App extends Component {
-    state: AppState;
     inputEditor: RefObject<Editor> = createRef();
     outputEditor: RefObject<Editor> = createRef();
-
-    constructor() {
-        super();
-        this.state = {
-            images: new Map(),
-            selectedImage: null,
-            stdin: null,
-        };
-
-        //this.inputEditor.addTextFileAndActivate('test.sh', 'echo "hello world"');
-        //let inputs = this.state.inputs.addTextFile('test.sh', 'echo "hello world"');
-        //inputs.active = inputs.files.keys().next().value;
-        //this.setState({inputs: inputs});
-    }
+    state: AppState = {
+        images: new Map(),
+        selectedImage: null,
+        cmd: null,
+    };
 
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
-        this.inputEditor.current.addTextFiles([
+        this.inputEditor.current.addFiles([
             {path:'test.sh', data:'echo "hello world"\ncat data.txt > output/data.txt'},
-            {path:'data.txt', data:'hi this is some data'},
+            {path:'blob', data:Uint8Array.from('AAAAAAAAAAAAAAAAAAAAA', (x) => x.charCodeAt(0))},
+            //{path:'data.txt', data:'hi this is some data'},
+            //{path:'f1/data.txt', data:'hi this is some data'},
+            //{path:'f1/f2/data.txt', data:'hi this is some data'},
+            //{path:'f2/data.txt', data:'hi this is some data'},
         ]);
+        this.setState({cmd: 'sh test.sh'});
 
         this.fetchImages();
+
+        setTimeout(() => {
+        }, 100);
     }
 
     async run(event) {
         event.preventDefault();
-        //console.log('hi this should run');
-        //// okay I need to get the current image, entrypoint, cmd, stdin
-        //// the image should already be the uri
-        //
-        //if (s_chosenImage.value !== null) {
-        //    let data = {};
-        //    // TODO get entrypoint and cmd from child
-        //    data.cmd = ["sh", "-c", "echo hi"];
-        //    let req = new Request(window.location.origin + s_chosenImage.value, {
-        //        method: 'POST',
-        //        body: JSON.stringify(data),
-        //        headers: {
-        //            'Content-type': 'application/json',
-        //        }
-        //    });
-        //    const response = await fetch(req);
-        //    if (response.ok) {
-        //        const json = await response.json();
-        //        let m = outputModelStore.getOrCreateModel('output.json', JSON.stringify(json, null, '  '));
-        //        outputEditor.editFile(m.uri);
-        //    } else {
-        //        console.error(response);
+
+        let {images,selectedImage} = this.state;
+        if (this.state.selectedImage === null) {
+            console.warn('cant run without an image');
+            return;
+        }
+        let image = images.get(selectedImage);
+
+        //let data = {};
+        //// TODO get entrypoint and cmd from child
+        //data.cmd = ["sh", "-c", "echo hi"];
+        //let req = new Request(window.location.origin + s_chosenImage.value, {
+        //    method: 'POST',
+        //    body: JSON.stringify(data),
+        //    headers: {
+        //        'Content-type': 'application/json',
         //    }
+        //});
+        //const response = await fetch(req);
+        //if (response.ok) {
+        //    const json = await response.json();
+        //    let m = outputModelStore.getOrCreateModel('output.json', JSON.stringify(json, null, '  '));
+        //    outputEditor.editFile(m.uri);
         //} else {
-        //    console.warn('cannot execute without a chosen image');
+        //    console.error(response);
         //}
+        //let x = pearchive.makeHiearachy(Array.from(this.inputEditor.current.state.store.files.values()));
+        //console.log(x);
+        let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
+        console.log(y);
+        let z = pearchive.combineRequestAndArchive({
+            'cmd': ['sh', 'echo hi'],
+        }, y);
+
+        let req = new Request(window.location.origin + image.links.runi, {
+            method: 'POST',
+            body: z,
+            headers: {
+                'Content-type': 'application/x.pe.archivev1',
+            }
+        });
+        const response = await fetch(req);
+        if (response.ok) {
+            // todo unpack the archive
+            console.log('yay');
+        } else {
+            console.error(response);
+        }
+
     }
 
     async fetchImages() {
@@ -311,21 +319,26 @@ class App extends Component {
         this.setState({selectedImage: event.target.value});
     }
 
-    // this.props, this.state
-    render({}, {images,selectedImage}) {
-        let imageOptions = Array.from(images.values().map(({info,links}) => {
-            let name = `${info.registry}/${info.repository}/${info.tag}`;
-            return <option key={info.digest} value={links.runi}>{name}</option>;
+    onCmdChange(event) {
+        this.setState({cmd: event.target.value});
+    }
 
+    // this.props, this.state
+    render({}, {images,selectedImage,cmd}) {
+        let imageOptions = Array.from(images.values().map(({info,links}) => {
+            let name = imageName(info);
+            return <option key={info.digest} value={links.runi}>{name}</option>;
         }));
 
         let imageDetails = [];
+        let fullCommand = '';
         if (selectedImage) {
             let image = images.get(selectedImage);
             imageDetails = (
                 <details>
                     <summary>About this image</summary>
-                    <p>These are a subset of properties defined for this image. See <a href="https://github.com/opencontainers/image-spec/blob/main/config.md#properties" nofollow>the OCI image spec</a> for more information.</p>
+                    <a href={image.links.upstream} rel="nofollow">{imageName(image.info)}</a>
+                    <p>These are a subset of properties defined for this image. See <a href="https://github.com/opencontainers/image-spec/blob/main/config.md#properties" rel="nofollow">the OCI image spec</a> for more information.</p>
                     <dl>
                         <dt>Env</dt>
                         <dd class="mono">{JSON.stringify(image.config.config.Env ?? [])}</dd>
@@ -337,14 +350,16 @@ class App extends Component {
 
                 </details>
             );
+            fullCommand = JSON.stringify(computeFullCommand(image, cmd).cmd);
         }
         return <div>
             <form>
                 <select onChange={e => this.onImageSelect(e)}>
                     {imageOptions}
                 </select>
-                <input className="mono" type="text" placeholder="env $entrypoint $cmd < /dev/null" />
-                <button className="mono" onClick={this.run}>Run</button>
+                <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
+                <button className="mono" onClick={e => this.run(e)}>Run</button>
+                <span className="mono">{fullCommand}</span>
 
                 {imageDetails}
 
