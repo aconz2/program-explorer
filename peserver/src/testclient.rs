@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::io::{Read,Write};
+use std::cmp::min;
 
 use http::Method;
 use std::time::Duration;
@@ -64,8 +65,12 @@ struct Args {
 
     #[arg(long)]
     header_too_many: bool,
+
     #[arg(long)]
     header_too_big: bool,
+
+    #[arg(long)]
+    corrupt_body: bool,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -74,6 +79,15 @@ struct Args {
 fn print_headers(prefix: &str, headers: &http::HeaderMap) {
     for (k, v) in headers.iter() {
         println!("{}{}: {:?}", prefix, k, v);
+    }
+}
+
+fn hexdump(buf: &[u8]) {
+    for chunk in buf.chunks(16) {
+        for byte in chunk {
+            print!("{:02x} ", byte);
+        }
+        println!();
     }
 }
 
@@ -104,7 +118,13 @@ async fn main() {
             let too_much_data = vec![0; 65536];
             v.file("file2", &too_much_data).unwrap();
         }
-        v.into_vec().unwrap()
+        if args.corrupt_body {
+            let mut v = v.into_vec().unwrap();
+            v.push(4); // BadTag
+            v
+        } else {
+            v.into_vec().unwrap()
+        }
     };
 
     let url = apiv1::runi::PREFIX.to_owned() + &args.image;
@@ -157,6 +177,7 @@ async fn main() {
         println!("ERROR {:?}", body);
         return;
     }
+    //hexdump(&body[..min(body.len(), 256)]);
     let (response, archive) = apiv1::runi::parse_response(&body).unwrap();
     println!("api  response {:#?}", response);
 

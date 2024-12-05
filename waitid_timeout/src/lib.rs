@@ -156,7 +156,6 @@ impl ChildWaitIdExt for Child {
 
     /// if you get Ok(WaitIdDataOvertime::NotExited) from this, something has gone pretty wrong and
     /// the child is probably not reaped, idk what else to do though
-    // TODO the second 10ms wait for reaping is pretty hacky
     fn wait_timeout_or_kill(&self, duration: Duration) -> io::Result<WaitIdDataOvertime> {
         let mut pidfd = PidFd::new(self)?;
         let mut waiter = PidFdWaiter::new(&mut pidfd)?;

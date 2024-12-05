@@ -191,6 +191,7 @@ impl HttpRunnerApp {
             kernel_inspect     : false,
         };
 
+        // TODO we should have this io_file crap not in here
         let mut io_file = NamedTempFile::new().map_err(|_| Error::TempfileCreate)?;
         match content_type {
             ContentType::ApplicationJson => {

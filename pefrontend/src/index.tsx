@@ -21,6 +21,12 @@ namespace Api {
             entrypoint?: string[],
             cmd?: string[],
         }
+
+        export type Response = {
+            stdin?: string,
+            entrypoint?: string[],
+            cmd?: string[],
+        }
     }
 
     export type Image = {
@@ -180,7 +186,7 @@ class Editor extends Component {
         this.setState({store: store});
     }
 
-    addFiles(files: {path: string, data: string}[]) {
+    addFiles(files: {path: string, data: string|ArrayBuffer}[]) {
         let store = this.state.store.addFiles(files);
         this.setState({store: store});
     }
@@ -191,7 +197,7 @@ class Editor extends Component {
 
     // this.props, this.state
     render({placeholder,readOnly}, {store}) {
-        let tabs = Array.from(store.files.values().map(file => {
+        let tabs = Array.from(store.files.values(), file => {
             let className = 'tab mono';
             if (store.active == file.id) {
                 className += ' selected';
@@ -203,7 +209,7 @@ class Editor extends Component {
                     {file.displayName()}
                 </button>
             );
-        }));
+        });
         if (this.editor && store.active) {
             let f = store.files.get(store.active);
             if (f.kind == FileKind.Editor) {
@@ -232,18 +238,20 @@ class App extends Component {
         // if you execute these back to back they don't both get applied...
         this.inputEditor.current.addFiles([
             {path:'test.sh', data:'echo "hello world"\ncat data.txt > output/data.txt'},
-            {path:'blob', data:Uint8Array.from('AAAAAAAAAAAAAAAAAAAAA', (x) => x.charCodeAt(0))},
+            {path:'blob', data: new TextEncoder().encode('AAAAAAAAAAAAAAAAAAA')},
             //{path:'data.txt', data:'hi this is some data'},
-            //{path:'f1/data.txt', data:'hi this is some data'},
-            //{path:'f1/f2/data.txt', data:'hi this is some data'},
-            //{path:'f2/data.txt', data:'hi this is some data'},
+            {path:'f1/data.txt', data:'hi this is some data'},
+            {path:'f1/f2/data.txt', data:'hi this is some data'},
+            {path:'f2/data.txt', data:'hi this is some data'},
         ]);
         this.setState({cmd: 'sh test.sh'});
 
         this.fetchImages();
 
-        setTimeout(() => {
-        }, 100);
+        //setTimeout(() => {
+        //let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
+        //y.bytes().then(x=>console.log(x));
+        //}, 100);
     }
 
     async run(event) {
@@ -256,28 +264,7 @@ class App extends Component {
         }
         let image = images.get(selectedImage);
 
-        //let data = {};
-        //// TODO get entrypoint and cmd from child
-        //data.cmd = ["sh", "-c", "echo hi"];
-        //let req = new Request(window.location.origin + s_chosenImage.value, {
-        //    method: 'POST',
-        //    body: JSON.stringify(data),
-        //    headers: {
-        //        'Content-type': 'application/json',
-        //    }
-        //});
-        //const response = await fetch(req);
-        //if (response.ok) {
-        //    const json = await response.json();
-        //    let m = outputModelStore.getOrCreateModel('output.json', JSON.stringify(json, null, '  '));
-        //    outputEditor.editFile(m.uri);
-        //} else {
-        //    console.error(response);
-        //}
-        //let x = pearchive.makeHiearachy(Array.from(this.inputEditor.current.state.store.files.values()));
-        //console.log(x);
         let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
-        console.log(y);
         let z = pearchive.combineRequestAndArchive({
             'cmd': ['sh', 'echo hi'],
         }, y);
@@ -290,13 +277,15 @@ class App extends Component {
             }
         });
         const response = await fetch(req);
-        if (response.ok) {
-            // todo unpack the archive
-            console.log('yay');
-        } else {
+        if (!response.ok) {
             console.error(response);
+            return;
         }
-
+        const body = await response.arrayBuffer();
+        let [responseJson, archiveSlice] = pearchive.splitResponseAndArchive(body);
+        console.log(responseJson);
+        // todo unpack the archive
+        console.log(archiveSlice);
     }
 
     async fetchImages() {
@@ -325,10 +314,11 @@ class App extends Component {
 
     // this.props, this.state
     render({}, {images,selectedImage,cmd}) {
-        let imageOptions = Array.from(images.values().map(({info,links}) => {
+        // firefox supports Map().values().map(), but chrome doesn't
+        let imageOptions = Array.from(images.values(), ({info,links}) => {
             let name = imageName(info);
             return <option key={info.digest} value={links.runi}>{name}</option>;
-        }));
+        });
 
         let imageDetails = [];
         let fullCommand = '';

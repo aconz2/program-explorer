@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read,Write,Seek,SeekFrom};
+use std::io::{Read,Write,Seek,SeekFrom,Cursor};
 use std::time::Duration;
 use std::path::Path;
 
@@ -222,7 +222,7 @@ pub fn read_io_file_config(file: &mut File) -> Result<(u32, Config), Error> {
 }
 
 // coming out of the guest, we have
-// <u32: archive end (absolute)> <u32: response size> <response> <archive>
+// <u32: archive size> <u32: response size> <response> <archive>
 // response is always in json format and archive_size may be 0
 pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<(), Error> {
     let response_bytes = serde_json::to_vec(&response).map_err(|_| Error::Ser)?;
@@ -233,7 +233,7 @@ pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<()
 }
 
 // coming out of the guest, we have
-// <u32: archive end (absolute)> <u32: response size> <response> <archive>
+// <u32: archive size> <u32: response size> <response> <archive>
 // response is always in json format and archive_size may be 0
 // we return the archive size and bytes of the response json
 // file cursor is left at beginning of archive
@@ -245,16 +245,16 @@ pub fn read_io_file_response_bytes(file: &mut File) -> Result<(u32, Vec<u8>), Er
     Ok((archive_size, ret))
 }
 
+// returns a vec with the bytes of the io file <u32: response size> <response> <archive>
 pub fn read_io_file_response_archive_bytes(file: &mut File) -> Result<Vec<u8>, Error> {
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
     let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     // could also truncate to archive_end and read_to_end to avoid the zero initialize
-    let mut ret = vec![0u8; (4 + archive_size + response_size) as usize];
-    // ret[0..4] = &response_size.to_le_bytes(); // wish this would work
-    {
-        let b = response_size.to_le_bytes();
-        for i in 0..4 { ret[i] = b[i]; }
-    }
+    let mut ret = {
+        let mut c = Cursor::new(vec![0u8; (4 + response_size + archive_size) as usize]);
+        c.write_u32::<LE>(response_size).map_err(|_| Error::Io)?;
+        c.into_inner()
+    };
     file.read_exact(&mut ret[4..]).map_err(|_| Error::Io)?;
     Ok(ret)
 }

@@ -94,6 +94,9 @@ fn packdev(args: &[String]) {
     let encoded_size: u32 = archive_size.try_into().unwrap();
     fileout.seek(SeekFrom::Start(0)).unwrap();
     fileout.write_u32::<LE>(encoded_size).unwrap();
+    // this is to be extra sure the write through the pmem device has finished
+    // only hit a bad case in the panic handler's write not getting sync'd
+    fileout.sync_data().unwrap();
 }
 
 fn main() {

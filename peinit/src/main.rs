@@ -44,15 +44,19 @@ fn exit() {
 
 // NOTE: the host can still not receive this message if the pmem is configured incorrectly, for
 // example by having discard_writes=on accidentally in which case the writes are silently dropped
+// and also if the data wasn't sync'd then the host never sees our response
 fn write_panic_response(message: &str) -> Result<(), peinit::Error> {
-    println!("panic: {message}");
+    println!("writing panic response: {message}");
 
     let response = Response::Panic {
         message: message.into(),
     };
 
     let mut f = File::create(INOUT_DEVICE).map_err(|_| peinit::Error::Io)?;
-    write_io_file_response(&mut f, &response)
+    write_io_file_response(&mut f, &response)?;
+    // have gotten bit by the write not being visible since we exit so quickly after the write
+    f.sync_data().map_err(|_| peinit::Error::Io)?;
+    Ok(())
 }
 
 fn setup_panic() {
