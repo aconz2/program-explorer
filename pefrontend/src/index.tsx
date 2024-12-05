@@ -127,6 +127,16 @@ class FileStore {
         this.active = active ?? null;
     }
 
+    static from(inputs: {path: string, data: string|ArrayBuffer}[]): FileStore {
+        if (inputs.length === 0) return new FileStore();
+        let files = new Map(inputs.map(({path,data}) => {
+            let f = File.makeFile(path, data);
+            return [f.id, f];
+        }));
+        let active = files.keys().next().value;
+        return new FileStore(files, active);
+    }
+
     addTextFile(path: string, data: string|ArrayBuffer): FileStore {
         let f = File.makeFile(path, data);
         let files = new Map(this.files);
@@ -191,6 +201,11 @@ class Editor extends Component {
         this.setState({store: store});
     }
 
+    setFiles(files: {path: string, data: string|ArrayBuffer}[]) {
+        let store = FileStore.from(files);
+        this.setState({store: store});
+    }
+
     editFile(file: File) {
         this.setState({store: this.state.store.setActive(file)});
     }
@@ -238,20 +253,32 @@ class App extends Component {
         // if you execute these back to back they don't both get applied...
         this.inputEditor.current.addFiles([
             {path:'test.sh', data:'echo "hello world"\ncat data.txt > output/data.txt'},
-            {path:'blob', data: new TextEncoder().encode('AAAAAAAAAAAAAAAAAAA')},
+            {path:'blob', data: new Uint8Array([0, 0, 0, 0, 0])},
             //{path:'data.txt', data:'hi this is some data'},
-            {path:'f1/data.txt', data:'hi this is some data'},
-            {path:'f1/f2/data.txt', data:'hi this is some data'},
-            {path:'f2/data.txt', data:'hi this is some data'},
+            {path:'f1/dataf1.txt', data:'hi this is some data'},
+            {path:'f1/f2/dataf1f2.txt', data:'hi this is some data'},
+            {path:'f2/dataf2.txt', data:'hi this is some data'},
         ]);
         this.setState({cmd: 'sh test.sh'});
 
         this.fetchImages();
 
-        //setTimeout(() => {
-        //let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
-        //y.bytes().then(x=>console.log(x));
-        //}, 100);
+        setTimeout(() => {
+            let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
+            // only firefox has a Blob.bytes() method
+
+            y.arrayBuffer().then(buf=>{
+                let bytes = new Uint8Array(buf);
+                console.log('----------------   packed -----------------------');
+                console.log(bytes);
+                console.log('---------------- unpacked (uint8array) -----------------------');
+                console.log(pearchive.unpackArchiveV1(bytes));
+                console.log('---------------- unpacked2 (arraybuffer) -----------------------');
+                console.log(pearchive.unpackArchiveV1(buf));
+                console.log('---------------- unpacked2 (dataview) -----------------------');
+                console.log(pearchive.unpackArchiveV1(new DataView(buf, 62)));
+            });
+        }, 100);
     }
 
     async run(event) {
@@ -285,7 +312,11 @@ class App extends Component {
         let [responseJson, archiveSlice] = pearchive.splitResponseAndArchive(body);
         console.log(responseJson);
         // todo unpack the archive
+        let returnFiles = pearchive.unpackArchiveV1(archiveSlice);
+        console.log(returnFiles);
         console.log(archiveSlice);
+
+        this.outputEditor.current.setFiles(returnFiles);
     }
 
     async fetchImages() {

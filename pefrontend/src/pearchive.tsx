@@ -1,3 +1,5 @@
+const MAX_NAME_LEN = 255; // tmpfs max name length
+
 enum ArchiveFormat1Tag {
     File = 1,
     Dir = 2,
@@ -21,11 +23,12 @@ export function makeHiearachy(files: {path: string, data: string|ArrayBuffer}[])
             if (part === '' || part === '.' || part === '..') {
                 continue;
             }
-            if (cur[part] === undefined) {
-                cur.set(part, new Map());
-            } else {
-                cur = cur.get(part);
+            let x = cur.get(part);
+            if (x === undefined) {
+                x = new Map();
+                cur.set(part, x);
             }
+            cur = x;
         }
         let name = parts[parts.length - 1];
         if (name === '' || name === '.' || name === '..') {
@@ -42,6 +45,7 @@ function encodeHierarchy(root: Map<string, any>): Blob {
     let lenbuf = new ArrayBuffer(4);
     let lenbufview = new DataView(lenbuf);
     // new Blob([1]) == [49] because ord('1') == 49 (it calls toString()!)
+    // so we have to make a u8 array for each tag (and null)
     let tagDir = new Uint8Array([ArchiveFormat1Tag.Dir]);
     let tagFile = new Uint8Array([ArchiveFormat1Tag.File]);
     let tagPop = new Uint8Array([ArchiveFormat1Tag.Pop]);
@@ -51,27 +55,22 @@ function encodeHierarchy(root: Map<string, any>): Blob {
     function* recur(cur) {
         for (let [name, v] of cur.entries()) {
             if (v instanceof Map) {
-                console.log('dir ' + name);
                 yield tagDir;
                 yield te.encode(name);
                 yield nullByte; // null term
                 yield* recur(v);
                 yield tagPop;
             } else {
-                console.log('file ' + name);
-                console.log(typeof ArchiveFormat1Tag.File);
                 yield tagFile;
                 yield te.encode(name);
                 yield nullByte; // null term
                 if (typeof v.data === 'string') {
                     let data = te.encode(v.data);
-                    console.log('string data length', data.byteLength);
-                    lenbufview.setUint32(0, data.byteLength, true);
-                    console.log(new Uint8Array(lenbuf));
+                    lenbufview.setUint32(0, data.byteLength, /* LE */ true);
                     yield lenbuf.slice();
                     yield data;
                 } else {
-                    lenbufview.setUint32(0, v.data.byteLength, true);
+                    lenbufview.setUint32(0, v.data.byteLength, /* LE */ true);
                     yield lenbuf.slice();
                     yield v.data;
                 }
@@ -91,13 +90,80 @@ export function packArchiveV1(files: {path: string, data: string|ArrayBuffer}[])
     return ret;
 }
 
+function findZeroByte(buf: DataView, start: number): number {
+    for (let i = start; i < Math.min(start + MAX_NAME_LEN, buf.byteLength); i++) {
+        if (buf.getUint8(i) === 0) return i;
+    }
+    return -1;
+}
+
+// tries to decode as utf-8, if fails, returns as arraybuffer and you can retry with another encoding
+// okay we don't actually respect the byteLength of a DataView since we read the length from the archive and slice
+// a new one from the underlying buffer. But really we just need it for the offset
+export function unpackArchiveV1(data: ArrayBuffer|Uint8Array|DataView): {path: string, data: string|ArrayBuffer}[] {
+    console.time('unpackArchiveV1');
+    let i = (data instanceof DataView) ? data.byteOffset : 0;
+    // note we recreate a view if given a view and always just work with the offset it gave
+    let view = (data instanceof ArrayBuffer) ? new DataView(data) : new DataView(data.buffer);
+    let buffer = (data instanceof ArrayBuffer) ? data : data.buffer;
+    const n = view.byteLength;
+
+    let lenbuf = new ArrayBuffer(4);
+    let lenbufview = new DataView(lenbuf);
+    let te = new TextDecoder(); // defaults to utf-8
+    let acc = [];
+    let pathBuf = [];
+
+    while (i < n) {
+        let tag = view.getUint8(i);
+        i++;
+        switch (tag) {
+            case ArchiveFormat1Tag.File: {
+                let zbi = findZeroByte(view, i);
+                if (zbi === -1) { throw new Error("didnt get null byte"); } // TODO
+                let nameLen = zbi - i;
+                let name = te.decode(new DataView(buffer, i, nameLen));
+                pathBuf.push(name);
+                let path = pathBuf.join('/');
+                pathBuf.pop();
+                let len = view.getUint32(zbi+1, /* LE */ true);
+                i = zbi + 1 + 4;
+                let data = new DataView(buffer, i, len); // this is where we don't respect a DataView.byteLength
+                try { // so this doesn't even throw on things with 0-bytes in it, they just become u+0000, hmmm
+                    data = te.decode(data);
+                } catch {
+                    console.log('data not uf8');
+                }
+                i += len;
+                acc.push({path, data});
+                break;
+            }
+            case ArchiveFormat1Tag.Dir: {
+                let zbi = findZeroByte(view, i);
+                if (zbi === -1) { throw new Error("didnt get null byte"); } // TODO
+                let nameLen = zbi - i;
+                let name = te.decode(new DataView(buffer, i, nameLen));
+                pathBuf.push(name);
+                i = zbi + 1;
+                break;
+            }
+            case ArchiveFormat1Tag.Pop:
+                pathBuf.pop();
+                break;
+            default:
+                return acc;
+        }
+    }
+
+    console.timeEnd('unpackArchiveV1');
+    return acc;
+}
+
 export function combineRequestAndArchive(req, archive: Blob): Blob {
     let te = new TextEncoder();
     let reqbuf = te.encode(JSON.stringify(req));
     let lenbuf = new ArrayBuffer(4);
-    console.log(reqbuf);
-    //                                     LE
-    new DataView(lenbuf).setUint32(0, reqbuf.byteLength, true);
+    new DataView(lenbuf).setUint32(0, reqbuf.byteLength, /* LE */ true);
 
     return new Blob([lenbuf, reqbuf, archive]);
 }
@@ -107,7 +173,6 @@ export function splitResponseAndArchive(buf: ArrayBuffer): [any, DataView] {
     let lenview = new DataView(buf);
     let responseLen = lenview.getUint32(0, true);
     let responseView = new DataView(buf, 4, responseLen);
-    console.log(responseView);
     let responseString = new TextDecoder().decode(responseView);
     let responseJson = JSON.parse(responseString);
     let archiveSlice = new DataView(buf, 4 + responseLen);
