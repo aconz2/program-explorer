@@ -1,5 +1,5 @@
 import { render, createRef, Component, RefObject } from 'preact';
-//import { signal, Signal } from '@preact/signals';
+import { signal, Signal } from '@preact/signals';
 import { EditorState } from '@codemirror/state';
 import { EditorView, basicSetup } from 'codemirror';
 import * as pearchive from './pearchive';
@@ -16,10 +16,10 @@ type FileId = string;
 type ImageId = string;
 
 type AppState = {
-    images: Map<ImageId, Api.Image>,
-    selectedImage?: ImageId,
-    cmd?: string,
-    lastStatus?: string,
+    images: Signal<Map<ImageId, Api.Image>>,
+    selectedImage: Signal<ImageId | null>,
+    cmd: Signal<string | null>,
+    lastStatus: Signal<string | null>,
 }
 
 class File {
@@ -30,10 +30,21 @@ class File {
     kind: FileKind;
     editorState?: EditorState = null;
     data: string|ArrayBuffer;
+    dataHex?: string;
 
     static _next_id(): number {
         File._id += 1;
         return File._id;
+    }
+
+    blobHex(): string {
+        if (this.kind !== FileKind.Blob) return '';
+        if (this.dataHex === null) {
+            // :( bummer not available everywhere
+            //this.dataHex = new Uint8Array(this.data).slice(0, 100).toHex();
+        }
+        console.log('yo in blobHex');
+        return this.dataHex;
     }
 
     constructor(path, kind, data) {
@@ -122,9 +133,7 @@ class FileStore {
     }
 
     setActive(file: File): FileStore {
-        // do we have to copy this?
-        this.active = file.id;
-        return this;
+        return new FileStore(this.files, file.id);
     }
 }
 
@@ -135,15 +144,11 @@ class Editor extends Component {
         readOnly: boolean,
         placeholder?: string,
     };
-    state: {
-        store: FileStore,
-    };
+    store: Signal<FileStore>;
 
     constructor({readOnly, placeholder}: {readOnly?: boolean, placeholder?: string}) {
         super({placeholder,readOnly});
-        this.state = {
-            store: new FileStore(),
-        };
+        this.store = signal(new FileStore());
     }
 
     componentDidMount() {
@@ -157,7 +162,7 @@ class Editor extends Component {
     }
 
     commitActive() {
-        let {store} = this.state;
+        let store = this.store.value;
         let active = store.getActive();
         if (active?.editorState === null) return;
         active.editorState = this.editor.state;
@@ -166,41 +171,47 @@ class Editor extends Component {
 
     getFiles(): File[] {
         this.commitActive();
-        return Array.from(this.state.store.files.values());
+        return Array.from(this.store.value.files.values());
     }
 
     addFiles(files: {path: string, data: string|ArrayBuffer}[]) {
-        let store = this.state.store.addFiles(files);
-        this.setState({store: store});
+        let store = this.store.value.addFiles(files);
+        this.store.value = store;
     }
 
     setFiles(files: {path: string, data: string|ArrayBuffer}[]) {
         let store = FileStore.from(files);
-        let active = this.state.store.getActive();
-        if (active !== null) {
-            console.log(active, store.files);
+        let active = this.store.value.getActive();
+        if (active !== null) {  // reselect active if path matches
             for (let f of store.files.values()) {
-                console.log('active check', f.path, active.path);
                 if (f.path === active.path) {
-                    console.log('setting active');
                     store.active = f.id;
                     break;
                 }
             }
         }
-        this.setState({store: store});
+        let activeFile = store.getActive();
+        if (activeFile?.editorState !== null) {
+            this.editor.setState(activeFile.editorState);
+        }
+        this.store.value = store;
     }
 
     editFile(file: File) {
         this.commitActive();
-        this.setState({store: this.state.store.setActive(file)});
+        let store = this.store.value.setActive(file);
+        if (file.editorState !== null) {
+            this.editor.setState(file.editorState);
+        }
+        this.store.value = store;
     }
 
     // this.props, this.state
-    render({placeholder,readOnly}, {store}) {
+    render({placeholder,readOnly}) {
+        let store = this.store.value;
         let tabs = Array.from(store.files.values(), (file: File) => {
             let className = 'tab mono';
-            if (store.active == file.id) {
+            if (store.active === file.id) {
                 className += ' selected';
             }
             return (
@@ -211,16 +222,25 @@ class Editor extends Component {
                 </button>
             );
         });
-        if (this.editor && store.active) {
-            let f = store.files.get(store.active);
-            if (f.kind == FileKind.Editor) {
-                this.editor.setState(f.editorState);
-            }
-        }
+        let active = store.getActive();
+        console.log('active', active);
+        //if (this.editor && store.active) {
+        //    let f = store.files.get(store.active);
+        //    if (f.kind == FileKind.Editor) {
+        //        this.editor.setState(f.editorState);
+        //    }
+        //}
+        let cmContainerStyle   = active?.editorState === null ? {display: 'none'} : {};
+        let blobContainerStyle = active?.editorState !== null ? {display: 'none'} : {};
+        let blobContents = active?.kind === FileKind.Blob ? active.blobHex() : '';
         return (
             <div class="editorContainer">
                 {tabs}
-                <div class="cmContainer" ref={this.ref}></div>
+                <div style={cmContainerStyle} class="cmContainer" ref={this.ref}></div>
+                <div style={blobContainerStyle} class="blobContainer">
+                    <p>Blob: first 100 bytes</p>
+                    <pre>{blobContents}</pre>
+                </div>
             </div>
         );
     }
@@ -229,11 +249,12 @@ class Editor extends Component {
 class App extends Component {
     r_inputEditor: RefObject<Editor> = createRef();
     r_outputEditor: RefObject<Editor> = createRef();
-    state: AppState = {
-        images: new Map(),
-        selectedImage: null,
-        cmd: null,
-        lastStatus: null,
+    // would like to call this state but not sure if that messes with the Component state
+    s: AppState = {
+        images: signal(new Map()),
+        selectedImage: signal(null),
+        cmd: signal(null),
+        lastStatus: signal(null),
     };
 
     get inputEditor():  Editor { return this.r_inputEditor.current; }
@@ -241,40 +262,43 @@ class App extends Component {
 
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
-        this.inputEditor.addFiles([
+        this.inputEditor.setFiles([
             {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/data.txt > /run/pe/output/data.txt\nls -ln /run/pe'},
-            {path:'blob', data: new Uint8Array([0, 0, 0, 0, 0])},
+            {path:'blob', data: new Uint8Array([0, 0, 0, 0, 0]).buffer},
             //{path:'data.txt', data:'hi this is some data'},
-            {path:'f1/dataf1.txt', data:'hi this is some data'},
-            {path:'f1/f2/dataf1f2.txt', data:'hi this is some data'},
-            {path:'f2/dataf2.txt', data:'hi this is some data'},
+            {path:'f1/dataf1.txt', data:'hi this is some data1'},
+            {path:'f1/f2/dataf1f2.txt', data:'hi this is some data2'},
+            {path:'f2/dataf2.txt', data:'hi this is some datar3'},
         ]);
-        this.setState({cmd: 'sh /run/pe/input/test.sh'});
+        this.s.cmd.value = 'sh /run/pe/input/test.sh';
 
-        this.fetchImages();
+         this.fetchImages();
 
-        setTimeout(() => {
-            let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
-            // only firefox has a Blob.bytes() method
-
-            y.arrayBuffer().then(buf=>{
-                let bytes = new Uint8Array(buf);
-                console.log('----------------   packed -----------------------');
-                console.log(bytes);
-                console.log('---------------- unpacked (uint8array) -----------------------');
-                console.log(pearchive.unpackArchiveV1(bytes));
-                console.log('---------------- unpacked2 (arraybuffer) -----------------------');
-                console.log(pearchive.unpackArchiveV1(buf));
-                //console.log('---------------- unpacked2 (dataview) -----------------------');
-                //console.log(pearchive.unpackArchiveV1(new DataView(buf, 62)));
-            });
-        }, 100);
+        //setTimeout(() => {
+        //    let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
+        //    // only firefox has a Blob.bytes() method
+        //
+        //    y.arrayBuffer().then(buf=>{
+        //        let bytes = new Uint8Array(buf);
+        //        console.log('----------------   packed -----------------------');
+        //        console.log(bytes);
+        //        console.log('---------------- unpacked (uint8array) -----------------------');
+        //        console.log(pearchive.unpackArchiveV1(bytes));
+        //        console.log('---------------- unpacked2 (arraybuffer) -----------------------');
+        //        console.log(pearchive.unpackArchiveV1(buf));
+        //        //console.log('---------------- unpacked2 (dataview) -----------------------');
+        //        //console.log(pearchive.unpackArchiveV1(new DataView(buf, 62)));
+        //    });
+        //}, 100);
     }
 
     async run(event) {
         event.preventDefault();
 
-        let {images,selectedImage,cmd} = this.state;
+        //let {images,selectedImage,cmd} = this.state;
+        let selectedImage = this.s.selectedImage.value;
+        let cmd = this.s.cmd.value;
+
         if (selectedImage === null) {
             console.warn('cant run without an image');
             return;
@@ -283,7 +307,12 @@ class App extends Component {
             console.warn('cant run without a cmd');
             return;
         }
-        let image = images.get(selectedImage);
+
+        let image = this.s.images.value.get(selectedImage);
+        if (image === undefined) {
+            console.warn('cant run without an image');
+            return;
+        }
 
         let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
         let z = pearchive.combineRequestAndArchive({
@@ -314,7 +343,8 @@ class App extends Component {
             }
             return null;
         })();
-        this.setState({lastStatus: lastStatus != null ? JSON.stringify(lastStatus) : null});
+        this.s.lastStatus.value = lastStatus != null ? JSON.stringify(lastStatus) : null;
+
         let returnFiles = pearchive.unpackArchiveV1(archiveSlice);
         returnFiles.sort((a, b) => a.path.localeCompare(b.path));
         //console.log(returnFiles);
@@ -325,13 +355,11 @@ class App extends Component {
     async fetchImages() {
         let response = await fetch(window.location.origin + '/api/v1/images');
         if (response.ok) {
-            let json = await response.json();
+            let json: Api.Images.Response = await response.json();
             if (json.images?.length > 0) {
-                let images = new Map(json.images.map(image => [image.info.digest, image]));
-                this.setState({
-                    images: images,
-                    selectedImage: images.keys().next().value,
-                })
+                let images: Map<string, Api.Image> = new Map(json.images.map(image => [image.info.digest, image]));
+                this.s.images.value = images;
+                this.s.selectedImage.value = images.keys().next()?.value;
             }
         } else {
             console.error(response);
@@ -339,20 +367,24 @@ class App extends Component {
     }
 
     onImageSelect(event) {
-        this.setState({selectedImage: event.target.value});
+        this.s.selectedImage.value = event.target.value;
     }
 
     onCmdChange(event) {
-        this.setState({cmd: event.target.value});
+        this.s.cmd.value = event.target.value;
     }
 
-    // this.props, this.state
-    render({}, {images,selectedImage,cmd,lastStatus}) {
-        console.log('render', this.state);
+    // this.props, this.state (all are signals)
+    render() {
+        let images = this.s.images.value;
+        let selectedImage = this.s.selectedImage.value;
+        let cmd = this.s.cmd.value;
+        let lastStatus = this.s.lastStatus.value;
+
         // firefox supports Map().values().map(), but chrome doesn't
         let imageOptions = Array.from(images.values(), ({info,links}) => {
             let name = imageName(info);
-            return <option key={info.digest} value={links.runi}>{name}</option>;
+            return <option key={info.digest} value={info.digest}>{name}</option>;
         });
 
         let imageDetails = [];

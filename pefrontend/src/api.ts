@@ -67,4 +67,9 @@ export namespace Api {
             history: any, // todo
         },
     };
+
+    export namespace Images {
+        export type Response = {images: Image[]};
+    }
+
 }

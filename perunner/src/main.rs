@@ -253,7 +253,6 @@ fn main() {
         println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
         return;
     }
-    //eprintln!("{}", serde_json::to_string(&runtime_spec).unwrap());
 
     let ch_config = CloudHypervisorConfig {
         bin      : cwd.join(args.ch).into(),
