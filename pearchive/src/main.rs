@@ -2,6 +2,7 @@ use std::env;
 use std::path::Path;
 use std::fs::File;
 use std::io::{Seek,SeekFrom};
+use std::os::fd::FromRawFd;
 
 use pearchive::{
     pack_dir_to_file,
@@ -46,24 +47,24 @@ fn unpack(args: &[String]) {
     unpack_file_to_dir_with_unshare_chroot(file, outpath).unwrap();
 }
 
-/// args: <size> <output dir> <offset> <len>
-fn unpackdev(args: &[String]) {
-    let inname = args.get(0).ok_or(Error::MissingArg).unwrap();
+/// args: <input fd> <output dir> <len>
+/// uses stream offset as beginning of map
+fn unpackfd(args: &[String]) {
+    let in_fd = args.get(0).ok_or(Error::MissingArg).unwrap().parse::<libc::c_int>().unwrap();
     let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
+    let len = args.get(2).ok_or(Error::MissingArg).unwrap().parse::<usize>().unwrap();
 
-    let offset: u64 = args.get(2).ok_or(Error::MissingArg).unwrap().parse::<u64>().unwrap();
-    let len:    u64 = args.get(3).ok_or(Error::MissingArg).unwrap().parse::<u64>().unwrap();
-
-    let inpath = Path::new(&inname);
     let outpath = Path::new(&outname);
 
     assert!(outpath.is_dir(), "{:?} should be a dir", outpath);
 
-    let file = File::open(inpath).unwrap();
+    let mut file = unsafe { File::from_raw_fd(in_fd) };
+    let offset = file.stream_position().unwrap();
+
     let mmap = unsafe {
         MmapOptions::new()
             .offset(offset)
-            .len(len.try_into().unwrap()) // when does a u64 not fit in usize????
+            .len(len) // when does a u64 not fit in usize????
             .map(&file)
             .map_err(|_| Error::Mmap)
             .unwrap()
@@ -72,17 +73,15 @@ fn unpackdev(args: &[String]) {
     unpack_data_to_dir_with_unshare_chroot(mmap.as_ref(), outpath).unwrap();
 }
 
-/// args: <input dir> <output file> <offset>
-fn packdev(args: &[String]) {
+/// args: <input dir> <output fd>
+fn packfd(args: &[String]) {
     let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
-    let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
+    let out_fd = args.get(1).ok_or(Error::MissingArg).unwrap().parse::<libc::c_int>().unwrap();
     let indirpath = Path::new(indir);
     assert!(indirpath.is_dir(), "{:?} should be a dir", indirpath);
 
-    let offset: u64 = args.get(2).ok_or(Error::MissingArg).unwrap().parse::<u64>().unwrap();
-
-    let mut fileout = File::create(outname).unwrap();
-    fileout.seek(SeekFrom::Start(offset)).unwrap();
+    let mut fileout = unsafe { File::from_raw_fd(out_fd) };
+    let offset = fileout.stream_position().unwrap();
 
     // its a bit quirky that we move fileout in and get it back out, which should be the same as an
     // &mut, but then the type of BufWriter<&mut File> gets weird and I don't know what to do
@@ -104,13 +103,13 @@ fn main() {
     match args.get(1).map(|s| s.as_str()) {
         Some("pack")      => {      pack(&args[2..]); },
         Some("unpack")    => {    unpack(&args[2..]); },
-        Some("packdev")    => {  packdev(&args[2..]); },
-        Some("unpackdev") => { unpackdev(&args[2..]); },
+        Some("packfd")    => {  packfd(&args[2..]); },
+        Some("unpackfd") => { unpackfd(&args[2..]); },
         _ => {
             println!("pack <input-dir> <output-file>");
             println!("unpack <input-file> <output-dir>");
-            println!("packdev <input-file> <output-dir> <offset>");
-            println!("unpackdev <input-file> <output-dir> <offset> <len>");
+            println!("packdev <input-file> <output-dir>");
+            println!("unpackfd <input-fd> <output-dir> <len>");
             std::process::exit(1);
         }
     }

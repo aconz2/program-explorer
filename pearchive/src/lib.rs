@@ -16,7 +16,7 @@ use open::{openat,opendirat_cwd,openat_w,opendirat,openpathat};
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
 const MKDIR_MODE: u32 = 0o744;
-const FILE_MODE: u32 = 0o644;
+const FILE_MODE: u32 = 0o611;
 const MAX_NAME_LEN: usize = 255; // max len on tmpfs
 
 /// v1 archive format

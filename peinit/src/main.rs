@@ -6,6 +6,7 @@ use std::ffi::{CStr,OsStr,CString};
 use std::path::Path;
 use std::io;
 use std::time::Instant;
+use std::os::fd::AsRawFd;
 
 use peinit::{Config,Response,RootfsKind,ResponseFormat};
 use peinit::{write_io_file_response,read_io_file_config};
@@ -91,9 +92,11 @@ fn mount(source: &CStr, target: &CStr, filesystem: Option<&CStr>, flags: libc::c
 
 //fn unshare(flags: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::unshare(flags) }) }
 fn chdir(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chdir(dir.as_ptr()) }) }
+fn chown(path: &CStr, uid: libc::uid_t, gid: libc::uid_t) -> io::Result<()> { check_libc(unsafe { libc::chown(path.as_ptr(), uid, gid) }) }
 fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.as_ptr()) }) }
 fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
 fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
+fn clear_cloexec(fd: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }) }
 
 // debugging code
 //fn mountinfo(name: &str) {
@@ -159,14 +162,27 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 
     let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
+use std::os::unix::process::CommandExt;
+    //let ret = Command::new("/bin/pearchive")
+    //TODO I think we should pass an fd in so that we can run as 1000/1000
+    //and we also maybe need to modify the umask
+    //let mut cmd = Command::new("strace").arg("/bin/pearchive");
+    let mut cmd = Command::new("/bin/pearchive");
+    let fd = f.as_raw_fd();
+    clear_cloexec(fd).unwrap();
 
-    let ret = Command::new("/bin/pearchive")
-    //let ret = Command::new("strace").arg("-e").arg("mmap").arg("/bin/pearchive")
-        .arg("unpackdev")
-        .arg(archive)
-        .arg(dir)
-        .arg(format!("{offset}"))
-        .arg(format!("{archive_size}"))
+    cmd.arg("unpackfd")
+       .arg(format!("{fd}"))
+       .arg(dir)
+       .arg(format!("{archive_size}"));
+        //.uid(1000)
+    //unsafe {
+    //    cmd.pre_exec(|| {
+    //        libc::umask(0);
+    //        Ok(())
+    //    });
+    //}
+    let ret = cmd
         .status()
         .unwrap()
         .code()
@@ -177,13 +193,14 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 // TODO: maybe do this in process?
-fn pack_output<P: AsRef<OsStr>>(offset: u64, dir: P, archive: P) {
+fn pack_output<P: AsRef<OsStr>, F: AsRawFd>(dir: P, archive: F) {
     //let ret = Command::new("strace").arg("/bin/pearchive")
+    let fd = archive.as_raw_fd();
+    clear_cloexec(fd).unwrap();
     let ret = Command::new("/bin/pearchive")
-        .arg("packdev")
+        .arg("packfd")
         .arg(dir)
-        .arg(archive)
-        .arg(format!("{offset}"))
+        .arg(format!("{fd}"))
         .status()
         .unwrap()
         .code()
@@ -273,19 +290,18 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
 fn main() {
     setup_panic();
 
-        mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
     parent_rootfs(c"/abc").unwrap();
 
     { // initial mounts
-        //mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
+        mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
         mount(c"none", c"/sys/fs/cgroup", Some(c"cgroup2"),  libc::MS_SILENT, None).unwrap();
         mount(c"none", c"/dev",           Some(c"devtmpfs"), libc::MS_SILENT, None).unwrap();
         mount(c"none", c"/run/output",    Some(c"tmpfs"),    libc::MS_SILENT, Some(c"size=2M,mode=777")).unwrap();
-
         // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
         // have set umask
         mkdir(c"/run/output/dir", 0o777).unwrap();
-        chmod(c"/run/output/dir", 0o777).unwrap();
+        //chmod(c"/run/output/dir", 0o777).unwrap();
+        chown(c"/run/output/dir", 1000, 1000).unwrap();
     }
 
     let config = unpack_input(INOUT_DEVICE, "/run/input");
@@ -301,7 +317,8 @@ fn main() {
     let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
     mount(&rootfs_dir, c"/mnt/rootfs", None, libc::MS_SILENT | libc::MS_BIND, None).unwrap();
-    Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
+    //Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
+    Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
 
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
@@ -363,10 +380,9 @@ fn main() {
     { // output
         let mut f = File::create(INOUT_DEVICE).unwrap();
         write_io_file_response(&mut f, &response).unwrap();
-        let offset = f.stream_position().unwrap();
 
         match config.response_format {
-            ResponseFormat::PeArchiveV1 => { pack_output(offset, "/run/output", INOUT_DEVICE); }
+            ResponseFormat::PeArchiveV1 => { pack_output("/run/output", f); }
             ResponseFormat::JsonV1 => { }
         }
     }
