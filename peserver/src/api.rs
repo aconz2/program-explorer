@@ -5,7 +5,7 @@ pub const APPLICATION_JSON: &str = "application/json";
 pub const APPLICATION_X_PE_ARCHIVEV1: &str = "application/x.pe.archivev1";
 
 // max request per second per client
-pub const MAX_REQ_PER_SEC: isize = 1;
+pub const MAX_REQ_PER_SEC: isize = 2;
 // max time we will wait trying to get a place in line for the worker
 // browsers are maybe a 60s total timeout so we have to get in there pretty quick to then hope to
 // actually get our request through

@@ -3,6 +3,7 @@ import { render, createRef, Component, RefObject } from 'preact';
 import { EditorState } from '@codemirror/state';
 import { EditorView, basicSetup } from 'codemirror';
 import * as pearchive from './pearchive';
+import {Api} from './api';
 
 import './style.css';
 
@@ -14,51 +15,11 @@ enum FileKind {
 type FileId = string;
 type ImageId = string;
 
-namespace Api {
-    export namespace Runi {
-        export type Request = {
-            stdin?: string,
-            entrypoint?: string[],
-            cmd?: string[],
-        }
-
-        export type Response = {
-            stdin?: string,
-            entrypoint?: string[],
-            cmd?: string[],
-        }
-    }
-
-    export type Image = {
-        links: {
-            runi: string,
-            upstream: string,
-        },
-        info: {
-            digest: string,
-            repository: string,
-            registry: string,
-            tag: string,
-        },
-        config: {
-            created: string,
-            architecture: string,
-            os: string,
-            config: {
-                Cmd?: string[],
-                Entrypoint?: string[],
-                Env?: string[],
-            },
-            rootfs: {type: string, diff_ids: string[]}[],
-            history: any, // todo
-        },
-    };
-}
-
 type AppState = {
     images: Map<ImageId, Api.Image>,
     selectedImage?: ImageId,
     cmd?: string,
+    lastStatus?: string,
 }
 
 class File {
@@ -67,7 +28,7 @@ class File {
     id: string;
     path: string;
     kind: FileKind;
-    editorState?: EditorState;
+    editorState?: EditorState = null;
     data: string|ArrayBuffer;
 
     static _next_id(): number {
@@ -80,7 +41,7 @@ class File {
         this.path = path;
         this.kind = kind;
         this.data = data;
-        if (this.kind == FileKind.Editor) {
+        if (this.kind === FileKind.Editor) {
             this.editorState = EditorState.create({
                 doc: data,
             });
@@ -156,6 +117,10 @@ class FileStore {
         return new FileStore(files, active);
     }
 
+    getActive(): File | null {
+        return this.files.get(this.active) ?? null;
+    }
+
     setActive(file: File): FileStore {
         // do we have to copy this?
         this.active = file.id;
@@ -191,9 +156,17 @@ class Editor extends Component {
         });
     }
 
-    addFile(path: string, data: string|ArrayBuffer) {
-        let store = this.state.store.addFile(path, data);
-        this.setState({store: store});
+    commitActive() {
+        let {store} = this.state;
+        let active = store.getActive();
+        if (active?.editorState === null) return;
+        active.editorState = this.editor.state;
+        active.data = active.editorState.doc.toString();
+    }
+
+    getFiles(): File[] {
+        this.commitActive();
+        return Array.from(this.state.store.files.values());
     }
 
     addFiles(files: {path: string, data: string|ArrayBuffer}[]) {
@@ -207,12 +180,13 @@ class Editor extends Component {
     }
 
     editFile(file: File) {
+        this.commitActive();
         this.setState({store: this.state.store.setActive(file)});
     }
 
     // this.props, this.state
     render({placeholder,readOnly}, {store}) {
-        let tabs = Array.from(store.files.values(), file => {
+        let tabs = Array.from(store.files.values(), (file: File) => {
             let className = 'tab mono';
             if (store.active == file.id) {
                 className += ' selected';
@@ -241,30 +215,34 @@ class Editor extends Component {
 }
 
 class App extends Component {
-    inputEditor: RefObject<Editor> = createRef();
-    outputEditor: RefObject<Editor> = createRef();
+    r_inputEditor: RefObject<Editor> = createRef();
+    r_outputEditor: RefObject<Editor> = createRef();
     state: AppState = {
         images: new Map(),
         selectedImage: null,
         cmd: null,
+        lastStatus: null,
     };
+
+    get inputEditor():  Editor { return this.r_inputEditor.current; }
+    get outputEditor(): Editor { return this.r_outputEditor.current; }
 
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
-        this.inputEditor.current.addFiles([
-            {path:'test.sh', data:'echo "hello world"\ncat data.txt > output/data.txt'},
+        this.inputEditor.addFiles([
+            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/data.txt > /run/pe/output/data.txt\nls -ln /run/pe'},
             {path:'blob', data: new Uint8Array([0, 0, 0, 0, 0])},
             //{path:'data.txt', data:'hi this is some data'},
             {path:'f1/dataf1.txt', data:'hi this is some data'},
             {path:'f1/f2/dataf1f2.txt', data:'hi this is some data'},
             {path:'f2/dataf2.txt', data:'hi this is some data'},
         ]);
-        this.setState({cmd: 'sh test.sh'});
+        this.setState({cmd: 'sh /run/pe/input/test.sh'});
 
         this.fetchImages();
 
         setTimeout(() => {
-            let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
+            let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
             // only firefox has a Blob.bytes() method
 
             y.arrayBuffer().then(buf=>{
@@ -284,16 +262,20 @@ class App extends Component {
     async run(event) {
         event.preventDefault();
 
-        let {images,selectedImage} = this.state;
-        if (this.state.selectedImage === null) {
+        let {images,selectedImage,cmd} = this.state;
+        if (selectedImage === null) {
             console.warn('cant run without an image');
+            return;
+        }
+        if (cmd === null) {
+            console.warn('cant run without a cmd');
             return;
         }
         let image = images.get(selectedImage);
 
-        let y = pearchive.packArchiveV1(Array.from(this.inputEditor.current.state.store.files.values()));
+        let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
         let z = pearchive.combineRequestAndArchive({
-            'cmd': ['sh', 'echo hi'],
+            'cmd': cmd.split(/\s+/),
         }, y);
 
         let req = new Request(window.location.origin + image.links.runi, {
@@ -311,12 +293,19 @@ class App extends Component {
         const body = await response.arrayBuffer();
         let [responseJson, archiveSlice] = pearchive.splitResponseAndArchive(body);
         console.log(responseJson);
-        // todo unpack the archive
+        console.log(responseJson.Ok?.siginfo)
+        let responseTyped: Api.Runi.Response = responseJson;
+        let lastStatus = (() => {
+            if (responseTyped.Ok != null)       return {Ok: {siginfo: responseTyped.Ok.siginfo}};
+            if (responseTyped.Overtime != null) return {Overtime: {siginfo: responseTyped.Overtime.siginfo}};
+            if (responseTyped.Panic != null)    return {Panic: {mssage: responseTyped.Panic.message}};
+            return null;
+        })();
+        this.setState({lastStatus: lastStatus != null ? JSON.stringify(lastStatus) : null});
         let returnFiles = pearchive.unpackArchiveV1(archiveSlice);
         console.log(returnFiles);
         console.log(archiveSlice);
-
-        this.outputEditor.current.setFiles(returnFiles);
+        this.outputEditor.setFiles(returnFiles);
     }
 
     async fetchImages() {
@@ -344,7 +333,8 @@ class App extends Component {
     }
 
     // this.props, this.state
-    render({}, {images,selectedImage,cmd}) {
+    render({}, {images,selectedImage,cmd,lastStatus}) {
+        console.log('render', this.state);
         // firefox supports Map().values().map(), but chrome doesn't
         let imageOptions = Array.from(images.values(), ({info,links}) => {
             let name = imageName(info);
@@ -353,7 +343,7 @@ class App extends Component {
 
         let imageDetails = [];
         let fullCommand = '';
-        if (selectedImage) {
+        if (selectedImage !== null) {
             let image = images.get(selectedImage);
             imageDetails = (
                 <details>
@@ -381,6 +371,7 @@ class App extends Component {
                 <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
                 <button className="mono" onClick={e => this.run(e)}>Run</button>
                 <span className="mono">{fullCommand}</span>
+                <span className="mono">{lastStatus ?? ''}</span>
 
                 {imageDetails}
 
@@ -388,9 +379,9 @@ class App extends Component {
             </form>
 
             <div id="editorSideBySide">
-                <Editor ref={this.inputEditor} />
+                <Editor ref={this.r_inputEditor} />
                 <Editor
-                    ref={this.outputEditor}
+                    ref={this.r_outputEditor}
                     readOnly={true}
                     placeholder={PLACEHOLDER_DIRECTIONS} />
             </div>

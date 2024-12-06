@@ -150,9 +150,6 @@ struct Args {
     #[arg(long, default_value = "../initramfs")]
     initramfs: OsString,
 
-    // #[arg(long, default_value = "../gcc-14.1.0.sqfs")]
-    // rootfs: OsString,
-
     #[arg(long, default_value = "../ocismall.sqfs")]
     index: String,
 
