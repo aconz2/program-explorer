@@ -38,9 +38,9 @@ export namespace Api {
             cmd?: string[],
         };
         export type Response =
-            | {Ok: {siginfo: Siginfo, rusage: Rusage}}
-            | {Overtime: {siginfo: Siginfo, rusage: Rusage}}
-            | {Panic: {message: string}};
+            | {kind: "Ok", siginfo: Siginfo, rusage: Rusage}
+            | {kind: "Overtime", siginfo: Siginfo, rusage: Rusage}
+            | {kind: "Panic", message: string};
     }
 
     export type Image = {

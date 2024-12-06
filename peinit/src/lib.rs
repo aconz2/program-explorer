@@ -52,6 +52,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind")]
 pub enum Response {
     Ok {
         siginfo : SigInfoRedux,

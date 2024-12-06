@@ -89,8 +89,8 @@ impl UnpackVisitor for UnpackVisitorPrinter {
     }
 }
 
-fn dump_archive(mmap: &Mmap) {
-    let mut visitor = UnpackVisitorPrinter{stdout: true};
+fn dump_archive(mmap: &Mmap, stdout: bool) {
+    let mut visitor = UnpackVisitorPrinter{stdout: stdout};
     unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
 }
 
@@ -99,7 +99,7 @@ fn dump_file<F: Read>(name: &str, file: &mut F) {
     let _ = io::copy(file, &mut io::stderr());
 }
 
-fn handle_worker_output(output: worker::OutputResult, response_format: &ResponseFormat) {
+fn handle_worker_output(output: worker::OutputResult, response_format: &ResponseFormat, stdout: bool) {
     match output {
         Ok(worker::Output{mut io_file, ch_logs, id}) => {
             let _ = id;
@@ -110,7 +110,9 @@ fn handle_worker_output(output: worker::OutputResult, response_format: &Response
             let (archive_size, response) = peinit::read_io_file_response(io_file.as_file_mut()).unwrap();
             eprintln!("response {:#?}", response);
             match response_format {
-                ResponseFormat::JsonV1 => { }
+                ResponseFormat::JsonV1 => {
+                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                }
                 ResponseFormat::PeArchiveV1 => {
                     let mapping = unsafe {
                         MmapOptions::new()
@@ -120,7 +122,7 @@ fn handle_worker_output(output: worker::OutputResult, response_format: &Response
                         .unwrap()
                     };
 
-                    dump_archive(&mapping);
+                    dump_archive(&mapping, stdout);
                 }
             }
 
@@ -191,6 +193,9 @@ struct Args {
 
     #[arg(long, help = "use json output format")]
     json: bool,
+
+    #[arg(long, help = "pipe stdout through")]
+    stdout: bool,
 
     #[arg(long, default_value_t = 0, help = "num workers to run")]
     parallel: u64,
@@ -291,7 +296,7 @@ fn main() {
         for id in 0..args.parallel {
             println!("hi trying to get work for {id}");
             let output = pool.receiver().recv_timeout(ch_timeout).expect("should have gotten a response by now");
-            handle_worker_output(output, &response_format);
+            handle_worker_output(output, &response_format, args.stdout);
         }
         let pool = pool.close_sender();
         let _ = pool.shutdown();
@@ -307,6 +312,6 @@ fn main() {
             io_file: io_file,
             rootfs: image_index_entry.path.clone().into(),
         };
-        handle_worker_output(worker::run(worker_input), &response_format);
+        handle_worker_output(worker::run(worker_input), &response_format, args.stdout);
     }
 }

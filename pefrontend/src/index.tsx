@@ -176,6 +176,18 @@ class Editor extends Component {
 
     setFiles(files: {path: string, data: string|ArrayBuffer}[]) {
         let store = FileStore.from(files);
+        let active = this.state.store.getActive();
+        if (active !== null) {
+            console.log(active, store.files);
+            for (let f of store.files.values()) {
+                console.log('active check', f.path, active.path);
+                if (f.path === active.path) {
+                    console.log('setting active');
+                    store.active = f.id;
+                    break;
+                }
+            }
+        }
         this.setState({store: store});
     }
 
@@ -253,8 +265,8 @@ class App extends Component {
                 console.log(pearchive.unpackArchiveV1(bytes));
                 console.log('---------------- unpacked2 (arraybuffer) -----------------------');
                 console.log(pearchive.unpackArchiveV1(buf));
-                console.log('---------------- unpacked2 (dataview) -----------------------');
-                console.log(pearchive.unpackArchiveV1(new DataView(buf, 62)));
+                //console.log('---------------- unpacked2 (dataview) -----------------------');
+                //console.log(pearchive.unpackArchiveV1(new DataView(buf, 62)));
             });
         }, 100);
     }
@@ -293,18 +305,20 @@ class App extends Component {
         const body = await response.arrayBuffer();
         let [responseJson, archiveSlice] = pearchive.splitResponseAndArchive(body);
         console.log(responseJson);
-        console.log(responseJson.Ok?.siginfo)
         let responseTyped: Api.Runi.Response = responseJson;
         let lastStatus = (() => {
-            if (responseTyped.Ok != null)       return {Ok: {siginfo: responseTyped.Ok.siginfo}};
-            if (responseTyped.Overtime != null) return {Overtime: {siginfo: responseTyped.Overtime.siginfo}};
-            if (responseTyped.Panic != null)    return {Panic: {mssage: responseTyped.Panic.message}};
+            switch (responseTyped.kind) {
+                case 'Ok': return {Ok: {siginfo: responseTyped.siginfo}};
+                case 'Overtime': return {Overtime: {siginfo: responseTyped.siginfo}};
+                case 'Panic': return {Panic: {message: responseTyped.message}};
+            }
             return null;
         })();
         this.setState({lastStatus: lastStatus != null ? JSON.stringify(lastStatus) : null});
         let returnFiles = pearchive.unpackArchiveV1(archiveSlice);
-        console.log(returnFiles);
-        console.log(archiveSlice);
+        returnFiles.sort((a, b) => a.path.localeCompare(b.path));
+        //console.log(returnFiles);
+        //console.log(archiveSlice);
         this.outputEditor.setFiles(returnFiles);
     }
 
