@@ -7,6 +7,7 @@ use std::path::Path;
 use std::io;
 use std::time::Instant;
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 
 use peinit::{Config,Response,RootfsKind,ResponseFormat};
 use peinit::{write_io_file_response,read_io_file_config};
@@ -162,7 +163,6 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 
     let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
-use std::os::unix::process::CommandExt;
     //let ret = Command::new("/bin/pearchive")
     //TODO I think we should pass an fd in so that we can run as 1000/1000
     //and we also maybe need to modify the umask
@@ -175,7 +175,8 @@ use std::os::unix::process::CommandExt;
        .arg(format!("{fd}"))
        .arg(dir)
        .arg(format!("{archive_size}"));
-        //.uid(1000)
+
+    cmd.uid(1000).gid(1000);
     //unsafe {
     //    cmd.pre_exec(|| {
     //        libc::umask(0);

@@ -1,6 +1,7 @@
 import { render, createRef, Component, RefObject } from 'preact';
 import { signal, Signal } from '@preact/signals';
 import { EditorState } from '@codemirror/state';
+import { keymap } from '@codemirror/view';
 import { EditorView, basicSetup } from 'codemirror';
 import * as pearchive from './pearchive';
 import {Api} from './api';
@@ -43,11 +44,10 @@ class File {
             // :( bummer not available everywhere
             //this.dataHex = new Uint8Array(this.data).slice(0, 100).toHex();
         }
-        console.log('yo in blobHex');
         return this.dataHex;
     }
 
-    constructor(path, kind, data) {
+    constructor(path: string, kind: FileKind, data: string|ArrayBuffer, readOnly=false) {
         this.id = File._next_id().toString();
         this.path = path;
         this.kind = kind;
@@ -55,15 +55,22 @@ class File {
         if (this.kind === FileKind.Editor) {
             this.editorState = EditorState.create({
                 doc: data,
+                extensions: [
+                    EditorState.readOnly.of(readOnly),
+              keymap.of([
+                  // TODO okay we have to rework how we are doing the EditorState/EditorView crap
+                  {key: 'Ctrl-Enter', run: (_) => { console.log('yo this shit wack'); }},
+              ]),
+                ]
             });
         }
     }
 
-    static makeFile(path, data: string|ArrayBuffer): File {
+    static makeFile(path, data: string|ArrayBuffer, readOnly=false): File {
         if (typeof data === 'string') {
-            return new File(path, FileKind.Editor, data);
+            return new File(path, FileKind.Editor, data, readOnly);
         } else {
-            return new File(path, FileKind.Blob, data);
+            return new File(path, FileKind.Blob, data, readOnly);
         }
     }
 
@@ -99,10 +106,10 @@ class FileStore {
         this.active = active ?? null;
     }
 
-    static from(inputs: {path: string, data: string|ArrayBuffer}[]): FileStore {
+    static from(inputs: {path: string, data: string|ArrayBuffer}[], readOnly=false): FileStore {
         if (inputs.length === 0) return new FileStore();
         let files = new Map(inputs.map(({path,data}) => {
-            let f = File.makeFile(path, data);
+            let f = File.makeFile(path, data, readOnly);
             return [f.id, f];
         }));
         let active = files.keys().next().value;
@@ -140,22 +147,27 @@ class FileStore {
 class Editor extends Component {
     ref = createRef();
     editor?: EditorView;
-    props: {
-        readOnly: boolean,
-        placeholder?: string,
-    };
+    readOnly: boolean;
+    ctrlEnterCb: (target: EditorView) => boolean;
     store: Signal<FileStore>;
 
-    constructor({readOnly, placeholder}: {readOnly?: boolean, placeholder?: string}) {
-        super({placeholder,readOnly});
+    constructor({readOnly=false, ctrlEnterCb=() => false}) {
+        super();
+        this.readOnly = readOnly;
         this.store = signal(new FileStore());
+        this.ctrlEnterCb = ctrlEnterCb;
     }
 
     componentDidMount() {
+        // TODO why is this.props borked on the first editor when we don't pass a readonly prop
         this.editor = new EditorView({
           extensions: [
+              // TODO not even sure if these extensions are getting passed down
+              // since we call EditorState.create elsewhere, confused on the api
               basicSetup,
-              ...(this.props.readOnly ? [EditorState.readOnly.of(true)] : []),
+              keymap.of([
+                  {key: 'Ctrl-Enter', run: this.ctrlEnterCb},
+              ]),
           ],
           parent: this.ref.current,
         });
@@ -180,7 +192,7 @@ class Editor extends Component {
     }
 
     setFiles(files: {path: string, data: string|ArrayBuffer}[]) {
-        let store = FileStore.from(files);
+        let store = FileStore.from(files, this.readOnly);
         let active = this.store.value.getActive();
         if (active !== null) {  // reselect active if path matches
             for (let f of store.files.values()) {
@@ -207,7 +219,7 @@ class Editor extends Component {
     }
 
     // this.props, this.state
-    render({placeholder,readOnly}) {
+    render() {
         let store = this.store.value;
         let tabs = Array.from(store.files.values(), (file: File) => {
             let className = 'tab mono';
@@ -223,16 +235,11 @@ class Editor extends Component {
             );
         });
         let active = store.getActive();
-        console.log('active', active);
-        //if (this.editor && store.active) {
-        //    let f = store.files.get(store.active);
-        //    if (f.kind == FileKind.Editor) {
-        //        this.editor.setState(f.editorState);
-        //    }
-        //}
+
         let cmContainerStyle   = active?.editorState === null ? {display: 'none'} : {};
         let blobContainerStyle = active?.editorState !== null ? {display: 'none'} : {};
         let blobContents = active?.kind === FileKind.Blob ? active.blobHex() : '';
+
         return (
             <div class="editorContainer">
                 {tabs}
@@ -263,7 +270,7 @@ class App extends Component {
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
         this.inputEditor.setFiles([
-            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/data.txt > /run/pe/output/data.txt\nls -ln /run/pe'},
+            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe'},
             {path:'blob', data: new Uint8Array([0, 0, 0, 0, 0]).buffer},
             //{path:'data.txt', data:'hi this is some data'},
             {path:'f1/dataf1.txt', data:'hi this is some data1'},
@@ -272,7 +279,7 @@ class App extends Component {
         ]);
         this.s.cmd.value = 'sh /run/pe/input/test.sh';
 
-         this.fetchImages();
+        this.fetchImages();
 
         //setTimeout(() => {
         //    let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
@@ -415,7 +422,7 @@ class App extends Component {
                     {imageOptions}
                 </select>
                 <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
-                <button className="mono" onClick={e => this.run(e)}>Run</button>
+                <button className="mono" onClick={e => { e.preventDefault(); this.run(); }}>Run</button>
                 <span className="mono">{fullCommand}</span>
                 <span className="mono">{lastStatus ?? ''}</span>
 
@@ -425,11 +432,13 @@ class App extends Component {
             </form>
 
             <div id="editorSideBySide">
-                <Editor ref={this.r_inputEditor} />
+                <Editor
+                    ref={this.r_inputEditor}
+                    ctrlEnterCb={(_editorView) => { this.run(); return true; }}
+                    />
                 <Editor
                     ref={this.r_outputEditor}
-                    readOnly={true}
-                    placeholder={PLACEHOLDER_DIRECTIONS} />
+                    readOnly={true} />
             </div>
         </div>
     }
