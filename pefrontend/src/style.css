@@ -21,14 +21,8 @@
 
     .tab-close {
         text-align: center;
-        display: none;
-        width: 2ch;
-    }
-
-    .tab-close- {
-        text-align: center;
+        width: 1.5ch;
         display: inline-block;
-        width: 2ch;
     }
 
     /*.tab-outer:hover .tab-name { cursor: pointer; }*/
@@ -37,8 +31,14 @@
     /**/
     .tab-name:hover, .tab-close:hover, .tab-new:hover { cursor: pointer; }
 
-    .tab-outer:hover .tab-close { display: inline-block; }
-    .tab-outer:hover .tab-close- { display: none; }
+    /*.tab-outer:hover .tab-close { display: inline-block; }*/
+    /*.tab-outer:hover .tab-close- { display: none; }*/
+
+    /*.tab-outer:hover .tab-close { display: inline-block; }*/
+    /*.tab-outer:hover .tab-close- { display: none; }*/
+
+    .tab-close:after { content: "•"; }
+    .tab-close:hover:after { content: "x"; }
 
     .tab-close:hover, .tab-new:hover { background: whitesmoke; }
 

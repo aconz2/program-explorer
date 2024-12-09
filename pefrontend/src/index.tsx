@@ -303,10 +303,9 @@ class Editor extends Component {
                         >
                         {file.displayName()}
                     </button>
-                    <button className="tab-close-">•</button>
                     <button className="tab-close" title="Close File"
                         onClick={() => this.closeFile(file)}
-                    >x</button>
+                    ></button>
                 </span>
             );
         });
@@ -356,7 +355,7 @@ class App extends Component {
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
         this.inputEditor.setFiles([
-            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe\ncat /run/pe/input/blob > /run/pe/output/blob'},
+            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe\ncat /run/pe/input/blob > /run/pe/output/blob\necho "an error" 1>&2'},
             {path:'blob', data: new Uint8Array([254, 237, 186, 202]).buffer},
             //{path:'data.txt', data:'hi this is some data'},
             {path:'f1/dataf1.txt', data:'hi this is some data1'},
@@ -437,7 +436,14 @@ class App extends Component {
         this.s.lastStatus.value = lastStatus != null ? JSON.stringify(lastStatus) : null;
 
         let returnFiles = pearchive.unpackArchiveV1(archiveSlice);
-        returnFiles.sort((a, b) => a.path.localeCompare(b.path));
+        returnFiles.sort((a, b) => {
+            if (a.path === 'stdout' && b.path === 'stderr') return -1;
+            if (a.path === 'stderr' && b.path === 'stdout') return 1;
+            if (a.path === 'stdout' || a.path == 'stderr') return -1;
+            if (b.path === 'stdout' || b.path == 'stderr') return 1;
+
+            a.path.localeCompare(b.path)
+        });
         //console.log(returnFiles);
         //console.log(archiveSlice);
         this.outputEditor.setFiles(returnFiles);
@@ -478,8 +484,8 @@ class App extends Component {
             return <option key={info.digest} value={info.digest}>{name}</option>;
         });
 
-        let imageDetails = [];
-        let fullCommand = '';
+        let imageDetails = null;
+        let fullCommand = null;
         if (selectedImage !== null) {
             let image = images.get(selectedImage);
             imageDetails = (
