@@ -97,6 +97,7 @@ function findZeroByte(buf: DataView, start: number): number {
     return -1;
 }
 
+
 // tries to decode as utf-8, if fails, returns as arraybuffer and you can retry with another encoding
 // okay we don't actually respect the byteLength of a DataView since we read the length from the archive and slice
 // a new one from the underlying buffer. But really we just need it for the offset
@@ -110,9 +111,18 @@ export function unpackArchiveV1(data: ArrayBuffer|Uint8Array|DataView): {path: s
 
     let lenbuf = new ArrayBuffer(4);
     let lenbufview = new DataView(lenbuf);
-    let te = new TextDecoder(); // defaults to utf-8
+    let te = new TextDecoder('utf-8', {fatal: true});
     let acc = [];
     let pathBuf = [];
+
+    // decode as utf-8 or copy the slice as a DataView (so that we can free the original blob eventually)
+    function extractFile(view: DataView): string | ArrayBuffer {
+        try {
+            return te.decode(view);
+        } catch {
+            return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+        }
+    }
 
     while (i < n) {
         let tag = view.getUint8(i);
@@ -128,12 +138,8 @@ export function unpackArchiveV1(data: ArrayBuffer|Uint8Array|DataView): {path: s
                 pathBuf.pop();
                 let len = view.getUint32(zbi+1, /* LE */ true);
                 i = zbi + 1 + 4;
-                let data = new DataView(buffer, i, len); // this is where we don't respect a DataView.byteLength
-                try { // so this doesn't even throw on things with 0-bytes in it, they just become u+0000, hmmm
-                    data = te.decode(data);
-                } catch {
-                    console.log('data not uf8');
-                }
+                let fileView = new DataView(buffer, i, len); // this is where we don't respect a DataView.byteLength
+                let data = extractFile(fileView);
                 i += len;
                 acc.push({path, data});
                 break;
@@ -155,10 +161,12 @@ export function unpackArchiveV1(data: ArrayBuffer|Uint8Array|DataView): {path: s
         }
     }
 
+    console.log(acc);
     console.timeEnd('unpackArchiveV1');
     return acc;
 }
 
+// <u32: json len> <json> <archive>
 export function combineRequestAndArchive(req, archive: Blob): Blob {
     let te = new TextEncoder();
     let reqbuf = te.encode(JSON.stringify(req));

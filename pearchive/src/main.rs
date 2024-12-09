@@ -64,7 +64,7 @@ fn unpackfd(args: &[String]) {
     let mmap = unsafe {
         MmapOptions::new()
             .offset(offset)
-            .len(len) // when does a u64 not fit in usize????
+            .len(len)
             .map(&file)
             .map_err(|_| Error::Mmap)
             .unwrap()

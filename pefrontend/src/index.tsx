@@ -1,6 +1,6 @@
 import { render, createRef, Component, RefObject } from 'preact';
 import { signal, Signal } from '@preact/signals';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Extension } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { EditorView, basicSetup } from 'codemirror';
 import * as pearchive from './pearchive';
@@ -23,6 +23,23 @@ type AppState = {
     lastStatus: Signal<string | null>,
 }
 
+function bufToHex(data: ArrayBuffer, length=100): string {
+    let n = Math.min(data.byteLength, length);
+    let acc = '';
+    let hexDigit = (i) => '0123456789abcdef'[i];
+    if (data instanceof ArrayBuffer) {
+        let buf = new Uint8Array(data);
+        for (let i = 0; i < n; i++) {
+            let b = buf[i];
+            acc +=  hexDigit((b >> 4) & 0xf) + hexDigit(b & 0xf);
+        }
+        return acc;
+    }
+    throw new Error('bad type');
+}
+
+type FileContents = string | ArrayBuffer;
+
 class File {
     static _id = 0;
 
@@ -30,8 +47,8 @@ class File {
     path: string;
     kind: FileKind;
     editorState?: EditorState = null;
-    data: string|ArrayBuffer;
-    dataHex?: string;
+    data: FileContents;
+    dataHex?: string = null;
 
     static _next_id(): number {
         File._id += 1;
@@ -41,36 +58,33 @@ class File {
     blobHex(): string {
         if (this.kind !== FileKind.Blob) return '';
         if (this.dataHex === null) {
-            // :( bummer not available everywhere
+            // Uint8Array.toHex is only in ff right now
             //this.dataHex = new Uint8Array(this.data).slice(0, 100).toHex();
+            if (!(this.data instanceof ArrayBuffer)) { throw new Error('type assertion'); }
+            this.dataHex = bufToHex(this.data);
         }
         return this.dataHex;
     }
 
-    constructor(path: string, kind: FileKind, data: string|ArrayBuffer, readOnly=false) {
+    constructor(path: string, kind: FileKind, data: FileContents, extensions: Extension[] = []) {
         this.id = File._next_id().toString();
         this.path = path;
         this.kind = kind;
         this.data = data;
         if (this.kind === FileKind.Editor) {
+            if (typeof data !== 'string') throw new Error('type assertion');
             this.editorState = EditorState.create({
                 doc: data,
-                extensions: [
-                    EditorState.readOnly.of(readOnly),
-              keymap.of([
-                  // TODO okay we have to rework how we are doing the EditorState/EditorView crap
-                  {key: 'Ctrl-Enter', run: (_) => { console.log('yo this shit wack'); }},
-              ]),
-                ]
+                extensions: extensions,
             });
         }
     }
 
-    static makeFile(path, data: string|ArrayBuffer, readOnly=false): File {
+    static makeFile(path, data: FileContents, extensions?: Extension[]): File {
         if (typeof data === 'string') {
-            return new File(path, FileKind.Editor, data, readOnly);
+            return new File(path, FileKind.Editor, data, extensions);
         } else {
-            return new File(path, FileKind.Blob, data, readOnly);
+            return new File(path, FileKind.Blob, data, extensions);
         }
     }
 
@@ -100,31 +114,33 @@ function computeFullCommand(image: Api.Image, userCmd: string): {entrypoint?: st
 class FileStore {
     files: Map<FileId, File> = new Map();
     active?: string = null;
+    extensions: Extension[];
 
-    constructor(files?: Map<FileId, File>, active?: FileId) {
+    constructor(files?: Map<FileId, File>, active?: FileId, extensions?: Extension[]) {
         this.files = files ?? new Map();
         this.active = active ?? null;
+        this.extensions = extensions ?? [];
     }
 
-    static from(inputs: {path: string, data: string|ArrayBuffer}[], readOnly=false): FileStore {
-        if (inputs.length === 0) return new FileStore();
+    from(inputs: {path: string, data: FileContents}[]): FileStore {
+        if (inputs.length === 0) return new FileStore(null, null, this.extensions);
         let files = new Map(inputs.map(({path,data}) => {
-            let f = File.makeFile(path, data, readOnly);
+            let f = File.makeFile(path, data, this.extensions);
             return [f.id, f];
         }));
         let active = files.keys().next().value;
-        return new FileStore(files, active);
+        return new FileStore(files, active, this.extensions);
     }
 
-    addTextFile(path: string, data: string|ArrayBuffer): FileStore {
-        let f = File.makeFile(path, data);
-        let files = new Map(this.files);
+    addTextFile(path: string, data: FileContents): FileStore {
+        let f = File.makeFile(path, data, this.extensions);
+        let files = this.files;
         files.set(f.id, f);
-        let active = this.active ?? f.id;
-        return new FileStore(files, active);
+        let active = f.id;
+        return new FileStore(files, active, this.extensions);
     }
 
-    addFiles(inputs: {path: string, data: string|ArrayBuffer}[]): FileStore {
+    addFiles(inputs: {path: string, data: FileContents}[]): FileStore {
         if (inputs.length === 0) return this;
         let fs = inputs.map(({path,data}) => File.makeFile(path, data));
         let files = new Map(this.files);
@@ -132,15 +148,46 @@ class FileStore {
             files.set(f.id, f);
         }
         let active = this.active ?? files.keys().next().value;
-        return new FileStore(files, active);
+        return new FileStore(files, active, this.extensions);
+    }
+
+    closeFile(file: File): FileStore {
+        let files = this.files;
+        files.delete(file.id);
+        let active = (file.id === this.active) ? files.keys().next()?.value : this.active;
+        return new FileStore(files, active, this.extensions);
+    }
+
+    newFile(): FileStore {
+        let name = this._untitled_name();
+        return this.addTextFile(name, '');
+    }
+
+    setActive(file: File): FileStore {
+        return new FileStore(this.files, file.id, this.extensions);
+    }
+
+    filenameExists(name: string): boolean {
+        for (let f of this.files.values()) {
+            if (f.path === name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    _untitled_name(): string {
+        for (let i = 0; i < 100; i++) {
+            let name = `Untitled-${i}`;
+            if (!this.filenameExists(name)) {
+                return name;
+            }
+        }
+        throw new Error('you got too many files');
     }
 
     getActive(): File | null {
         return this.files.get(this.active) ?? null;
-    }
-
-    setActive(file: File): FileStore {
-        return new FileStore(this.files, file.id);
     }
 }
 
@@ -148,26 +195,28 @@ class Editor extends Component {
     ref = createRef();
     editor?: EditorView;
     readOnly: boolean;
-    ctrlEnterCb: (target: EditorView) => boolean;
     store: Signal<FileStore>;
+    extensions: Extension[];
 
     constructor({readOnly=false, ctrlEnterCb=() => false}) {
         super();
         this.readOnly = readOnly;
-        this.store = signal(new FileStore());
-        this.ctrlEnterCb = ctrlEnterCb;
+
+        this.extensions = [
+            EditorState.readOnly.of(readOnly),
+            keymap.of([
+                {key: 'Ctrl-Enter', run: ctrlEnterCb},
+            ]),
+            basicSetup,
+        ];
+        this.store = signal(new FileStore(null, null, this.extensions));
     }
 
     componentDidMount() {
         // TODO why is this.props borked on the first editor when we don't pass a readonly prop
         this.editor = new EditorView({
           extensions: [
-              // TODO not even sure if these extensions are getting passed down
-              // since we call EditorState.create elsewhere, confused on the api
-              basicSetup,
-              keymap.of([
-                  {key: 'Ctrl-Enter', run: this.ctrlEnterCb},
-              ]),
+              // we pass extensions through to the EditorState
           ],
           parent: this.ref.current,
         });
@@ -192,7 +241,7 @@ class Editor extends Component {
     }
 
     setFiles(files: {path: string, data: string|ArrayBuffer}[]) {
-        let store = FileStore.from(files, this.readOnly);
+        let store = this.store.value.from(files);
         let active = this.store.value.getActive();
         if (active !== null) {  // reselect active if path matches
             for (let f of store.files.values()) {
@@ -218,22 +267,58 @@ class Editor extends Component {
         this.store.value = store;
     }
 
+    newFile() {
+        let store = this.store.value.newFile();
+        let active = store.getActive();
+        if (active?.editorState !== null) {
+            this.editor.setState(active.editorState);
+        }
+        this.store.value = store;
+    }
+
+    closeFile(file) { // TODO undo
+        let store = this.store.value.closeFile(file);
+        let active = store.getActive();
+        if (active?.editorState !== null) {
+            this.editor.setState(active.editorState);
+        }
+        this.store.value = store;
+    }
+
     // this.props, this.state
     render() {
         let store = this.store.value;
         let tabs = Array.from(store.files.values(), (file: File) => {
-            let className = 'tab mono';
+            let className = 'tab-outer';
             if (store.active === file.id) {
                 className += ' selected';
             }
             return (
-                <button
-                    className={className}
-                    key={file.id} onClick={() => this.editFile(file)}>
-                    {file.displayName()}
-                </button>
+                <span className={className}>
+                    <button
+                        className="tab-name"
+                        key={file.id}
+                        onClick={() => this.editFile(file)}
+                        title="Edit File"
+                        >
+                        {file.displayName()}
+                    </button>
+                    <button className="tab-close-">•</button>
+                    <button className="tab-close" title="Close File"
+                        onClick={() => this.closeFile(file)}
+                    >x</button>
+                </span>
             );
         });
+        let newButton = this.readOnly ? [] : (
+            <span className="tab-outer" title="New File">
+                <button
+                    className="tab-new"
+                    onClick={() => this.newFile()}
+                    >+</button>
+            </span>
+        );
+
         let active = store.getActive();
 
         let cmContainerStyle   = active?.editorState === null ? {display: 'none'} : {};
@@ -243,6 +328,7 @@ class Editor extends Component {
         return (
             <div class="editorContainer">
                 {tabs}
+                {newButton}
                 <div style={cmContainerStyle} class="cmContainer" ref={this.ref}></div>
                 <div style={blobContainerStyle} class="blobContainer">
                     <p>Blob: first 100 bytes</p>
@@ -270,8 +356,8 @@ class App extends Component {
     componentDidMount() {
         // if you execute these back to back they don't both get applied...
         this.inputEditor.setFiles([
-            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe'},
-            {path:'blob', data: new Uint8Array([0, 0, 0, 0, 0]).buffer},
+            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe\ncat /run/pe/input/blob > /run/pe/output/blob'},
+            {path:'blob', data: new Uint8Array([254, 237, 186, 202]).buffer},
             //{path:'data.txt', data:'hi this is some data'},
             {path:'f1/dataf1.txt', data:'hi this is some data1'},
             {path:'f1/f2/dataf1f2.txt', data:'hi this is some data2'},
@@ -299,9 +385,7 @@ class App extends Component {
         //}, 100);
     }
 
-    async run(event) {
-        event.preventDefault();
-
+    async run() {
         //let {images,selectedImage,cmd} = this.state;
         let selectedImage = this.s.selectedImage.value;
         let cmd = this.s.cmd.value;

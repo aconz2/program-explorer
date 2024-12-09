@@ -164,7 +164,6 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
     //let ret = Command::new("/bin/pearchive")
-    //TODO I think we should pass an fd in so that we can run as 1000/1000
     //and we also maybe need to modify the umask
     //let mut cmd = Command::new("strace").arg("/bin/pearchive");
     let mut cmd = Command::new("/bin/pearchive");
@@ -202,6 +201,8 @@ fn pack_output<P: AsRef<OsStr>, F: AsRawFd>(dir: P, archive: F) {
         .arg("packfd")
         .arg(dir)
         .arg(format!("{fd}"))
+        .uid(1000)
+        .gid(1000)
         .status()
         .unwrap()
         .code()
