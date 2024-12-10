@@ -164,6 +164,21 @@ class FileStore {
         return this.addTextFile(name, '');
     }
 
+    renameFile(id: FileId, name: string): FileStore {
+        let file = this.files.get(id);
+        if (file == null) {
+            console.warn('renaming file not part of the store');
+            return this;
+        }
+        let byName = new Set(Array.from(this.files.values(), x => x.path));
+        if (byName.has(name)) {
+            console.warn('renaming file to colliding name');
+            return this;
+        }
+        file.path = name;
+        return new FileStore(this.files, this.active, this.extensions);
+    }
+
     setActive(file: File): FileStore {
         return new FileStore(this.files, file.id, this.extensions);
     }
@@ -185,11 +200,13 @@ class FileStore {
 }
 
 class Editor extends Component {
-    ref = createRef();
+    editorParentRef = createRef();
+    renameDialogRef = createRef();
     editor?: EditorView;
     readOnly: boolean;
     store: Signal<FileStore>;
     extensions: Extension[];
+    renamingFileId?: FileId = null;
 
     constructor({readOnly=false, ctrlEnterCb=() => false}) {
         super();
@@ -203,16 +220,6 @@ class Editor extends Component {
             basicSetup,
         ];
         this.store = signal(new FileStore(null, null, this.extensions));
-    }
-
-    componentDidMount() {
-        // TODO why is this.props borked on the first editor when we don't pass a readonly prop
-        this.editor = new EditorView({
-          extensions: [
-              // we pass extensions through to the EditorState
-          ],
-          parent: this.ref.current,
-        });
     }
 
     commitActive() {
@@ -269,13 +276,65 @@ class Editor extends Component {
         this.store.value = store;
     }
 
-    closeFile(file) { // TODO undo
+    closeFile(file: File) { // TODO undo
         let store = this.store.value.closeFile(file);
         let active = store.getActive();
         if (active?.editorState !== null) {
             this.editor.setState(active.editorState);
         }
         this.store.value = store;
+    }
+
+    renameFile(file: File) {
+        this.renamingFileId = file.id;
+        this.showRenameDialog();
+    }
+
+    renameDialog() {
+        return this.renameDialogRef.current;
+    }
+
+    showRenameDialog() {
+        if (this.renameDialogRef.current == null) return;
+        this.renameDialogRef.current.showModal();
+    }
+
+    onRenameSubmit(e) {
+        // TODO when we submit with enter on the input, e.submitter is set to
+        // whichever input/button is next in the form, not the one with the type="submit"
+        const doRename = () => {
+            let name = e.target.elements['name'].value;
+            if (name === '') {
+                console.warn('cant rename to empty string');
+                return;
+            }
+            if (this.renamingFileId === null) {
+                console.warn('cant rename without a fileid');
+                return;
+            }
+            this.store.value = this.store.value.renameFile(this.renamingFileId, name);
+        }
+        switch (e.submitter?.value) {
+            case 'rename': doRename(); break;
+            case 'cancel': // fallthrough
+            default:       // fallthrough
+        }
+        this.renamingFileId = null;
+        e.target.elements['name'].value = '';
+        this.renameDialog()?.close();
+    }
+
+    componentDidMount() {
+        this.editor = new EditorView({
+          extensions: [
+              // we pass extensions through to the EditorState
+          ],
+          parent: this.editorParentRef.current,
+        });
+
+        //if (!this.readOnly) {
+        //setTimeout(() => { this.showRenameDialog(); }, 100);
+        //}
     }
 
     // this.props, this.state
@@ -292,6 +351,7 @@ class Editor extends Component {
                         className="tab-name"
                         key={file.id}
                         onClick={() => this.editFile(file)}
+                        onDblClick={() => this.renameFile(file)}
                         title="Edit File"
                         >
                         {file.displayName()}
@@ -319,13 +379,24 @@ class Editor extends Component {
 
         return (
             <div class="editorContainer">
-                {tabs}
-                {newButton}
-                <div style={cmContainerStyle} class="cmContainer" ref={this.ref}></div>
-                <div style={blobContainerStyle} class="blobContainer">
+                <div className="tab-row">
+                    {tabs}
+                    {newButton}
+                </div>
+                <div style={cmContainerStyle} className="cmContainer" ref={this.editorParentRef}></div>
+                <div style={blobContainerStyle} className="blobContainer">
                     <p>Blob: first 100 bytes</p>
                     <pre>{blobContents}</pre>
                 </div>
+                <dialog ref={this.renameDialogRef}>
+                    <form method="dialog" onSubmit={(e) => {e.preventDefault(); this.onRenameSubmit(e);}}>
+                        <label for="name">Rename:</label>
+                        <input autocomplete="off" name="name" type="text" />
+                        <button value="rename" type="submit">Rename</button>
+                        <button value="cancel">Cancel</button>
+                        <p><kbd>Enter</kbd> to submit, <kbd>Esc</kbd> to cancel</p>
+                    </form>
+                </dialog>
             </div>
         );
     }
@@ -499,31 +570,37 @@ class App extends Component {
             );
             fullCommand = JSON.stringify(computeFullCommand(image, cmd).cmd);
         }
-        return <div>
-            <form>
-                <select onChange={e => this.onImageSelect(e)}>
-                    {imageOptions}
-                </select>
-                <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
-                <button className="mono" onClick={e => { e.preventDefault(); this.run(); }}>Run</button>
-                <span className="mono">{fullCommand}</span>
-                <span className="mono">{lastStatus ?? ''}</span>
+        return (
+            <div>
+                <form>
+                    <select onChange={e => this.onImageSelect(e)}>
+                        {imageOptions}
+                    </select>
+                    <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
+                    <button className="mono" onClick={e => { e.preventDefault(); this.run(); }}>Run</button>
+                    <span className="mono">{fullCommand}</span>
+                    <span className="mono">{lastStatus ?? ''}</span>
 
-                {imageDetails}
+                    {imageDetails}
+                </form>
 
+                <details>
+                    <summary>Help</summary>
+                    <p><kbd>Ctrl+Enter</kbd> within text editor will run</p>
+                    <p>Input size limited to 1 MB</p>
+                </details>
 
-            </form>
-
-            <div id="editorSideBySide">
-                <Editor
-                    ref={this.r_inputEditor}
-                    ctrlEnterCb={(_editorView) => { this.run(); return true; }}
-                    />
-                <Editor
-                    ref={this.r_outputEditor}
-                    readOnly={true} />
-            </div>
+                <div id="editorSideBySide">
+                    <Editor
+                        ref={this.r_inputEditor}
+                        ctrlEnterCb={(_editorView) => { this.run(); return true; }}
+                        />
+                    <Editor
+                        ref={this.r_outputEditor}
+                        readOnly={true} />
+                </div>
         </div>
+        );
     }
 }
 

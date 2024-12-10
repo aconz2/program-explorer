@@ -1,5 +1,6 @@
 .cmContainer {
     height: 100vh;
+    padding-top: 2px;
 }
 
 .editorContainer {
@@ -21,25 +22,30 @@
 
     .tab-close {
         text-align: center;
-        width: 1.5ch;
+        width: 3ch;
         display: inline-block;
+        padding: 0;
     }
 
     .tab-name:hover, .tab-close:hover, .tab-new:hover { cursor: pointer; }
 
     .tab-close:after { content: "•"; }
-    .tab-close:hover:after { content: "x"; }
+    .tab-close:hover:after { content: "✕"; }
 
     .tab-close:hover, .tab-new:hover { background: whitesmoke; }
 
     .tab-close, .tab-new { border-radius: 4px; }
 
     .tab-outer.selected {
-        border-bottom: 1px solid cornflowerblue;
+        border-bottom: 2px solid cornflowerblue;
     }
+
     .tab-outer.selected .tab-name {
-        font-weight: bold;
+        /*font-weight: bold;*/
     }
+
+    .tab-outer.selected .tab-close:after { content: "✕"; }
+    /*.tab-outer.selected .tab-close { display: inline-block; }*/
 
 }
 
