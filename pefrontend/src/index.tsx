@@ -167,19 +167,11 @@ class FileStore {
         return new FileStore(this.files, file.id, this.extensions);
     }
 
-    filenameExists(name: string): boolean {
-        for (let f of this.files.values()) {
-            if (f.path === name) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     _untitled_name(): string {
+        let byName = new Set(Array.from(this.files.values(), x => x.path));
         for (let i = 0; i < 100; i++) {
             let name = `Untitled-${i}`;
-            if (!this.filenameExists(name)) {
+            if (!byName.has(name)) {
                 return name;
             }
         }
