@@ -3,6 +3,7 @@ import { signal, Signal } from '@preact/signals';
 import { EditorState, Extension } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { EditorView, basicSetup } from 'codemirror';
+
 import * as pearchive from './pearchive';
 import {Api} from './api';
 
@@ -526,31 +527,4 @@ class App extends Component {
     }
 }
 
-const PLACEHOLDER_DIRECTIONS = `Run something to see the output...`;
-// TODO something about the args going in not being compat with the Component type signature
 render(<App/>, document.getElementById('app'));
-
-//const response = await fetch(window.location.origin + '/api/v1/images');
-//console.log(response);
-//if (response.ok) {
-//    const json = await response.json();
-//    s_images.value = json;
-//    if (json.images?.length > 0) {
-//        s_chosenImage.value = json.images[0].links.runi;
-//    }
-//} else {
-//    console.error(response);
-//}
-//
-//<Editor
-//  height="80vh"
-//  theme="vs-dark"
-//  path={file.name}
-//  defaultLanguage={file.language}
-//  defaultValue={file.value}
-///>
-//function getOrCeateFile(path, text) {
-//    let uri = monaco.Uri.file(path);
-//    return monaco.editor.getModel(uri) || monaco.editor.createModel(text, undefined, uri);
-//}
-
