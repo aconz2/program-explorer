@@ -22,6 +22,8 @@ type AppState = {
     selectedImage: Signal<ImageId | null>,
     cmd: Signal<string | null>,
     lastStatus: Signal<string | null>,
+    lastRuntime: Signal<number | null>
+    running: Signal<boolean>,
 }
 
 function bufToHex(data: ArrayBuffer, length=100): string {
@@ -332,10 +334,6 @@ class Editor extends Component {
           ],
           parent: this.editorParentRef.current,
         });
-
-        //if (!this.readOnly) {
-        //setTimeout(() => { this.showRenameDialog(); }, 100);
-        //}
     }
 
     // this.props, this.state
@@ -412,6 +410,8 @@ class App extends Component {
         selectedImage: signal(null),
         cmd: signal(null),
         lastStatus: signal(null),
+        lastRuntime: signal(null),
+        running: signal(false),
     };
 
     get inputEditor():  Editor { return this.r_inputEditor.current; }
@@ -482,6 +482,7 @@ class App extends Component {
             }
         });
         const response = await fetch(req);
+        // TODO handle 429
         if (!response.ok) {
             console.error(response);
             return;
@@ -514,6 +515,20 @@ class App extends Component {
         this.outputEditor.setFiles(returnFiles);
     }
 
+    async onRun() {
+        this.s.running.value = true;
+        let start = performance.now();
+        console.log('beginRun');
+        try {
+            await this.run();
+        } catch (error) {
+            console.error(error);
+        }
+        console.log('endrun');
+        this.s.lastRuntime.value = performance.now() - start;
+        this.s.running.value = false;
+    }
+
     async fetchImages() {
         let response = await fetch(window.location.origin + '/api/v1/images');
         if (response.ok) {
@@ -542,6 +557,7 @@ class App extends Component {
         let selectedImage = this.s.selectedImage.value;
         let cmd = this.s.cmd.value;
         let lastStatus = this.s.lastStatus.value;
+        let lastRuntime = this.s.lastRuntime.value;
 
         // firefox supports Map().values().map(), but chrome doesn't
         let imageOptions = Array.from(images.values(), ({info,links}) => {
@@ -572,33 +588,49 @@ class App extends Component {
             fullCommand = JSON.stringify(computeFullCommand(image, cmd).cmd);
         }
         return (
-            <div>
+            <div className="mono">
+                <details>
+                    <summary>Help</summary>
+                    <p>Input size limited to 1 MB</p>
+                    <p>Runtime limited to 1 second</p>
+                    <p>Input files are in <code>/run/pe/input</code></p>
+                    <p>Output files go in <code>/run/pe/output</code></p>
+                    <p><code>stdout</code> and <code>stderr</code> are captured</p>
+                    <p><code>stdin</code> can be attached to an input file (under Advanced)</p>
+                    <p><kbd>Ctrl+Enter</kbd> within text editor will run</p>
+                </details>
+
                 <form>
                     <select onChange={e => this.onImageSelect(e)}>
                         {imageOptions}
                     </select>
                     <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
-                    <button className="mono" onClick={e => { e.preventDefault(); this.run(); }}>Run</button>
+                    <button
+                        className="mono"
+                        onClick={e => { e.preventDefault(); this.onRun(); }}
+                        disabled={this.s.running}
+                        >
+                        {this.s.running.value ? 'Running…' : 'Run'}
+                    </button>
                     <span className="mono">{fullCommand}</span>
-                    <span className="mono">{lastStatus ?? ''}</span>
 
                     {imageDetails}
                 </form>
 
-                <details>
-                    <summary>Help</summary>
-                    <p><kbd>Ctrl+Enter</kbd> within text editor will run</p>
-                    <p>Input size limited to 1 MB</p>
-                </details>
-
-                <div id="editorSideBySide">
-                    <Editor
-                        ref={this.r_inputEditor}
-                        ctrlEnterCb={(_editorView) => { this.run(); return true; }}
-                        />
-                    <Editor
-                        ref={this.r_outputEditor}
-                        readOnly={true} />
+                <div id="inputOutputContainer">
+                    <div id="inputContainer">
+                        <Editor
+                            ref={this.r_inputEditor}
+                            ctrlEnterCb={(_editorView) => { this.onRun(); return true; }}
+                            />
+                    </div>
+                    <div id="outputContainer">
+                        <span className="mono">{lastRuntime === null ? '' : `${lastRuntime.toFixed(2)}ms`}</span>
+                        <span className="mono">{lastStatus ?? ''}</span>
+                        <Editor
+                            ref={this.r_outputEditor}
+                            readOnly={true} />
+                    </div>
                 </div>
         </div>
         );

@@ -1,13 +1,12 @@
+summary { cursor: pointer; }
+
 .cmContainer {
-    height: 100vh;
+    height: 80vh;
     padding-top: 2px;
 }
 
-.editorContainer {
-    height: 100vh;
-    width: 50%;
-}
-
+.cm-editor { height: 100%; }
+.cm-scroller { overflow: auto; }
 
 .editorContainer {
     .tab-outer {
@@ -50,9 +49,8 @@
 }
 
 
-#editorSideBySide {
-    display: flex;
-}
+#inputOutputContainer { display: flex; }
+.inputContainer, .outputContainer { width: 50%; }
 
 .mono {
     font-family: monospace;

@@ -161,7 +161,6 @@ export function unpackArchiveV1(data: ArrayBuffer|Uint8Array|DataView): {path: s
         }
     }
 
-    console.log(acc);
     console.timeEnd('unpackArchiveV1');
     return acc;
 }
