@@ -286,6 +286,7 @@ class Editor extends Component {
     }
 
     renameFile(file: File) {
+        if (this.readOnly) return;
         this.renamingFileId = file.id;
         this.showRenameDialog();
     }
