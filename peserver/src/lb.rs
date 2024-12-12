@@ -95,7 +95,6 @@ impl Worker {
 
 // peers could be dynamic in the future, but always have to maintain the same id
 pub struct Workers {
-    peers: Vec<HttpPeer>,
     workers: Vec<Arc<Worker>>,
     data: ArcSwap<ImageData>,
     image_check_frequency: Duration,
@@ -106,11 +105,9 @@ impl Workers {
         if workers.is_empty() { return None; }
         if workers.len() > WorkerId::MAX.into() { return None; }
 
-        let peers: Vec<_> = workers.iter().map(|x| x.peer.clone()).collect();
         let workers: Vec<_> = workers.into_iter().map(|x| Arc::new(x)).collect();
 
         Some(Self {
-            peers,
             workers,
             data: ArcSwap::from_pointee(ImageData::new()),
             image_check_frequency,
@@ -167,10 +164,10 @@ impl BackgroundService for Workers {
             interval.tick().await;
 
             // TODO in parallel or something (if dynamic, hard to spawn task per)
-            for (id, peer) in self.peers.iter().enumerate() {
-                match self.do_update(id.try_into().unwrap(), peer).await {
+            for (id, worker) in self.workers.iter().enumerate() {
+                match self.do_update(id.try_into().unwrap(), &worker.peer).await {
                     Ok(()) => {}
-                    Err(e) => { error!("error getting images for peer {} {:?} {:?}", id, peer, e); }
+                    Err(e) => { error!("error getting images for peer {} {:?} {:?}", id, worker.peer, e); }
                 }
             }
         }

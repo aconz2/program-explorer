@@ -35,16 +35,9 @@ summary { cursor: pointer; }
 
     .tab-close, .tab-new { border-radius: 4px; }
 
-    .tab-outer.selected {
-        border-bottom: 2px solid cornflowerblue;
-    }
-
-    .tab-outer.selected .tab-name {
-        /*font-weight: bold;*/
-    }
+    .tab-outer.selected { border-bottom: 2px solid cornflowerblue; }
 
     .tab-outer.selected .tab-close:after { content: "✕"; }
-    /*.tab-outer.selected .tab-close { display: inline-block; }*/
 
 }
 
