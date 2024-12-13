@@ -20,11 +20,21 @@ static SECCOMP: Lazy<oci_runtime::LinuxSeccomp> = Lazy::new(|| {
     serde_json::from_slice(SECCOMP_JSON).unwrap()
 });
 
+#[derive(Debug)]
+pub enum Error {
+    BadArch,
+    BadOs,
+    BadArgs,
+    EmptyUser,
+    UnhandledUser,
+    OciUser,
+}
+
 // the allocations in this make me a bit unhappy, but maybe its all worth it
 pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
                            entrypoint: Option<&[String]>,
                            cmd:        Option<&[String]>,
-                           ) -> Option<oci_runtime::Spec> {
+                           ) -> Result<oci_runtime::Spec, Error> {
     //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(UID, UID);
     // ugh this api is horrible
@@ -49,8 +59,8 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
     linux.set_seccomp(Some(SECCOMP.clone()));
 
     // TODO multi arch/os
-    if *image_config.architecture() != oci_image::Arch::Amd64 { return None; }
-    if *image_config.os() != oci_image::Os::Linux { return None; }
+    if *image_config.architecture() != oci_image::Arch::Amd64 { return Err(Error::BadArch); }
+    if *image_config.os() != oci_image::Os::Linux { return Err(Error::BadOs); }
 
     // TODO how does oci-spec-rs deserialize the config .Env into .env ?
 
@@ -118,7 +128,7 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         }
         acc
     };
-    if args.is_empty() { return None; }
+    if args.is_empty() { return Err(Error::BadArgs); }
     process.set_args(Some(args));
 
     // image config can be null / totally empty
@@ -133,15 +143,35 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         //   groups of the given user/uid in /etc/passwd from
         //   the container are applied.
         // let _ = config.exposed_ports; // ignoring network for now
+        if let Some(user_config_string) = config.user() {
+            process.set_user(parse_user_string(user_config_string)?);
+        }
 
         if let Some(env) = config.env() {
             *process.env_mut() = Some(env.clone());
         }
 
-        if let Some(cwd) = config.working_dir() { process.set_cwd(cwd.into()); }
+        if let Some(cwd) = config.working_dir() {
+            process.set_cwd(cwd.into());
+        }
     } else {
+        // TODO are the defaults all okay here?
     }
 
-    Some(spec)
+    Ok(spec)
 }
 
+fn parse_user_string(s: &str) -> Result<oci_runtime::User, Error> {
+    if s == "" { return Err(Error::EmptyUser); }
+    if let Ok(uid) = s.parse::<u32>() {
+        // TODO this is also supposed to lookup the gid in /etc/group I think
+        return oci_runtime::UserBuilder::default().uid(uid).gid(uid).build().map_err(|_| Error::OciUser);
+    }
+    let mut iter = s.splitn(2, ":");
+    let a = iter.next().and_then(|x| Some(x.parse::<u32>()));
+    let b = iter.next().and_then(|x| Some(x.parse::<u32>()));
+    match (a, b) {
+        (Some(Ok(uid)), Some(Ok(gid))) => oci_runtime::UserBuilder::default().uid(uid).gid(gid).build().map_err(|_| Error::OciUser),
+        _ => Err(Error::UnhandledUser)
+    }
+}

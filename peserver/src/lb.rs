@@ -27,7 +27,7 @@ use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 use peserver::api::v1 as apiv1;
 use peserver::api;
 
-use peserver::util::{read_full_client_response_body,session_ip_id,make_json_response_header};
+use peserver::util::{read_full_client_response_body,session_ip_id};
 use peserver::util::premade_errors;
 
 // pingora has been mostly fine, I don't know why the caching logic is so baked into their proxy
@@ -59,7 +59,13 @@ impl ImageData {
     fn from_parts(image_map: BTreeMap<String, WorkerId>,
                   premade_json: Bytes,
                   ) -> Self {
-        let premade_json_response_header = make_json_response_header(premade_json.len());
+        let premade_json_response_header = {
+            let mut x = ResponseHeader::build(200, Some(3)).unwrap();
+            x.insert_header(header::CONTENT_TYPE, "application/json").unwrap();
+            x.insert_header(header::CONTENT_LENGTH, premade_json.len()).unwrap();
+            x.insert_header(header::CACHE_CONTROL, "max-age=3600").unwrap();
+            x
+        };
         Self { image_map, premade_json, premade_json_response_header }
     }
     fn new() -> Self {

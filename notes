@@ -438,3 +438,9 @@ podman-oci-config | jq -S
 ./build.sh && (cd perunner && target/debug/perunner --spec --console echo hi) | jq -S
 
 pingora write timeouts don't work great because the write completes instantly and then the kernel holds the buffer, interestingly curl --limit-rate 1 keeps reading even after the process is shut down. not sure why the keepalive timeout isn't getting kicked though
+
+okay so if we want user to resolve for named things, we have to lookup /etc/passwd and /etc/group in the container's rootfs, so we have to do this after flattening and probably after it is in an erofs since that handles weird shit like symlinks. Read the entry using
+https://github.com/moby/sys/blob/main/user/user.go
+and
+https://pkg.go.dev/gvisor.dev/gvisor/pkg/erofs#Inode
+podman does this in pkg/lookup/lookup.go GetUserGroupInfo

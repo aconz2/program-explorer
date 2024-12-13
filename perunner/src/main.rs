@@ -186,7 +186,7 @@ struct Args {
     crun_debug: bool,
 
     #[arg(long, help = "just build the spec and exit")]
-    spec: bool,
+    spec_only: bool,
 
     #[arg(long, help = "print some stuff to console about the kernel")]
     kernel_inspect: bool,
@@ -249,7 +249,8 @@ fn main() {
     // here we just always replace all the image's arguments
     let runtime_spec = create_runtime_spec(&image_index_entry.image.config, Some(&[]), Some(&args.args)).unwrap();
 
-    if args.spec {
+    if args.spec_only {
+        println!("{}", serde_json::to_string_pretty(&image_index_entry.image.config).unwrap());
         println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
         return;
     }

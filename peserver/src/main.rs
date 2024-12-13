@@ -251,19 +251,14 @@ impl HttpRunnerApp {
 
         match response_format {
             peinit::ResponseFormat::JsonV1 => {
-                let response_json_serialized = {
-                    peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
-                        .map(|(_, x)| x)
-                        .map_err(|_| Error::ResponseRead)?
-                };
-                Ok(response_json_vec(StatusCode::OK, response_json_serialized))
+                peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
+                    .map_err(|_| Error::ResponseRead)
+                    .map(|(_archive_size, json_bytes)| response_json_vec(StatusCode::OK, json_bytes))
             }
             peinit::ResponseFormat::PeArchiveV1 => {
-                let response_json_archive = {
-                    peinit::read_io_file_response_archive_bytes(worker_output.io_file.as_file_mut())
-                        .map_err(|_| Error::ResponseRead)?
-                };
-                Ok(response_pearchivev1(StatusCode::OK, response_json_archive))
+                peinit::read_io_file_response_archive_bytes(worker_output.io_file.as_file_mut())
+                    .map_err(|_| Error::ResponseRead)
+                    .map(|response_bytes| response_pearchivev1(StatusCode::OK, response_bytes))
             }
         }
     }

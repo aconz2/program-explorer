@@ -1,7 +1,7 @@
 use std::fs;
 use std::fs::{File,DirEntry};
 use std::process::{Stdio, Command};
-use std::io::{Read,Seek};
+use std::io::{Read};
 use std::ffi::{CStr,OsStr,CString};
 use std::path::Path;
 use std::io;
@@ -161,7 +161,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut f = File::open(&archive).unwrap();
     let (archive_size, config) = read_io_file_config(&mut f).unwrap();
 
-    let offset = f.stream_position().unwrap();
+    //let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
     //let ret = Command::new("/bin/pearchive")
     //and we also maybe need to modify the umask
@@ -320,7 +320,7 @@ fn main() {
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
     mount(&rootfs_dir, c"/mnt/rootfs", None, libc::MS_SILENT | libc::MS_BIND, None).unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
-    Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
+    //Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
 
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 

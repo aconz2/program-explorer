@@ -13,6 +13,7 @@ import (
     "maps"
     "os"
     "os/exec"
+    "regexp"
     "slices"
     "strings"
     "syscall"
@@ -39,6 +40,8 @@ const IndexJsonMagic = uint64(0x1db56abd7b82da38)  // magic to be put at end of 
 
 type HeaderXform func(*tar.Header) (error)
 
+// only fields with capital are put in JSON
+
 type PEImageId struct {
     Digest v1.Hash       `json:"digest"`
     Repository string    `json:"repository"` // library/gcc
@@ -46,16 +49,11 @@ type PEImageId struct {
     Tag string           `json:"tag"`        // 14.1.0
 }
 
-// only fields with capital/exported are put in JSON
 type PEImageIndexEntry struct {
-    // [a-f0-9]+ that we have unpacked the flattened rootfs under
-    Rootfs string            `json:"rootfs"`
+    Rootfs string            `json:"rootfs"` // [a-f0-9]+ that we have unpacked the flattened rootfs under
     Config *v1.ConfigFile    `json:"config"`
-    // we guarantee that descriptor.annotations["org.opencontainers.image.ref.name"] exists
-    // and looks like index.docker.io/library/gcc:14.1.0
     Manifest v1.Manifest     `json:"manifest"`
     Descriptor v1.Descriptor `json:"descriptor"`
-    // looks like index.docker.io/library/gcc:14.1.0
     Id PEImageId             `json:"id"` // idk this name is terrible
 }
 
@@ -66,7 +64,7 @@ type PEImageIndex struct {
 type OCIIndexEntry struct {
     img            v1.Image
     ref            name.Reference
-    descriptor     v1.Descriptor
+    descriptor     v1.Descriptor // descriptor in the oci image index
     manifest       v1.Manifest
     rootfsDigest   v1.Hash  // combined hash of each layer
     configDigest   v1.Hash
@@ -84,6 +82,7 @@ func OffsetUidGid(offset int) HeaderXform {
 func PrependPath(s string) HeaderXform {
     return func(header *tar.Header) error {
         header.Name = filepath.Join(s, header.Name)
+        // TODO wait I think the below is only for relative symlinks
         // NOTE: symlinks do NOT get prefixed, they look broken in a tar dump
         // but resolve correctly once inside a container
         if header.Typeflag == tar.TypeLink {
@@ -196,7 +195,18 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
         })
     }
 
+    slices.SortFunc(images, func(a, b PEImageIndexEntry) int {
+        // TODO computes string every time
+        return strings.Compare(a.Id.Digest.String(), b.Id.Digest.String())
+    })
+
     return PEImageIndex { Images: images }
+}
+
+func isNonNumericUidGid(user string) bool {
+    if user == "" { return false; }
+    re := regexp.MustCompile(`^\d+(:\d+)?$`)
+    return !re.MatchString(user)
 }
 
 func mainExport(output io.Writer, args []string) ([]byte, error) {
@@ -221,6 +231,13 @@ func mainExport(output io.Writer, args []string) ([]byte, error) {
     if err != nil {
         return nil, fmt.Errorf("choosing images %w", err)
     }
+
+    for _, entry := range selected {
+        if isNonNumericUidGid(entry.config.Config.User) {
+            return nil, fmt.Errorf("entry %s has non-numeric user/group `%s`", entry.ref, entry.config.Config.User)
+        }
+    }
+
     rootfsMap := makeRootfsMap(selected)
     rootfsShortMap := makeRootfsShortMap(rootfsMap)
     peIdx := makePEImageIndex(selected, rootfsShortMap)
@@ -376,7 +393,8 @@ func readPeIndexJson(infile string) (*PEImageIndex, error) {
     return peImageIndex, nil
 }
 
-func exportImageSqfs(outfile string, args []string) (error) {
+// TODO this doesn't do the uid/gid mapping!
+func mainImageSqfs(outfile string, args []string) (error) {
     cmd := exec.Command("sqfstar", "-comp", "zstd", "-force", outfile)
     stdin, err := cmd.StdinPipe()
     if err != nil {
@@ -398,7 +416,7 @@ func exportImageSqfs(outfile string, args []string) (error) {
     return nil
 }
 
-func exportImageErofs(outfile string, args []string) (error) {
+func mainImageErofs(outfile string, args []string) (error) {
     f, err := os.CreateTemp("", "fifo")
     if err != nil {
         return fmt.Errorf("tempfile %w", err)
@@ -451,10 +469,10 @@ func mainImage(args []string) (error) {
 
     switch format {
     case "sqfs":
-        return exportImageSqfs(image, args[1:])
+        return mainImageSqfs(image, args[1:])
 
     case "erofs":
-        return exportImageErofs(image, args[1:])
+        return mainImageErofs(image, args[1:])
     default:
         return fmt.Errorf("got unexpected format %s", format)
     }
@@ -503,6 +521,8 @@ func mainPull(args []string) (error) {
         if parsed.Identifier() == "latest" {
             return fmt.Errorf("latest tag is not allowed %s: %s", ref, parsed.Name())
         }
+        // TODO some images like chainguard/ffmpeg don't have a version tag and only a sha tag,
+        //      maybe we want to append a custom tag if we figure out the version?
         // based on go-containerregistry/cmd/crane/cmd/pull.go
         opts := []layout.Option{}
         opts = append(opts, layout.WithAnnotations(map[string]string{
@@ -570,6 +590,31 @@ func mainList(args []string) (error) {
             fmt.Printf("  %3d      %v\n", i, m)
             fmt.Printf("           %v\n", digest)
         }
+
+        {
+            fmt.Println("descriptor (from image index)");
+            buf, err := json.MarshalIndent(v.descriptor, "", "  ")
+            fmt.Printf("%s\n", buf)
+            if err != nil {
+                return fmt.Errorf("dumping json %w", err)
+            }
+        }
+        {
+            fmt.Println("manifest");
+            buf, err := json.MarshalIndent(v.manifest, "", "  ")
+            fmt.Printf("%s\n", buf)
+            if err != nil {
+                return fmt.Errorf("dumping json %w", err)
+            }
+        }
+        {
+            fmt.Println("config");
+            buf, err := json.MarshalIndent(v.config, "", "  ")
+            fmt.Printf("%s\n", buf)
+            if err != nil {
+                return fmt.Errorf("dumping json %w", err)
+            }
+        }
     }
     return nil
 }
@@ -580,7 +625,7 @@ func mainParse(args []string) (error) {
         if err != nil {
             return fmt.Errorf("error parsing %w", err)
         }
-        fmt.Printf("%s\tName=%s\tContext=%s\tIdentifier=%s\tContext.RepositorStr=%s\tContext.RegistryStr=%s\n",
+        fmt.Printf("%s\tName=%s\tContext=%s\tIdentifier=%s\tContext.RepositoryStr=%s\tContext.RegistryStr=%s\n",
                     ref, parsed.Name(), parsed.Context(), parsed.Identifier(),
                     parsed.Context().RepositoryStr(), parsed.Context().RegistryStr(),
                 )
