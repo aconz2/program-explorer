@@ -25,8 +25,10 @@ use peimage::PEImageMultiIndex;
 
 use peserver::api;
 use peserver::api::v1 as apiv1;
-use peserver::api::{ContentType,APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
-use peserver::util::{read_full_server_request_body};
+use peserver::util::{
+    read_full_server_request_body,
+    response_json,response_no_body,response_json_vec,response_pearchivev1
+};
 
 #[derive(Debug,Serialize,Clone)]
 enum Error {
@@ -57,38 +59,6 @@ struct HttpRunnerApp {
     pub cloud_hypervisor: OsString,
     pub initramfs: OsString,
     pub kernel: OsString,
-}
-
-fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
-    Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_LENGTH, 0)
-        .body(vec![])
-        .unwrap()
-}
-
-fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Result<Response<Vec<u8>>> {
-    Ok(response_json_vec(status, serde_json::to_vec(&body)?))
-}
-
-fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
-    // TODO presize headermap
-    Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
-        .header(http::header::CONTENT_LENGTH, body.len())
-        .body(body)
-        .unwrap()
-}
-
-fn response_pearchivev1(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
-    // TODO presize headermap
-    Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, APPLICATION_X_PE_ARCHIVEV1)
-        .header(http::header::CONTENT_LENGTH, body.len())
-        .body(body)
-        .unwrap()
 }
 
 //fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -164,7 +134,7 @@ impl HttpRunnerApp {
         let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
             .ok_or(Error::BadRequest)?;
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
-            .ok_or(Error::OciSpec)?;
+            .map_err(|_| Error::OciSpec)?;
 
         let timeout = Duration::from_millis(1000);
         let ch_timeout = timeout + Duration::from_millis(500);

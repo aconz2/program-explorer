@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap,HashMap};
 
-use pingora::prelude::{timeout,RequestHeader,HttpPeer};
+use pingora::prelude::{timeout,HttpPeer};
+use pingora::http::{RequestHeader,ResponseHeader};
 use pingora::services::background::{background_service,BackgroundService};
 use pingora::modules::http::compression::ResponseCompressionBuilder;
 use pingora::modules::http::HttpModules;
@@ -10,7 +11,6 @@ use pingora::server::configuration::{Opt,ServerConf};
 use pingora::server::Server;
 use pingora::Result;
 use pingora::proxy::{ProxyHttp, Session};
-use pingora::http::{ResponseHeader};
 use pingora_limits::rate::Rate;
 use pingora::protocols::http::v1::common::header_value_content_length;
 
@@ -24,15 +24,15 @@ use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 
+use peserver::StaticFile;
 use peserver::api::v1 as apiv1;
 use peserver::api;
+use peserver::admin::Admin;
 
 use peserver::util::{read_full_client_response_body,session_ip_id};
 use peserver::util::premade_errors;
 
-// pingora has been mostly fine, I don't know why the caching logic is so baked into their proxy
-// though, it makes it a bit complicated to read
-// argh: write_response_header_ref makes a Box::new(x.clone()) internally! I guess it has to but
+// write_response_header_ref makes a Box::new(x.clone()) internally! I guess it has to but
 // maybe there could be a path to take an Arc so that you don't actually have to copy?
 // and I wish I could preload the downstream request body so that it is in memory before sending it
 // upstream
@@ -44,6 +44,8 @@ const TLS_FALSE: bool = false;
 const HASHES: usize = 4;
 const SLOTS: usize = 1024;
 static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
+
+static STATIC_FILES: Lazy<Arc<ArcSwap<HashMap<String, StaticFile>>>> = Lazy::new(|| Arc::new(ArcSwap::from_pointee(HashMap::new())));
 
 type WorkerId = u16;
 
@@ -195,7 +197,6 @@ pub struct LBCtxInner {
 
 pub struct LBCtx {
     inner: Option<LBCtxInner>,
-    //body_len: usize
 }
 
 impl LBCtx {
@@ -207,12 +208,6 @@ impl LBCtx {
         assert!(self.inner.is_none());
         self.inner.replace(inner.into());
     }
-    //fn add_body_len(&mut self, len: Option<usize>) -> usize {
-    //    if let Some(l) = len {
-    //        self.body_len += l;
-    //    }
-    //    self.body_len
-    //}
 }
 
 impl LB {
@@ -296,6 +291,14 @@ impl LB {
         let curr_window_requests = RATE_LIMITER.observe(&session_ip_id(session), 1);
         curr_window_requests > api::MAX_REQ_PER_SEC
     }
+
+    fn static_file(&self, parts: &http::request::Parts) -> Option<(ResponseHeader, Bytes)> {
+        if parts.method != Method::GET { return None; }
+        STATIC_FILES
+            .load()
+            .get(parts.uri.path())
+            .map(|static_file| static_file.for_request(parts))
+    }
 }
 
 // LB phases go (from HTTPProxy::proxy_request)
@@ -328,6 +331,12 @@ impl ProxyHttp for LB {
         }
 
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
+
+        if let Some((response, body)) = self.static_file(req_parts) {
+            session.downstream_session.write_response_header_ref(&response).await?;
+            session.downstream_session.write_response_body(body.clone(), true).await?;
+            return Ok(true);
+        }
 
         let ret = match (req_parts.method.clone(), req_parts.uri.path()) {
             (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, ctx).await.map(|_| true),
@@ -398,6 +407,29 @@ fn main() {
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
     lb_service.add_tcp("127.0.0.1:6188");
 
+    {
+        let mut hm = HashMap::new();
+        let index_data = Bytes::from_static(b"foooooooooooooooo");
+        hm.insert("/".to_string(), StaticFile {
+            uncompressed: ( {
+                let mut header = ResponseHeader::build(StatusCode::OK, Some(3)).unwrap();
+                header.insert_header("Content-type", "text/html").unwrap();
+                header.insert_header("Content-length", index_data.len()).unwrap();
+                //header.insert_header("Etag", "1").unwrap();
+                header
+            },
+            index_data
+            ),
+          compressed: None,
+          etag: None,
+        });
+        STATIC_FILES.store(Arc::new(hm));
+    }
+
+    use pingora::services::Service;
+    let mut admin_service = Service::new("admin".to_string(), Admin {});
+    admin_service.add_uds("/tmp/peserver-admin.sock", None);
+
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
     //let key_path = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
     //
@@ -407,8 +439,8 @@ fn main() {
     //lb.add_tls_with_settings("0.0.0.0:6189", None, tls_settings);
 
     my_server.add_service(lb_service);
-    //my_server.add_service(upstreams_background);
     my_server.add_service(workers_background);
+    my_server.add_service(admin_service);
 
     my_server.run_forever();
 }

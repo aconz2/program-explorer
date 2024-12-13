@@ -1,11 +1,14 @@
 use std::net::{IpAddr,Ipv6Addr};
 
 use bytes::{Bytes,BytesMut};
-use pingora::http::ResponseHeader;
-use http::header;
+use http::{Response,StatusCode};
+use serde::Serialize;
+
 use pingora;
 use pingora::proxy::Session;
 use pingora::protocols::http::ServerSession;
+
+use crate::api::{APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
 
 pub async fn read_full_server_request_body(session: &mut ServerSession, max_len: usize) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
@@ -57,13 +60,38 @@ pub fn session_ip_id(session: &Session) -> u64 {
     }
 }
 
-
-pub fn make_json_response_header(len: usize) -> ResponseHeader {
-    let mut x = ResponseHeader::build(200, Some(2)).unwrap();
-    x.insert_header(header::CONTENT_TYPE, "application/json").unwrap();
-    x.insert_header(header::CONTENT_LENGTH, len).unwrap();
-    x
+pub fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_LENGTH, 0)
+        .body(vec![])
+        .unwrap()
 }
+
+pub fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Result<Response<Vec<u8>>> {
+    Ok(response_json_vec(status, serde_json::to_vec(&body)?))
+}
+
+pub fn response_json_vec(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
+    // TODO presize headermap
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, APPLICATION_JSON)
+        .header(http::header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap()
+}
+
+pub fn response_pearchivev1(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
+    // TODO presize headermap
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, APPLICATION_X_PE_ARCHIVEV1)
+        .header(http::header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap()
+}
+
 
 pub mod premade_errors {
     use once_cell::sync::Lazy;
