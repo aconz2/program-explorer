@@ -10,20 +10,29 @@ use async_trait::async_trait;
 use pingora::protocols::http::ServerSession;
 use pingora::apps::http_app::ServeHttp;
 
-use crate::StaticFile;
+use crate::staticfiles::{StaticFile,static_file_map_from_buf};
 use crate::util::{
     read_full_server_request_body,
-    response_json,response_no_body,response_json_vec,response_pearchivev1
+    response_json,response_no_body
 };
 
 pub struct Admin {
     static_files: Arc<ArcSwap<HashMap<String, StaticFile>>>,
 }
 
+impl Admin {
+    pub fn new(static_files: Arc<ArcSwap<HashMap<String, StaticFile>>>) -> Self {
+        Self {
+            static_files,
+        }
+    }
+}
+
 #[derive(Debug,Serialize,Clone)]
 enum Error {
     ReadError,
     BadBody,
+    Serde,
 }
 
 #[derive(Serialize)]
@@ -43,21 +52,19 @@ impl Into<Response<Vec<u8>>> for Error {
     }
 }
 
-fn build_static_file_map(data: Bytes) -> Result<HashMap<String, StaticFile>, Error> {
-}
-
 impl Admin {
     async fn update_static_files(&self, session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         let body = read_full_server_request_body(session, 2_000_000).await
             .map_err(|_| Error::ReadError)?;
-        let static_files = build_static_file_map(body)
+        let static_files = static_file_map_from_buf(&body)
             .map_err(|_| Error::BadBody)?;
-        self.static_files.store(static_files);
+        self.static_files.store(static_files.into());
         Ok(response_no_body(StatusCode::OK))
     }
 
-    async fn get_static_files(&self, session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
-        Ok(response_json(StatusCode::OK, StaticFileResponse{}))
+    async fn get_static_files(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+        response_json(StatusCode::OK, StaticFileResponse{})
+            .map_err(|_| Error::Serde)
     }
 }
 

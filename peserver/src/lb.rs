@@ -13,6 +13,7 @@ use pingora::Result;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora_limits::rate::Rate;
 use pingora::protocols::http::v1::common::header_value_content_length;
+use pingora::services::listening::Service;
 
 use async_trait::async_trait;
 use env_logger;
@@ -24,7 +25,7 @@ use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 
-use peserver::StaticFile;
+use peserver::staticfiles::StaticFile;
 use peserver::api::v1 as apiv1;
 use peserver::api;
 use peserver::admin::Admin;
@@ -407,27 +408,26 @@ fn main() {
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
     lb_service.add_tcp("127.0.0.1:6188");
 
-    {
-        let mut hm = HashMap::new();
-        let index_data = Bytes::from_static(b"foooooooooooooooo");
-        hm.insert("/".to_string(), StaticFile {
-            uncompressed: ( {
-                let mut header = ResponseHeader::build(StatusCode::OK, Some(3)).unwrap();
-                header.insert_header("Content-type", "text/html").unwrap();
-                header.insert_header("Content-length", index_data.len()).unwrap();
-                //header.insert_header("Etag", "1").unwrap();
-                header
-            },
-            index_data
-            ),
-          compressed: None,
-          etag: None,
-        });
-        STATIC_FILES.store(Arc::new(hm));
-    }
+    //{
+    //    let mut hm = HashMap::new();
+    //    let index_data = Bytes::from_static(b"foooooooooooooooo");
+    //    hm.insert("/".to_string(), StaticFile {
+    //        uncompressed: ( {
+    //            let mut header = ResponseHeader::build(StatusCode::OK, Some(3)).unwrap();
+    //            header.insert_header("Content-type", "text/html").unwrap();
+    //            header.insert_header("Content-length", index_data.len()).unwrap();
+    //            //header.insert_header("Etag", "1").unwrap();
+    //            header
+    //        },
+    //        index_data
+    //        ),
+    //      compressed: None,
+    //      etag: None,
+    //    });
+    //    STATIC_FILES.store(Arc::new(hm));
+    //}
 
-    use pingora::services::Service;
-    let mut admin_service = Service::new("admin".to_string(), Admin {});
+    let mut admin_service = Service::new("admin".to_string(), Admin::new(STATIC_FILES.clone()));
     admin_service.add_uds("/tmp/peserver-admin.sock", None);
 
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));

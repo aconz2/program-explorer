@@ -24,6 +24,7 @@ use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size
 use peimage::PEImageMultiIndex;
 
 use peserver::api;
+use peserver::api::ContentType;
 use peserver::api::v1 as apiv1;
 use peserver::util::{
     read_full_server_request_body,
