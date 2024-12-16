@@ -444,3 +444,6 @@ https://github.com/moby/sys/blob/main/user/user.go
 and
 https://pkg.go.dev/gvisor.dev/gvisor/pkg/erofs#Inode
 podman does this in pkg/lookup/lookup.go GetUserGroupInfo
+
+thinking ovh eco kimsufi
+https://eco.us.ovhcloud.com/?display=list&range=kimsufi
