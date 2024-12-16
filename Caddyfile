@@ -1,0 +1,6 @@
+http://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080}
+
+encode zstd gzip  # doesn't handle decompression of requests though
+reverse_proxy /api/* 127.0.0.1:6188
+root * pefrontend/dist
+file_server

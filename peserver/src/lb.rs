@@ -1,19 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::{BTreeMap,HashMap};
+use std::collections::{BTreeMap};
 
 use pingora::prelude::{timeout,HttpPeer};
 use pingora::http::{RequestHeader,ResponseHeader};
 use pingora::services::background::{background_service,BackgroundService};
-use pingora::modules::http::compression::ResponseCompressionBuilder;
-use pingora::modules::http::HttpModules;
+//use pingora::modules::http::compression::ResponseCompressionBuilder;
+//use pingora::modules::http::HttpModules;
 use pingora::server::configuration::{Opt,ServerConf};
 use pingora::server::Server;
 use pingora::Result;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora_limits::rate::Rate;
 use pingora::protocols::http::v1::common::header_value_content_length;
-use pingora::services::listening::Service;
+//use pingora::services::listening::Service;
 
 use async_trait::async_trait;
 use env_logger;
@@ -25,13 +25,11 @@ use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 
-use peserver::staticfiles::StaticFile;
 use peserver::api::v1 as apiv1;
 use peserver::api;
-use peserver::admin::Admin;
 
-use peserver::util::{read_full_client_response_body,session_ip_id};
-use peserver::util::premade_errors;
+use peserver::util::{read_full_client_response_body,session_ip_id,etag};
+use peserver::util::premade_responses;
 
 // write_response_header_ref makes a Box::new(x.clone()) internally! I guess it has to but
 // maybe there could be a path to take an Arc so that you don't actually have to copy?
@@ -46,8 +44,6 @@ const HASHES: usize = 4;
 const SLOTS: usize = 1024;
 static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
 
-static STATIC_FILES: Lazy<Arc<ArcSwap<HashMap<String, StaticFile>>>> = Lazy::new(|| Arc::new(ArcSwap::from_pointee(HashMap::new())));
-
 type WorkerId = u16;
 
 // TODO images probably needs the images kept per worker, image_map might have a list of workerids
@@ -56,20 +52,23 @@ pub struct ImageData {
     image_map: BTreeMap<String, WorkerId>,
     premade_json: Bytes,
     premade_json_response_header: ResponseHeader,
+    premade_json_etag: String,
 }
 
 impl ImageData {
     fn from_parts(image_map: BTreeMap<String, WorkerId>,
                   premade_json: Bytes,
                   ) -> Self {
+        let premade_json_etag = etag(&premade_json);
         let premade_json_response_header = {
             let mut x = ResponseHeader::build(200, Some(3)).unwrap();
             x.insert_header(header::CONTENT_TYPE, "application/json").unwrap();
             x.insert_header(header::CONTENT_LENGTH, premade_json.len()).unwrap();
             x.insert_header(header::CACHE_CONTROL, "max-age=3600").unwrap();
+            x.insert_header(header::ETAG, premade_json_etag.clone()).unwrap();
             x
         };
-        Self { image_map, premade_json, premade_json_response_header }
+        Self { image_map, premade_json, premade_json_response_header, premade_json_etag }
     }
     fn new() -> Self {
         let premade_json = serde_json::to_vec(&apiv1::images::Response{images: vec![]}).unwrap();
@@ -220,6 +219,16 @@ impl LB {
         session.set_write_timeout(api::DOWNSTREAM_WRITE_TIMEOUT);
         let downstream_session = &mut session.downstream_session;
         let data = self.workers.data.load();
+        let req_parts: &http::request::Parts = downstream_session.req_header();
+        match req_parts.headers.get(header::IF_NONE_MATCH) {
+            Some(etag) if etag.as_bytes() == data.premade_json_etag.as_bytes() => {
+                return session.downstream_session
+                    .write_response_header_ref(&*premade_responses::NOT_MODIFIED)
+                    .await
+                    .map(|_| ())
+                }
+            _ => {}
+        }
         // NOTE these skip any filter modules
         downstream_session.write_response_header_ref(&data.premade_json_response_header).await?;
         downstream_session.write_response_body(data.premade_json.clone(), true).await?;
@@ -236,7 +245,7 @@ impl LB {
         match header_value_content_length(req_parts.headers.get(header::CONTENT_LENGTH)) {
             Some(l) if l > api::MAX_BODY_SIZE => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_errors::PAYLOAD_TOO_LARGE)
+                    .write_response_header_ref(&*premade_responses::PAYLOAD_TOO_LARGE)
                     .await?;
                 return Err(pingora::Error::new(pingora::ErrorType::ReadError).into())
             }
@@ -255,7 +264,7 @@ impl LB {
             Some(worker) => worker,
             None => {
                 return session.downstream_session
-                    .write_response_header_ref(&*premade_errors::NOT_FOUND)
+                    .write_response_header_ref(&*premade_responses::NOT_FOUND)
                     .await
                     .map(|_| true);
             }
@@ -268,7 +277,7 @@ impl LB {
             }
             None => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_errors::SERVICE_UNAVAILABLE)
+                    .write_response_header_ref(&*premade_responses::SERVICE_UNAVAILABLE)
                     .await
                     .map(|_| true)
             }
@@ -292,14 +301,6 @@ impl LB {
         let curr_window_requests = RATE_LIMITER.observe(&session_ip_id(session), 1);
         curr_window_requests > api::MAX_REQ_PER_SEC
     }
-
-    fn static_file(&self, parts: &http::request::Parts) -> Option<(ResponseHeader, Bytes)> {
-        if parts.method != Method::GET { return None; }
-        STATIC_FILES
-            .load()
-            .get(parts.uri.path())
-            .map(|static_file| static_file.for_request(parts))
-    }
 }
 
 // LB phases go (from HTTPProxy::proxy_request)
@@ -318,33 +319,27 @@ impl ProxyHttp for LB {
 
     // This function is only called once when the server starts
     // for some reason the default has a downstream response compression builder that is disabled
-    fn init_downstream_modules(&self, modules: &mut HttpModules) {
-        modules.add_module(ResponseCompressionBuilder::enable(5));
-    }
+    //fn init_downstream_modules(&self, modules: &mut HttpModules) {
+    //    modules.add_module(ResponseCompressionBuilder::enable(5));
+    //}
 
     // Ok(true) means request is done
     async fn request_filter(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         if self.rate_limit(session, ctx) {
             return session.downstream_session
-                .write_response_header_ref(&*premade_errors::TOO_MANY_REQUESTS)
+                .write_response_header_ref(&*premade_responses::TOO_MANY_REQUESTS)
                 .await
                 .map(|_| true)
         }
 
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
-        if let Some((response, body)) = self.static_file(req_parts) {
-            session.downstream_session.write_response_header_ref(&response).await?;
-            session.downstream_session.write_response_body(body.clone(), true).await?;
-            return Ok(true);
-        }
-
         let ret = match (req_parts.method.clone(), req_parts.uri.path()) {
             (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, ctx).await.map(|_| true),
             (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, ctx).await,
             _ => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_errors::NOT_FOUND)
+                    .write_response_header_ref(&*premade_responses::NOT_FOUND)
                     .await
                     .map(|_| true)
             }
@@ -408,29 +403,6 @@ fn main() {
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
     lb_service.add_tcp("127.0.0.1:6188");
 
-    //{
-    //    let mut hm = HashMap::new();
-    //    let index_data = Bytes::from_static(b"foooooooooooooooo");
-    //    hm.insert("/".to_string(), StaticFile {
-    //        uncompressed: ( {
-    //            let mut header = ResponseHeader::build(StatusCode::OK, Some(3)).unwrap();
-    //            header.insert_header("Content-type", "text/html").unwrap();
-    //            header.insert_header("Content-length", index_data.len()).unwrap();
-    //            //header.insert_header("Etag", "1").unwrap();
-    //            header
-    //        },
-    //        index_data
-    //        ),
-    //      compressed: None,
-    //      etag: None,
-    //    });
-    //    STATIC_FILES.store(Arc::new(hm));
-    //}
-
-    let static_files_path = "/dev/null";
-    let mut admin_service = Service::new("admin".to_string(), Admin::new(static_files_path, STATIC_FILES.clone()).unwrap());
-    admin_service.add_uds("/tmp/peserver-admin.sock", None);
-
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
     //let key_path = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
     //
@@ -441,7 +413,6 @@ fn main() {
 
     my_server.add_service(lb_service);
     my_server.add_service(workers_background);
-    my_server.add_service(admin_service);
 
     my_server.run_forever();
 }

@@ -3,6 +3,8 @@ use std::net::{IpAddr,Ipv6Addr};
 use bytes::{Bytes,BytesMut};
 use http::{Response,StatusCode};
 use serde::Serialize;
+use sha2::{Sha256,Digest};
+use base64::prelude::{BASE64_STANDARD,Engine};
 
 use pingora;
 use pingora::proxy::Session;
@@ -92,8 +94,19 @@ pub fn response_pearchivev1(status: StatusCode, body: Vec<u8>) -> Response<Vec<u
         .unwrap()
 }
 
+pub fn etag(data: &[u8]) -> String {
+    let hash = Sha256::digest(&data);
+    let mut ret = String::with_capacity(16);
+    ret.push('W');
+    ret.push('/');
+    ret.push('"');
+    BASE64_STANDARD.encode_string(hash, &mut ret);
+    ret.push('"');
+    ret
+}
 
-pub mod premade_errors {
+
+pub mod premade_responses {
     use once_cell::sync::Lazy;
     use pingora::protocols::http::error_resp;
     use pingora::http::ResponseHeader;
@@ -117,6 +130,12 @@ pub mod premade_errors {
                 .unwrap();
             header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
             header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
+            header.insert_header("Content-Length", "0").unwrap();
+            header
+    });
+
+    pub static NOT_MODIFIED: Lazy<ResponseHeader> = Lazy::new(|| {
+            let mut header = ResponseHeader::build(StatusCode::NOT_MODIFIED, Some(1)).unwrap();
             header.insert_header("Content-Length", "0").unwrap();
             header
     });
