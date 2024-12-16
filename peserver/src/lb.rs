@@ -427,7 +427,8 @@ fn main() {
     //    STATIC_FILES.store(Arc::new(hm));
     //}
 
-    let mut admin_service = Service::new("admin".to_string(), Admin::new(STATIC_FILES.clone()));
+    let static_files_path = "/dev/null";
+    let mut admin_service = Service::new("admin".to_string(), Admin::new(static_files_path, STATIC_FILES.clone()).unwrap());
     admin_service.add_uds("/tmp/peserver-admin.sock", None);
 
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
