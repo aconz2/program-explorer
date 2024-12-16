@@ -41,7 +41,7 @@ summary { cursor: pointer; }
 
 }
 
-
+#cmd { width: 90%; }
 #inputOutputContainer { display: flex; }
 .inputContainer, .outputContainer { width: 50%; }
 

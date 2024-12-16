@@ -200,7 +200,6 @@ pub struct LBCtx {
 }
 
 impl LBCtx {
-    //fn new() -> Self { Self{ inner: None, body_len: 0 } }
     fn new() -> Self { Self{ inner: None } }
     fn is_some(&self) -> bool { self.inner.is_some() }
     fn peer(&self) -> Option<HttpPeer> { self.inner.as_ref().map(|inner| inner.worker.peer.clone()) }

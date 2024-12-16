@@ -601,17 +601,27 @@ class App extends Component {
                 </details>
 
                 <form>
-                    <select onChange={e => this.onImageSelect(e)}>
-                        {imageOptions}
-                    </select>
-                    <input className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
-                    <button
-                        className="mono"
-                        onClick={e => { e.preventDefault(); this.onRun(); }}
-                        disabled={this.s.running}
-                        >
-                        {this.s.running.value ? 'Running…' : 'Run'}
-                    </button>
+                    <div>
+                        <select onChange={e => this.onImageSelect(e)}>
+                            {imageOptions}
+                        </select>
+                    </div>
+                    <div>
+                        <input id="cmd" className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
+                    </div>
+                    <div>
+                        <button
+                            className="mono"
+                            onClick={e => {
+                                e.preventDefault();
+                                if (this.s.running.value) return;
+                                this.onRun();
+                            }}
+                            disabled={this.s.running}
+                            >
+                            {this.s.running.value ? 'Running…' : 'Run'}
+                        </button>
+                    </div>
                     <span className="mono">{fullCommand}</span>
 
                     {imageDetails}
