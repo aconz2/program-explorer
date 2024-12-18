@@ -3,7 +3,6 @@ use std::io::{Read,Write};
 use std::ffi::OsString;
 
 use pingora_timeout::timeout;
-use pingora::services::Service as IService;
 use pingora::services::listening::Service;
 use pingora::server::Server;
 use pingora::server::configuration::{Opt,ServerConf};
@@ -17,7 +16,10 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
+use log::log_enabled;
 use clap::Parser;
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter,IntCounter};
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -31,6 +33,23 @@ use peserver::util::{
     read_full_server_request_body,
     response_json,response_no_body,response_json_vec,response_pearchivev1
 };
+
+static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("req_images", "Number of images requests").unwrap()
+});
+
+static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("req_run", "Number of run requests").unwrap()
+});
+
+static ERR_CH_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("err_ch", "Number of ch errors").unwrap()
+});
+
+// timeout we put on the user's process (after the initial crun process exits)
+const RUN_TIMEOUT: Duration      = Duration::from_millis(1000);
+// overhead from kernel boot and crun start
+const CH_TIMEOUT_EXTRA: Duration = Duration::from_millis(300);
 
 #[derive(Debug,Serialize,Clone)]
 enum Error {
@@ -104,6 +123,7 @@ impl Into<Response<Vec<u8>>> for Error {
 
 impl HttpRunnerApp {
     async fn apiv1_runi(&self, session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+        REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.req_header();
 
         let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path())
@@ -138,9 +158,6 @@ impl HttpRunnerApp {
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
             .map_err(|_| Error::OciSpec)?;
 
-        let timeout = Duration::from_millis(1000);
-        let ch_timeout = timeout + Duration::from_millis(500);
-
         let ch_config = CloudHypervisorConfig {
             bin           : self.cloud_hypervisor.clone(),
             kernel        : self.kernel.clone(),
@@ -152,7 +169,7 @@ impl HttpRunnerApp {
         };
 
         let pe_config = peinit::Config {
-            timeout            : timeout,
+            timeout            : RUN_TIMEOUT,
             oci_runtime_config : serde_json::to_string(&runtime_spec).unwrap(),
             stdin              : api_req.stdin,
             strace             : false,
@@ -182,7 +199,7 @@ impl HttpRunnerApp {
         let worker_input = worker::Input {
             id         : 42, // id is useless because we are passing a return channel
             ch_config  : ch_config,
-            ch_timeout : ch_timeout,
+            ch_timeout : RUN_TIMEOUT + CH_TIMEOUT_EXTRA,
             io_file    : io_file,
             rootfs     : image_entry.path.clone().into(),
         };
@@ -199,6 +216,7 @@ impl HttpRunnerApp {
             .await
             .map_err(|_| Error::WorkerRecv)?
             .map_err(|postmortem| {
+                ERR_CH_COUNT.inc();
                 fn dump_file<F: Read>(name: &str, file: &mut F) {
                     eprintln!("=== {} ===", name);
                     let _ = std::io::copy(file, &mut std::io::stderr());
@@ -211,7 +229,7 @@ impl HttpRunnerApp {
                 Error::WorkerError
             })?;
 
-        if true {
+        if log_enabled!(log::Level::Debug) {
             fn dump_file<F: Read>(name: &str, file: &mut F) {
                 eprintln!("=== {} ===", name);
                 let _ = std::io::copy(file, &mut std::io::stderr());
@@ -236,6 +254,7 @@ impl HttpRunnerApp {
     }
 
     async fn apiv1_images(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+        REQ_IMAGES_COUNT.inc();
         response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&self.index))
             .map_err(|_| Error::Serialize)
     }
@@ -313,10 +332,12 @@ fn main() {
     let mut runner_service_http = Service::new("Program Explorer Worker".to_string(), app);
     runner_service_http.add_tcp("127.0.0.1:1234");
 
-    let services: Vec<Box<dyn IService>> = vec![
-        Box::new(runner_service_http),
-    ];
-    my_server.add_services(services);
+    let mut prometheus_service_http = Service::prometheus_http_service();
+    prometheus_service_http.add_tcp("127.0.0.1:6192");
+
+    my_server.add_service(runner_service_http);
+    my_server.add_service(prometheus_service_http);
+
     my_server.run_forever();
 }
 

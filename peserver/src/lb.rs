@@ -5,15 +5,13 @@ use std::collections::{BTreeMap};
 use pingora::prelude::{timeout,HttpPeer};
 use pingora::http::{RequestHeader,ResponseHeader};
 use pingora::services::background::{background_service,BackgroundService};
-//use pingora::modules::http::compression::ResponseCompressionBuilder;
-//use pingora::modules::http::HttpModules;
 use pingora::server::configuration::{Opt,ServerConf};
 use pingora::server::Server;
 use pingora::Result;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora_limits::rate::Rate;
 use pingora::protocols::http::v1::common::header_value_content_length;
-//use pingora::services::listening::Service;
+use pingora::services::listening::Service;
 
 use async_trait::async_trait;
 use env_logger;
@@ -402,6 +400,9 @@ fn main() {
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
     lb_service.add_tcp("127.0.0.1:6188");
 
+    let mut prometheus_service_http = Service::prometheus_http_service();
+    prometheus_service_http.add_tcp("127.0.0.1:6192");
+
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
     //let key_path = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
     //
@@ -412,6 +413,7 @@ fn main() {
 
     my_server.add_service(lb_service);
     my_server.add_service(workers_background);
+    my_server.add_service(prometheus_service_http);
 
     my_server.run_forever();
 }

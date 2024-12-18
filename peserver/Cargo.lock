@@ -1285,6 +1285,7 @@ dependencies = [
  "pingora",
  "pingora-limits",
  "pingora-timeout",
+ "prometheus",
  "serde",
  "serde_json",
  "sha2",
