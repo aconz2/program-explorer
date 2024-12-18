@@ -17,6 +17,7 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
+use clap::Parser;
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -256,9 +257,27 @@ impl ServeHttp for HttpRunnerApp {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long, default_value = "../cloud-hypervisor-static")]
+    ch: OsString,
+
+    #[arg(long, default_value = "../vmlinux")]
+    kernel: OsString,
+
+    #[arg(long, default_value = "../initramfs")]
+    initramfs: OsString,
+
+    #[arg(long, default_value = "../ocismall.erofs")]
+    index: Vec<OsString>,
+}
+
+
 fn main() {
     env_logger::init();
     let cwd = std::env::current_dir().unwrap();
+    let args = Args::parse();
 
     //let opt = Some(Opt::parse_args());
     let opt = Some(Opt {
@@ -277,13 +296,13 @@ fn main() {
     my_server.bootstrap();
 
     let pool = worker::asynk::Pool::new(&worker::cpuset(2, 2, 2).unwrap());
-    let index = PEImageMultiIndex::from_paths_by_digest_with_colon(&["../ocismall.erofs"]).unwrap();
+    let index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
     let app = HttpRunnerApp {
         pool             : pool,
         index            : index,
-        kernel           : cwd.join("../vmlinux").into(),
-        initramfs        : cwd.join("../initramfs").into(),
-        cloud_hypervisor : cwd.join("../cloud-hypervisor-static").into(),
+        kernel           : cwd.join(args.kernel).into(),
+        initramfs        : cwd.join(args.initramfs).into(),
+        cloud_hypervisor : cwd.join(args.ch).into(),
     };
 
     // TODO multiple kernels

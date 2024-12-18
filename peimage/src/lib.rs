@@ -91,7 +91,7 @@ pub struct PEImageMultiIndexEntry {
 
 pub enum PEImageMultiIndexKeyType {
     Name,            // index.docker.io/library/busybox:1.37
-    DigestWithSlash, // sha256/abcd1234 I wrongly thought this had to be escaped in urls
+    DigestWithSlash, // sha256/abcd1234 I wrongly thought the colon had to be escaped in urls
     Digest,          // sha256:abcd1234
 }
 
@@ -108,23 +108,23 @@ impl PEImageMultiIndex {
         }
     }
 
-    pub fn from_paths(key_type: PEImageMultiIndexKeyType, paths: &[&str]) -> io::Result<Self> {
+    pub fn from_paths<P: AsRef<Path>>(key_type: PEImageMultiIndexKeyType, paths: &[P]) -> io::Result<Self> {
         let mut ret = Self::new(key_type);
         for p in paths {
-            ret = ret.add_path(&p)?;
+            ret = ret.add_path(p)?;
         }
         Ok(ret)
     }
 
-    pub fn from_paths_by_digest_with_colon(paths: &[&str]) -> io::Result<Self> {
+    pub fn from_paths_by_digest_with_colon<P: AsRef<Path>>(paths: &[P]) -> io::Result<Self> {
         Self::from_paths(PEImageMultiIndexKeyType::Digest, paths)
     }
 
-    pub fn add_path<P: AsRef<Path> + Into<PathBuf>>(mut self, path: P) -> io::Result<Self> {
+    pub fn add_path<P: AsRef<Path>>(mut self, path: P) -> io::Result<Self> {
         let idx = PEImageIndex::from_path(&path)?;
         let rootfs_kind = RootfsKind::try_from_path_name(&path)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "couldn't determine rootfs kind"))?;
-        let pathbuf: PathBuf = path.into();
+        let pathbuf: PathBuf = path.as_ref().to_path_buf();
         for image in idx.images {
             let key = image.id.name();
             if self.map.contains_key(&key) {

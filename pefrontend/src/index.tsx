@@ -447,6 +447,7 @@ class App extends Component {
     async run() {
         //let {images,selectedImage,cmd} = this.state;
         let selectedImage = this.s.selectedImage.value;
+        let selectedStdin = this.s.selectedStdin.value;
         let cmd = this.s.cmd.value;
 
         if (selectedImage === null) {
@@ -472,14 +473,17 @@ class App extends Component {
             return;
         }
 
-        let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
-        let z = pearchive.combineRequestAndArchive({
-            'cmd': cmd.split(/\s+/),
-        }, y);
+        let archive = pearchive.packArchiveV1(this.inputEditor.getFiles());
+        let runReq = {
+            stdin: selectedStdin,
+            cmd: cmd.split(/\s+/),
+        };
+        console.log(runReq);
+        let combined = pearchive.combineRequestAndArchive(runReq, archive);
 
         let req = new Request(window.location.origin + image.links.runi, {
             method: 'POST',
-            body: z,
+            body: combined,
             headers: {
                 'Content-type': 'application/x.pe.archivev1',
             }
@@ -572,7 +576,7 @@ class App extends Component {
         });
 
         let stdinOptions = this.inputEditor?.getFiles().map(file => {
-            return <option key={file.id} value={file.id}>{file.path}</option>;
+            return <option key={file.id} value={file.path}>{file.path}</option>;
         });
 
         let imageDetails = null;
@@ -582,7 +586,7 @@ class App extends Component {
             imageDetails = (
                 <details>
                     <summary>About this image</summary>
-                    <a href={image.links.upstream} rel="nofollow">{imageName(image.info)}</a>
+                    <a target="_blank" href={image.links.upstream} rel="nofollow">{imageName(image.info)}</a>
                     <p>These are a subset of properties defined for this image. See <a href="https://github.com/opencontainers/image-spec/blob/main/config.md#properties" rel="nofollow">the OCI image spec</a> for more information.</p>
                     <dl>
                         <dt>Env</dt>
