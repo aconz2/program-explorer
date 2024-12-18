@@ -3,6 +3,7 @@ import { signal, Signal } from '@preact/signals';
 import { EditorState, Extension } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { EditorView, basicSetup } from 'codemirror';
+import * as shlex from 'shlex';
 
 import * as pearchive from './pearchive';
 import {Api} from './api';
@@ -20,6 +21,7 @@ type ImageId = string;
 type AppState = {
     images: Signal<Map<ImageId, Api.Image>>,
     selectedImage: Signal<ImageId | null>,
+    selectedStdin: Signal<FileId | null>,
     cmd: Signal<string | null>,
     lastStatus: Signal<string | null>,
     lastRuntime: Signal<number | null>
@@ -99,19 +101,11 @@ class File {
 const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
 
 // TODO this just unconditionally overrides Entrypoint and Cmd with a string split of cmd
-function computeFullCommand(image: Api.Image, userCmd: string): {entrypoint?: string[], cmd?: string[]} {
-    // let env = image.config.config.Env ?? [];
-    let parts = userCmd.split(/\s+/); // TODO handle quotes
-    // todo handle env
-    //if (parts[0] === '$entrypoint') {
-    //    acc.extend(image.config.config.Entrypoint ?? []);
-    //    parts = parts.slice(1);
-    //}
-    //if (parts[0] === '$cmd') {
-    //    acc.extend(image.config.config.Cmd ?? []);
-    //    parts = parts.slice(1);
-    //}
-    return {entrypoint: [], cmd: parts};
+function computeFullCommand(image: Api.Image, userCmd: string): {entrypoint: string[], cmd: string[], env: string[]} {
+    let parts = shlex.split(userCmd);
+    let entrypoint = image.config.config.Entrypoint ?? [];
+    let env = image.config.config.Env ?? [];
+    return {entrypoint, cmd: parts, env};
 }
 
 class FileStore {
@@ -408,6 +402,7 @@ class App extends Component {
     s: AppState = {
         images: signal(new Map()),
         selectedImage: signal(null),
+        selectedStdin: signal(null),
         cmd: signal(null),
         lastStatus: signal(null),
         lastRuntime: signal(null),
@@ -469,6 +464,14 @@ class App extends Component {
             return;
         }
 
+        let fullCommand;
+        try {
+            fullCommand = computeFullCommand(image, cmd);
+        } catch (e) {
+            console.warn('cmd bad split');
+            return;
+        }
+
         let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
         let z = pearchive.combineRequestAndArchive({
             'cmd': cmd.split(/\s+/),
@@ -517,14 +520,13 @@ class App extends Component {
 
     async onRun() {
         this.s.running.value = true;
+        this.s.lastRuntime.value = null;
         let start = performance.now();
-        console.log('beginRun');
         try {
             await this.run();
         } catch (error) {
             console.error(error);
         }
-        console.log('endrun');
         this.s.lastRuntime.value = performance.now() - start;
         this.s.running.value = false;
     }
@@ -547,6 +549,10 @@ class App extends Component {
         this.s.selectedImage.value = event.target.value;
     }
 
+    onStdinSelect(event) {
+        this.s.selectedStdin.value = event.target.value;
+    }
+
     onCmdChange(event) {
         this.s.cmd.value = event.target.value;
     }
@@ -563,6 +569,10 @@ class App extends Component {
         let imageOptions = Array.from(images.values(), ({info,links}) => {
             let name = imageName(info);
             return <option key={info.digest} value={info.digest}>{name}</option>;
+        });
+
+        let stdinOptions = this.inputEditor?.getFiles().map(file => {
+            return <option key={file.id} value={file.id}>{file.path}</option>;
         });
 
         let imageDetails = null;
@@ -585,7 +595,11 @@ class App extends Component {
 
                 </details>
             );
-            fullCommand = JSON.stringify(computeFullCommand(image, cmd).cmd);
+            try {
+                fullCommand = computeFullCommand(image, cmd);
+            } catch (e) {
+                fullCommand = null;
+            }
         }
         return (
             <div className="mono">
@@ -602,13 +616,35 @@ class App extends Component {
 
                 <form>
                     <div>
-                        <select onChange={e => this.onImageSelect(e)}>
+                        <label for="image">Image</label>
+                        <select name="image" onChange={e => this.onImageSelect(e)}>
                             {imageOptions}
                         </select>
                     </div>
+                    {imageDetails}
                     <div>
-                        <input id="cmd" className="mono" type="text" value={cmd} onChange={e => this.onCmdChange(e)} placeholder="env $entrypoint $cmd < /dev/null" />
+                        <input autocomplete="off" id="cmd" className="mono" type="text"
+                               value={cmd} onInput={e => this.onCmdChange(e)} />
                     </div>
+                    <details>
+                        <summary>More</summary>
+                        <label for="stdin">stdin</label>
+                        <select name="stdin" onChange={e => this.onStdinSelect(e)}>
+                            <option value="/dev/null">/dev/null</option>
+                            {stdinOptions}
+                        </select>
+                        <h3>Computed</h3>
+                        {fullCommand === null ? (<div>error in cmd</div>) : (
+                            <dl>
+                                <dt>env</dt>
+                                <dd>{JSON.stringify(fullCommand.env)}</dd>
+                                <dt>entrypoint</dt>
+                                <dd>{JSON.stringify(fullCommand.entrypoint)}</dd>
+                                <dt>argv</dt>
+                                <dd>{JSON.stringify(fullCommand.cmd)}</dd>
+                            </dl>
+                        )}
+                    </details>
                     <div>
                         <button
                             className="mono"
@@ -622,9 +658,6 @@ class App extends Component {
                             {this.s.running.value ? 'Running…' : 'Run'}
                         </button>
                     </div>
-                    <span className="mono">{fullCommand}</span>
-
-                    {imageDetails}
                 </form>
 
                 <div id="inputOutputContainer">
