@@ -35,15 +35,15 @@ use peserver::util::{
 };
 
 static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("req_images", "Number of images requests").unwrap()
+    register_int_counter!("worker_req_images", "Worker number of images requests").unwrap()
 });
 
 static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("req_run", "Number of run requests").unwrap()
+    register_int_counter!("worker_req_run", "Worker number of run requests").unwrap()
 });
 
 static ERR_CH_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("err_ch", "Number of ch errors").unwrap()
+    register_int_counter!("worker_err_ch", "Worker number of ch errors").unwrap()
 });
 
 // timeout we put on the user's process (after the initial crun process exits)

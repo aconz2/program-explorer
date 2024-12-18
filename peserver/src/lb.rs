@@ -22,12 +22,25 @@ use log::{error,info};
 use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
+use prometheus::{register_int_counter,IntCounter};
 
 use peserver::api::v1 as apiv1;
 use peserver::api;
 
 use peserver::util::{read_full_client_response_body,session_ip_id,etag};
 use peserver::util::premade_responses;
+
+static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("lb_req_images", "Number of images requests").unwrap()
+});
+
+static REQ_IMAGES_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("lb_req_images_cache_hit", "Number of images requests cache hit").unwrap()
+});
+
+static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("lb_req_run", "Number of run requests").unwrap()
+});
 
 // write_response_header_ref makes a Box::new(x.clone()) internally! I guess it has to but
 // maybe there could be a path to take an Arc so that you don't actually have to copy?
@@ -213,12 +226,14 @@ impl LB {
     }
 
     async fn apiv1_images(&self, session: &mut Session, _ctx: &mut LBCtx) -> Result<()> {
+        REQ_IMAGES_COUNT.inc();
         session.set_write_timeout(api::DOWNSTREAM_WRITE_TIMEOUT);
         let downstream_session = &mut session.downstream_session;
         let data = self.workers.data.load();
         let req_parts: &http::request::Parts = downstream_session.req_header();
         match req_parts.headers.get(header::IF_NONE_MATCH) {
             Some(etag) if etag.as_bytes() == data.premade_json_etag.as_bytes() => {
+                REQ_IMAGES_CACHE_HIT.inc();
                 return session.downstream_session
                     .write_response_header_ref(&*premade_responses::NOT_MODIFIED)
                     .await
@@ -234,6 +249,7 @@ impl LB {
 
     // Ok(true) means request done, ie the image was missed
     async fn apiv1_runi(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
+        REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
         // if there is no content-length (maybe it is chunked), and the body is too large
@@ -401,6 +417,7 @@ fn main() {
     lb_service.add_tcp("127.0.0.1:6188");
 
     let mut prometheus_service_http = Service::prometheus_http_service();
+    // TODO This has to be on a different port than main
     prometheus_service_http.add_tcp("127.0.0.1:6192");
 
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
