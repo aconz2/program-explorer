@@ -333,7 +333,7 @@ fn main() {
     runner_service_http.add_tcp("127.0.0.1:1234");
 
     let mut prometheus_service_http = Service::prometheus_http_service();
-    prometheus_service_http.add_tcp("127.0.0.1:6192");
+    prometheus_service_http.add_tcp("127.0.0.1:6193");
 
     my_server.add_service(runner_service_http);
     my_server.add_service(prometheus_service_http);
