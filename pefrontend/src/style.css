@@ -1,14 +1,10 @@
 summary { cursor: pointer; }
 
-.cmContainer {
-    height: 80vh;
-    padding-top: 2px;
-}
-
+// these are internal to code-mirror
 .cm-editor { height: 100%; }
 .cm-scroller { overflow: auto; }
 
-.editorContainer {
+.editor-container {
     .tab-outer {
         font-family: monospace;
         margin-right: 5px;
@@ -42,8 +38,19 @@ summary { cursor: pointer; }
 }
 
 #cmd { width: 90%; }
-#inputOutputContainer { display: flex; }
-#inputContainer, #outputContainer { width: 50%; }
+#input-output-container { display: flex; }
+#input-container, #output-container { width: 50%; }
+
+#input-output-container {
+    .cm-container {
+        height: 80vh;
+        padding-top: 2px;
+    }
+}
+
+#input-output-container {
+    .cm-container {}
+}
 
 .mono {
     font-family: monospace;

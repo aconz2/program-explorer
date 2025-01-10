@@ -100,10 +100,10 @@ class File {
 
 const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
 
-// TODO this just unconditionally overrides Entrypoint and Cmd with a string split of cmd
 function computeFullCommand(image: Api.Image, userCmd: string): {entrypoint: string[], cmd: string[], env: string[]} {
     let parts = shlex.split(userCmd);
-    let entrypoint = image.config.config.Entrypoint ?? [];
+    // let entrypoint = image.config.config.Entrypoint ?? [];
+    let entrypoint = [];
     let env = image.config.config.Env ?? [];
     return {entrypoint, cmd: parts, env};
 }
@@ -195,6 +195,33 @@ class FileStore {
     }
 }
 
+class SimpleEditor extends Component {
+    editorParentRef = createRef();
+
+    constructor() {
+        super();
+    }
+
+    componentDidMount() {
+        let details = this.editorParentRef.current.parentNode.parentNode.parentNode;
+        details.open = true;
+        this.editor = new EditorView({
+          extensions: [
+            basicSetup,
+          ],
+          parent: this.editorParentRef.current,
+        });
+    }
+
+    render() {
+        return (
+            <div class="editor-container">
+                <div className="cm-container" ref={this.editorParentRef}></div>
+            </div>
+        );
+    }
+}
+
 class Editor extends Component {
     editorParentRef = createRef();
     renameDialogRef = createRef();
@@ -216,6 +243,15 @@ class Editor extends Component {
             basicSetup,
         ];
         this.store = signal(new FileStore(null, null, this.extensions));
+    }
+
+    componentDidMount() {
+        this.editor = new EditorView({
+          extensions: [
+              // we pass extensions through to the EditorState
+          ],
+          parent: this.editorParentRef.current,
+        });
     }
 
     commitActive() {
@@ -321,15 +357,6 @@ class Editor extends Component {
         this.renameDialog()?.close();
     }
 
-    componentDidMount() {
-        this.editor = new EditorView({
-          extensions: [
-              // we pass extensions through to the EditorState
-          ],
-          parent: this.editorParentRef.current,
-        });
-    }
-
     // this.props, this.state
     render() {
         let store = this.store.value;
@@ -371,13 +398,13 @@ class Editor extends Component {
         let blobContents = active?.kind === FileKind.Blob ? active.blobHex() : '';
 
         return (
-            <div class="editorContainer">
+            <div class="editor-container">
                 <div className="tab-row">
                     {tabs}
                     {newButton}
                 </div>
-                <div style={cmContainerStyle} className="cmContainer" ref={this.editorParentRef}></div>
-                <div style={blobContainerStyle} className="blobContainer">
+                <div style={cmContainerStyle} className="cm-container" ref={this.editorParentRef}></div>
+                <div style={blobContainerStyle} className="blob-container">
                     <p>Blob: first 100 bytes</p>
                     <pre>{blobContents}</pre>
                 </div>
@@ -398,6 +425,7 @@ class Editor extends Component {
 class App extends Component {
     r_inputEditor: RefObject<Editor> = createRef();
     r_outputEditor: RefObject<Editor> = createRef();
+    r_envEditor: RefObject<Editor> = createRef();
     // would like to call this state but not sure if that messes with the Component state
     s: AppState = {
         images: signal(new Map()),
@@ -476,7 +504,7 @@ class App extends Component {
         let archive = pearchive.packArchiveV1(this.inputEditor.getFiles());
         let runReq = {
             stdin: selectedStdin,
-            cmd: cmd.split(/\s+/),
+            ...fullCommand,
         };
         console.log(runReq);
         let combined = pearchive.combineRequestAndArchive(runReq, archive);
@@ -637,14 +665,19 @@ class App extends Component {
                             <option value="/dev/null">/dev/null</option>
                             {stdinOptions}
                         </select>
+                        <div id="env-editor">
+                            <label for="env">env</label>
+                            <SimpleEditor ref={this.r_envEditor} />
+                        </div>
+
                         <h3>Computed</h3>
                         {fullCommand === null ? (<div>error in cmd</div>) : (
                             <dl>
-                                <dt>env</dt>
+                                <dt>Env</dt>
                                 <dd>{JSON.stringify(fullCommand.env)}</dd>
-                                <dt>entrypoint</dt>
+                                <dt>Entrypoint</dt>
                                 <dd>{JSON.stringify(fullCommand.entrypoint)}</dd>
-                                <dt>argv</dt>
+                                <dt>Cmd</dt>
                                 <dd>{JSON.stringify(fullCommand.cmd)}</dd>
                             </dl>
                         )}
@@ -664,14 +697,14 @@ class App extends Component {
                     </div>
                 </form>
 
-                <div id="inputOutputContainer">
-                    <div id="inputContainer">
+                <div id="input-output-container">
+                    <div id="input-container">
                         <Editor
                             ref={this.r_inputEditor}
                             ctrlEnterCb={(_editorView) => { this.onRun(); return true; }}
                             />
                     </div>
-                    <div id="outputContainer">
+                    <div id="output-container">
                         <span className="mono">{lastRuntime === null ? '' : `${lastRuntime.toFixed(2)}ms`}</span>
                         <span className="mono">{lastStatus ?? ''}</span>
                         <Editor
