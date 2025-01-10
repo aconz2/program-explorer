@@ -28,6 +28,28 @@ type AppState = {
     running: Signal<boolean>,
 }
 
+function debounce(f, wait) {
+  let timeoutId = null;
+  return (...args) => {
+    window.clearTimeout(timeoutId);
+    timeoutId = window.setTimeout(() => {
+      f(...args);
+    }, wait);
+  };
+}
+
+function parseEnvText(s: string): [string] {
+    let ret = [];
+    for (let line of s.split('\n')) {
+        if (line.startsWith('#')) {
+            continue;
+        }
+        // TODO do some validation
+        ret.push(line);
+    }
+    return ret;
+}
+
 function bufToHex(data: ArrayBuffer, length=100): string {
     let n = Math.min(data.byteLength, length);
     let acc = '';
@@ -41,6 +63,18 @@ function bufToHex(data: ArrayBuffer, length=100): string {
         return acc;
     }
     throw new Error('bad type');
+}
+
+const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
+
+function computeFullCommand(image: Api.Image, env: [string] | null, userCmd: string)
+    : {entrypoint: string[], cmd: string[], env: string[]} {
+    let parts = shlex.split(userCmd);
+    // let entrypoint = image.config.config.Entrypoint ?? [];
+    let entrypoint = [];
+    console.log('computeFullCommand', env);
+    env = env ?? image.config.config.Env ?? [];
+    return {entrypoint, cmd: parts, env};
 }
 
 type FileContents = string | ArrayBuffer;
@@ -97,16 +131,6 @@ class File {
         return this.path;
     }
 };
-
-const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
-
-function computeFullCommand(image: Api.Image, userCmd: string): {entrypoint: string[], cmd: string[], env: string[]} {
-    let parts = shlex.split(userCmd);
-    // let entrypoint = image.config.config.Entrypoint ?? [];
-    let entrypoint = [];
-    let env = image.config.config.Env ?? [];
-    return {entrypoint, cmd: parts, env};
-}
 
 class FileStore {
     files: Map<FileId, File> = new Map();
@@ -198,16 +222,23 @@ class FileStore {
 class SimpleEditor extends Component {
     editorParentRef = createRef();
 
-    constructor() {
+    constructor({onChange=() => false}) {
         super();
+        this.onChange = onChange;
     }
 
     componentDidMount() {
         let details = this.editorParentRef.current.parentNode.parentNode.parentNode;
         details.open = true;
+        let cb = this.onChange;
         this.editor = new EditorView({
           extensions: [
             basicSetup,
+            EditorView.updateListener.of((v: ViewUpdate) => {
+                if (v.docChanged) {
+                    cb(v.state.doc.toString());
+                }
+            })
           ],
           parent: this.editorParentRef.current,
         });
@@ -284,7 +315,8 @@ class Editor extends Component {
             }
         }
         let activeFile = store.getActive();
-        if (activeFile?.editorState !== null) {
+        // why can't you do activeFile?.editorState
+        if (activeFile !== null && activeFile.editorState !== null) {
             this.editor.setState(activeFile.editorState);
         }
         this.store.value = store;
@@ -432,6 +464,7 @@ class App extends Component {
         selectedImage: signal(null),
         selectedStdin: signal(null),
         cmd: signal(null),
+        env: signal(null),
         lastStatus: signal(null),
         lastRuntime: signal(null),
         running: signal(false),
@@ -477,6 +510,7 @@ class App extends Component {
         let selectedImage = this.s.selectedImage.value;
         let selectedStdin = this.s.selectedStdin.value;
         let cmd = this.s.cmd.value;
+        let env = this.s.env.value;
 
         if (selectedImage === null) {
             console.warn('cant run without an image');
@@ -495,9 +529,10 @@ class App extends Component {
 
         let fullCommand;
         try {
-            fullCommand = computeFullCommand(image, cmd);
+            fullCommand = computeFullCommand(image, env, cmd);
         } catch (e) {
             console.warn('cmd bad split');
+            console.error(e);
             return;
         }
 
@@ -589,6 +624,15 @@ class App extends Component {
         this.s.cmd.value = event.target.value;
     }
 
+    onEnvChange(env: string) {
+        if (env.length === 0) {
+            this.s.env.value = null;
+        } else {
+            console.log('parsingenvtext')
+            this.s.env.value = parseEnvText(env);
+        }
+    }
+
     // this.props, this.state (all are signals)
     render() {
         let images = this.s.images.value;
@@ -596,6 +640,7 @@ class App extends Component {
         let cmd = this.s.cmd.value;
         let lastStatus = this.s.lastStatus.value;
         let lastRuntime = this.s.lastRuntime.value;
+        let env = this.s.env.value;
 
         // firefox supports Map().values().map(), but chrome doesn't
         let imageOptions = Array.from(images.values(), ({info,links}) => {
@@ -628,7 +673,7 @@ class App extends Component {
                 </details>
             );
             try {
-                fullCommand = computeFullCommand(image, cmd);
+                fullCommand = computeFullCommand(image, env, cmd);
             } catch (e) {
                 fullCommand = null;
             }
@@ -667,7 +712,9 @@ class App extends Component {
                         </select>
                         <div id="env-editor">
                             <label for="env">env</label>
-                            <SimpleEditor ref={this.r_envEditor} />
+                            <SimpleEditor
+                                 onChange={debounce(this.onEnvChange.bind(this), 250)}
+                                 ref={this.r_envEditor} />
                         </div>
 
                         <h3>Computed</h3>

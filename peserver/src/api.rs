@@ -55,6 +55,7 @@ pub mod v1 {
                                                    // for content-type: application/json
             pub entrypoint : Option<Vec<String>>,  // as per oci image config
             pub cmd        : Option<Vec<String>>,  // as per oci image config
+            pub env        : Option<Vec<String>>,  // as per oci image config
         }
 
         pub type Response = peinit::Response;

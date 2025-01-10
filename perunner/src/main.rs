@@ -246,8 +246,9 @@ fn main() {
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
-    // here we just always replace all the image's arguments
-    let runtime_spec = create_runtime_spec(&image_index_entry.image.config, Some(&[]), Some(&args.args)).unwrap();
+    // here we just always replace all the image's arguments (entrypoint is empty)
+    let env = None;
+    let runtime_spec = create_runtime_spec(&image_index_entry.image.config, Some(&[]), Some(&args.args), env).unwrap();
 
     if args.spec_only {
         println!("{}", serde_json::to_string_pretty(&image_index_entry.image.config).unwrap());

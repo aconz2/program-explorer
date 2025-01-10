@@ -155,7 +155,8 @@ impl HttpRunnerApp {
 
         let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
             .ok_or(Error::BadRequest)?;
-        let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref())
+
+        let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
             .map_err(|_| Error::OciSpec)?;
 
         let ch_config = CloudHypervisorConfig {

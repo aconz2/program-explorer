@@ -34,6 +34,7 @@ pub enum Error {
 pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
                            entrypoint: Option<&[String]>,
                            cmd:        Option<&[String]>,
+                           env:        Option<&[String]>,
                            ) -> Result<oci_runtime::Spec, Error> {
     //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(UID, UID);
@@ -131,6 +132,14 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
     if args.is_empty() { return Err(Error::BadArgs); }
     process.set_args(Some(args));
 
+    if let Some(env) = env {
+        *process.env_mut() = Some(env.to_vec());
+    } else if let Some(config) = image_config.config() {
+        if let Some(env) = config.env() {
+            *process.env_mut() = Some(env.clone());
+        }
+    }
+
     // image config can be null / totally empty
     if let Some(config) = image_config.config() {
         // TODO: handle user
@@ -145,10 +154,6 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         // let _ = config.exposed_ports; // ignoring network for now
         if let Some(user_config_string) = config.user() {
             process.set_user(parse_user_string(user_config_string)?);
-        }
-
-        if let Some(env) = config.env() {
-            *process.env_mut() = Some(env.clone());
         }
 
         if let Some(cwd) = config.working_dir() {
