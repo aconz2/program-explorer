@@ -28,6 +28,36 @@ type AppState = {
     running: Signal<boolean>,
 }
 
+type UrlHashState = {
+    expand: {
+        help: bool,
+        more: bool,
+    },
+    cmd: string | null,
+    stdin: string | null,
+    env: string | null,
+    files: [{n: string, d: string}] | null,
+}
+
+function loadUrlHashState(): UrlHashState { return parseUrlHashState(window.location.hash); }
+
+function parseUrlHashState(s): UrlHashState {
+    let ret = {
+        expand: { help: false, more: false, },
+        cmd: null,
+        stdin: null,
+        env: null,
+        files: null,
+    };
+    let parts = s.substring(1).split('&');
+    for (let part of parts) {
+        let [a, b] = part.split('=');
+        if      (a === 'help' && b === 'x') { ret.expand.help = true; }
+        else if (a === 'more' && b === 'x') { ret.expand.more = true; }
+    }
+    return ret;
+}
+
 function debounce(f, wait) {
   let timeoutId = null;
   return (...args) => {
@@ -228,8 +258,6 @@ class SimpleEditor extends Component {
     }
 
     componentDidMount() {
-        let details = this.editorParentRef.current.parentNode.parentNode.parentNode;
-        details.open = true;
         let cb = this.onChange;
         this.editor = new EditorView({
           extensions: [
@@ -458,7 +486,9 @@ class App extends Component {
     r_inputEditor: RefObject<Editor> = createRef();
     r_outputEditor: RefObject<Editor> = createRef();
     r_envEditor: RefObject<Editor> = createRef();
-    // would like to call this state but not sure if that messes with the Component state
+    r_helpDetails: RefObject<HTMLDetailsElement> = createRef();
+    r_moreDetails: RefObject<HTMLDetailsElement> = createRef();
+
     s: AppState = {
         images: signal(new Map()),
         selectedImage: signal(null),
@@ -469,6 +499,12 @@ class App extends Component {
         lastRuntime: signal(null),
         running: signal(false),
     };
+    urlHashState: UrlHashState;
+
+    constructor() {
+        super();
+        this.urlHashState = loadUrlHashState();
+    }
 
     get inputEditor():  Editor { return this.r_inputEditor.current; }
     get outputEditor(): Editor { return this.r_outputEditor.current; }
@@ -486,6 +522,13 @@ class App extends Component {
         this.s.cmd.value = 'sh /run/pe/input/test.sh';
 
         this.fetchImages();
+
+        if (this.urlHashState.expand.help === true) {
+            this.r_helpDetails.current.open = true;
+        }
+        if (this.urlHashState.expand.more === true) {
+            this.r_moreDetails.current.open = true;
+        }
 
         //setTimeout(() => {
         //    let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
@@ -680,7 +723,7 @@ class App extends Component {
         }
         return (
             <div className="mono">
-                <details>
+                <details ref={this.r_helpDetails}>
                     <summary>Help</summary>
                     <p>Input size limited to 1 MB</p>
                     <p>Runtime limited to 1 second</p>
@@ -703,7 +746,7 @@ class App extends Component {
                         <input autocomplete="off" id="cmd" className="mono" type="text"
                                value={cmd} onInput={e => this.onCmdChange(e)} />
                     </div>
-                    <details>
+                    <details ref={this.r_moreDetails}>
                         <summary>More</summary>
                         <label for="stdin">stdin</label>
                         <select name="stdin" onChange={e => this.onStdinSelect(e)}>
