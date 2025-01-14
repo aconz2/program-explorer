@@ -447,3 +447,50 @@ podman does this in pkg/lookup/lookup.go GetUserGroupInfo
 
 thinking ovh eco kimsufi
 https://eco.us.ovhcloud.com/?display=list&range=kimsufi
+
+okay so docker podman and kata all add a default PATH of
+podman
+https://github.com/containers/podman/blob/9f1fee2a0b119024750975e2b16c1a89edc615d9/pkg/env/env.go#L19
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+kata
+https://github.com/kata-containers/kata-containers/blob/7d34ca44205a1e4c786306b2e61de9eeda851978/src/tools/genpolicy/src/containerd.rs#L167
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+containerd
+https://github.com/docker-archive/containerd/blob/26183b3a69a36f426785cdefe1bc9e8e233596d1/cmd/ctr/run_unix.go#L55
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+moby
+https://github.com/moby/moby/blob/04b03cfc0a99f50088ac9c811a9992e5b05463bc/oci/defaults.go#L12
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+but google cloud run does not
+google cloud run busybox 1.37.0-glibc (which doesn't have PATH)
+does need to be configured with PATH=/bin to make
+entrypoint: sh
+cmd: -c env
+work
+and it gives
+No older entries found matching current filter.
+CLOUD_RUN_EXECUTION=test003-cl69x
+SHLVL=1
+HOME=/root
+CLOUD_RUN_TASK_INDEX=0
+CLOUD_RUN_TASK_ATTEMPT=0
+PATH=/bin
+CLOUD_RUN_TASK_COUNT=1
+PWD=/
+CLOUD_RUN_JOB=test003
+
+in podman we get
+→ podman run --rm busybox env
+container=podman
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOME=/root
+HOSTNAME=b74d80f01fab
+
+→ podman run --unsetenv=container --rm busybox env
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOME=/root
+HOSTNAME=96c0f1d08056

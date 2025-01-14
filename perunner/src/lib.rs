@@ -132,13 +132,21 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
     if args.is_empty() { return Err(Error::BadArgs); }
     process.set_args(Some(args));
 
-    if let Some(env) = env {
-        *process.env_mut() = Some(env.to_vec());
-    } else if let Some(config) = image_config.config() {
-        if let Some(env) = config.env() {
-            *process.env_mut() = Some(env.clone());
+    // always adding PATH begrudginly https://github.com/docker-library/busybox/issues/214
+    let env = {
+        let mut tmp = Vec::with_capacity(8);
+        // crun goes sequentially and uses putenv, so having PATH last will
+        tmp.push("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string());
+        if let Some(env) = env {
+            tmp.extend_from_slice(env);
+        } else if let Some(config) = image_config.config() {
+            if let Some(env) = config.env() {
+                tmp.extend_from_slice(env);
+            }
         }
-    }
+        tmp
+    };
+    *process.env_mut() = Some(env);
 
     // image config can be null / totally empty
     if let Some(config) = image_config.config() {
