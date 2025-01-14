@@ -7,6 +7,8 @@ import * as shlex from 'shlex';
 
 import * as pearchive from './pearchive';
 import {Api} from './api';
+import {bufToHex, debounce} from './util';
+import {UrlHashState, loadUrlHashState, encodeUrlHashState} from './urlstate';
 
 import './style.css';
 
@@ -28,81 +30,13 @@ type AppState = {
     running: Signal<boolean>,
 }
 
-type UrlHashState = {
-    expand: {
-        help: bool,
-        more: bool,
-    },
-    cmd: string | null,
-    stdin: string | null,
-    env: string | null,
-    files: [{n: string, d: string}] | null,
-}
-
-function loadUrlHashState(): UrlHashState { return parseUrlHashState(window.location.hash); }
-
-function parseUrlHashState(s): UrlHashState {
-    let ret = {
-        expand: { help: false, more: false, },
-        cmd: null,
-        stdin: null,
-        env: null,
-        files: null,
-    };
-    let parts = s.substring(1).split('&');
-    for (let part of parts) {
-        let [a, b] = part.split('=');
-        if      (a === 'help' && b === 'x') { ret.expand.help = true; }
-        else if (a === 'more' && b === 'x') { ret.expand.more = true; }
-    }
-    return ret;
-}
-
-function debounce(f, wait) {
-  let timeoutId = null;
-  return (...args) => {
-    window.clearTimeout(timeoutId);
-    timeoutId = window.setTimeout(() => {
-      f(...args);
-    }, wait);
-  };
-}
-
-function parseEnvText(s: string): [string] {
-    let ret = [];
-    for (let line of s.split('\n')) {
-        if (line.startsWith('#')) {
-            continue;
-        }
-        // TODO do some validation
-        ret.push(line);
-    }
-    return ret;
-}
-
-function bufToHex(data: ArrayBuffer, length=100): string {
-    let n = Math.min(data.byteLength, length);
-    let acc = '';
-    let hexDigit = (i) => '0123456789abcdef'[i];
-    if (data instanceof ArrayBuffer) {
-        let buf = new Uint8Array(data);
-        for (let i = 0; i < n; i++) {
-            let b = buf[i];
-            acc +=  hexDigit((b >> 4) & 0xf) + hexDigit(b & 0xf);
-        }
-        return acc;
-    }
-    throw new Error('bad type');
-}
-
 const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
 
 function computeFullCommand(image: Api.Image, env: [string] | null, userCmd: string)
     : {entrypoint: string[], cmd: string[], env: string[]} {
-    let parts = shlex.split(userCmd);
+    let parts = userCmd.length === 0 ? (image.config.config.Cmd ?? []) : shlex.split(userCmd);
     // let entrypoint = image.config.config.Entrypoint ?? [];
     let entrypoint = [];
-    console.log('computeFullCommand', env);
     env = env ?? image.config.config.Env ?? [];
     return {entrypoint, cmd: parts, env};
 }
@@ -504,22 +438,27 @@ class App extends Component {
     constructor() {
         super();
         this.urlHashState = loadUrlHashState();
+        console.log('loaded from url', this.urlHashState);
     }
 
     get inputEditor():  Editor { return this.r_inputEditor.current; }
     get outputEditor(): Editor { return this.r_outputEditor.current; }
 
     componentDidMount() {
-        // if you execute these back to back they don't both get applied...
-        this.inputEditor.setFiles([
-            {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe\ncat /run/pe/input/blob > /run/pe/output/blob\necho "an error" 1>&2'},
-            {path:'blob', data: new Uint8Array([254, 237, 186, 202]).buffer},
-            //{path:'data.txt', data:'hi this is some data'},
-            {path:'f1/dataf1.txt', data:'hi this is some data1'},
-            {path:'f1/f2/dataf1f2.txt', data:'hi this is some data2'},
-            {path:'f2/dataf2.txt', data:'hi this is some datar3'},
-        ]);
-        this.s.cmd.value = 'sh /run/pe/input/test.sh';
+        if (this.urlHashState.files != null) {
+            this.inputEditor.setFiles(this.urlHashState.files);
+            this.urlHashState.files = null; // clear mem
+        } else {
+            this.inputEditor.setFiles([
+                {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe\ncat /run/pe/input/blob > /run/pe/output/blob\necho "an error" 1>&2'},
+                {path:'blob', data: new Uint8Array([254, 237, 186, 202, 0, 10, 0]).buffer},
+                //{path:'data.txt', data:'hi this is some data'},
+                {path:'f1/dataf1.txt', data:'hi this is some data1'},
+                {path:'f1/f2/dataf1f2.txt', data:'hi this is some data2'},
+                {path:'f2/dataf2.txt', data:'hi this is some datar3'},
+            ]);
+        }
+        this.s.cmd.value = this.urlHashState.cmd ?? 'sh /run/pe/input/test.sh';
 
         this.fetchImages();
 
@@ -648,6 +587,7 @@ class App extends Component {
             if (json.images?.length > 0) {
                 let images: Map<string, Api.Image> = new Map(json.images.map(image => [image.info.digest, image]));
                 this.s.images.value = images;
+                // check from urlhashstate and verify it is in the set, otherwise error
                 this.s.selectedImage.value = images.keys().next()?.value;
             }
         } else {
@@ -676,7 +616,40 @@ class App extends Component {
         }
     }
 
-    // this.props, this.state (all are signals)
+    onSaveToUrl(event) {
+        event.preventDefault();
+        let s = '';
+        if (this.urlHashState.expand.more === true) { s += 'more=x&'; }
+        //for (let file of this.inputEditor?.getFiles()) {
+        //    if (typeof file.data !== 'string') {
+        //        console.error('binary files not supported yet...');
+        //        return;
+        //    }
+        //}
+        s += 's=' + encodeUrlHashState({
+            cmd: this.s.cmd.value,
+            stdin: this.s.selectedStdin.value,
+            env: this.s.env.value,
+            image: this.s.selectedImage.value,
+            files: this.inputEditor?.getFiles().map(file => {
+                return {
+                    p: file.path,
+                    s: file.data,
+                };
+            }),
+        });
+        window.location.hash = s;
+    }
+
+    onClearUrl(event) {
+        event.preventDefault();
+        if (this.urlHashState.expand.more === true) {
+            window.location.hash = "more=x";
+        } else {
+            window.location.hash = "";
+        }
+    }
+
     render() {
         let images = this.s.images.value;
         let selectedImage = this.s.selectedImage.value;
@@ -771,6 +744,10 @@ class App extends Component {
                                 <dd>{JSON.stringify(fullCommand.cmd)}</dd>
                             </dl>
                         )}
+                        <div>
+                            <button onClick={e => this.onSaveToUrl(e)}>Save To URL</button>
+                            <button onClick={e => this.onClearUrl(e)}>Clear URL</button>
+                        </div>
                     </details>
                     <div>
                         <button
