@@ -1,18 +1,24 @@
+import {bufFromBase64} from './util';
 
 export type UrlHashState = {
-    // just for me
+    // just for dev
     expand: {
-        help: bool,
-        more: bool,
+        help: boolean,
+        more: boolean,
     },
     cmd: string | null,
     stdin: string | null,
     env: string | null,
     image: string | null,
-    // stored as
-    // files: [{p: string, s: string} | {p: string, b: base64string}] | null,
-    // decoded into
-    files: [{path: string, data: string}] | null,
+    files: {path: string, data: string}[] | null,
+}
+
+type UrlHashStateSettings = {
+    cmd?: string | null,
+    stdin?: string | null,
+    env?: string | null,
+    image?: string | null,
+    files?: ({p: string, s: string} | {p: string, b: string})[],
 }
 
 export function loadUrlHashState(): UrlHashState { return parseUrlHashState(window.location.hash); }
@@ -21,10 +27,8 @@ export function encodeUrlHashState(x: {
     stdin: string,
     env: string,
     image: string,
-    files: [{p: string, s: string} | {p: string, d: string}]
+    files: ({p: string, s: string} | {p: string, b: string})[]
 }): string {
-    console.log(x);
-    console.log(JSON.stringify(x));
     return window.btoa(JSON.stringify(x));
 }
 // chrome doesn't support https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8Array/fromBase64 yet
@@ -38,12 +42,12 @@ function tryBase64Decode(x: string | null | undefined): string | null {
     }
 }
 function checkString(x): string | null { return typeof x === 'string' ? x : null; }
-function checkStringArray(x): string | null {
+function checkStringArray(x): string[] | null {
     if (!Array.isArray(x)) return null;
     if (!x.every((y) => typeof y === 'string')) return null;
-    return y;
+    return x;
 }
-function checkFiles(x): [{p: string, d: string}] | null {
+function checkFiles(x): ({p: string, s: string} | {p: string, b: string})[] | null {
     if (!Array.isArray(x)) return null;
     let ret = [];
     for (let y of x) {
@@ -53,16 +57,15 @@ function checkFiles(x): [{p: string, d: string}] | null {
         if (y.s != null && typeof y.s === 'string') {
             data = y.s;
         } else if (y.b != null && typeof y.b === 'string') {
-            try {
-                data = window.btoa(y.b);
-            } catch {
-                console.error('error decoding base64 file');
+            data = bufFromBase64(y.b);
+            if (data == null) {
+                console.error('got null data from atob?');
                 return null;
             }
-            data = y.s;
+        } else {
+            console.error('unhandled case');
+            return null;
         }
-        // todo y.b for binary
-        if (data == null) return null;
         ret.push({path, data});
     }
     return ret;
@@ -75,6 +78,10 @@ function decodeBase64Json(s): object {
         console.error('error decoding json', e);
         return {};
     }
+}
+
+function decodeSettings(s: string): UrlHashStateSettings {
+    return decodeBase64Json(s);
 }
 
 function parseUrlHashState(s): UrlHashState {
@@ -92,7 +99,7 @@ function parseUrlHashState(s): UrlHashState {
         if      (a === 'help' && b === 'x') { ret.expand.help = true; }
         else if (a === 'more' && b === 'x') { ret.expand.more = true; }
         else if (a === 's') {
-            let settings = decodeBase64Json(b);
+            let settings = decodeSettings(b);
             ret.cmd = checkString(settings.cmd);
             ret.stdin = checkString(settings.stdin);
             ret.image = checkString(settings.image);

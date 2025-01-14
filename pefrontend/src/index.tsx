@@ -1,13 +1,13 @@
 import { render, createRef, Component, RefObject } from 'preact';
 import { signal, Signal } from '@preact/signals';
 import { EditorState, Extension } from '@codemirror/state';
-import { keymap } from '@codemirror/view';
+import { keymap, ViewUpdate } from '@codemirror/view';
 import { EditorView, basicSetup } from 'codemirror';
 import * as shlex from 'shlex';
 
 import * as pearchive from './pearchive';
 import {Api} from './api';
-import {bufToHex, debounce} from './util';
+import {bufToHex, debounce, parseEnvText, bufToBase64} from './util';
 import {UrlHashState, loadUrlHashState, encodeUrlHashState} from './urlstate';
 
 import './style.css';
@@ -25,6 +25,7 @@ type AppState = {
     selectedImage: Signal<ImageId | null>,
     selectedStdin: Signal<FileId | null>,
     cmd: Signal<string | null>,
+    env: Signal<string[] | null>,
     lastStatus: Signal<string | null>,
     lastRuntime: Signal<number | null>
     running: Signal<boolean>,
@@ -32,7 +33,7 @@ type AppState = {
 
 const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
 
-function computeFullCommand(image: Api.Image, env: [string] | null, userCmd: string)
+function computeFullCommand(image: Api.Image, env: string[] | null, userCmd: string)
     : {entrypoint: string[], cmd: string[], env: string[]} {
     let parts = userCmd.length === 0 ? (image.config.config.Cmd ?? []) : shlex.split(userCmd);
     // let entrypoint = image.config.config.Entrypoint ?? [];
@@ -58,15 +59,20 @@ class File {
         return File._id;
     }
 
-    blobHex(): string {
+    blobHex(len): string {
         if (this.kind !== FileKind.Blob) return '';
         if (this.dataHex === null) {
             // Uint8Array.toHex is only in ff right now
             //this.dataHex = new Uint8Array(this.data).slice(0, 100).toHex();
             if (!(this.data instanceof ArrayBuffer)) { throw new Error('type assertion'); }
-            this.dataHex = bufToHex(this.data);
+            this.dataHex = bufToHex(this.data, len);
         }
         return this.dataHex;
+    }
+
+    length(): number {
+        if (typeof this.data === 'string') return this.data.length;
+        return this.data.byteLength;
     }
 
     constructor(path: string, kind: FileKind, data: FileContents, extensions: Extension[] = []) {
@@ -185,6 +191,8 @@ class FileStore {
 
 class SimpleEditor extends Component {
     editorParentRef = createRef();
+    onChange: (a: string) => boolean;
+    editor: EditorView;
 
     constructor({onChange=() => false}) {
         super();
@@ -389,7 +397,10 @@ class Editor extends Component {
 
         let cmContainerStyle   = active?.editorState === null ? {display: 'none'} : {};
         let blobContainerStyle = active?.editorState !== null ? {display: 'none'} : {};
-        let blobContents = active?.kind === FileKind.Blob ? active.blobHex() : '';
+        const showBlobLength = 100;
+        let blobContents = active?.kind === FileKind.Blob ? active.blobHex(showBlobLength) : '';
+        let blobLength = active?.length();
+        let blobLengthShown = Math.min(showBlobLength, blobLength ?? 0);
 
         return (
             <div class="editor-container">
@@ -399,7 +410,7 @@ class Editor extends Component {
                 </div>
                 <div style={cmContainerStyle} className="cm-container" ref={this.editorParentRef}></div>
                 <div style={blobContainerStyle} className="blob-container">
-                    <p>Blob: first 100 bytes</p>
+                    <p>Blob: showing {blobLengthShown}/{blobLength} bytes</p>
                     <pre>{blobContents}</pre>
                 </div>
                 <dialog ref={this.renameDialogRef}>
@@ -419,7 +430,7 @@ class Editor extends Component {
 class App extends Component {
     r_inputEditor: RefObject<Editor> = createRef();
     r_outputEditor: RefObject<Editor> = createRef();
-    r_envEditor: RefObject<Editor> = createRef();
+    r_envEditor: RefObject<SimpleEditor> = createRef();
     r_helpDetails: RefObject<HTMLDetailsElement> = createRef();
     r_moreDetails: RefObject<HTMLDetailsElement> = createRef();
 
@@ -438,7 +449,7 @@ class App extends Component {
     constructor() {
         super();
         this.urlHashState = loadUrlHashState();
-        console.log('loaded from url', this.urlHashState);
+        // console.log('loaded from url', this.urlHashState);
     }
 
     get inputEditor():  Editor { return this.r_inputEditor.current; }
@@ -446,6 +457,10 @@ class App extends Component {
 
     componentDidMount() {
         if (this.urlHashState.files != null) {
+            console.log('loading files from url');
+            //for (let f of this.urlHashState.files) {
+            //    console.log(f);
+            //}
             this.inputEditor.setFiles(this.urlHashState.files);
             this.urlHashState.files = null; // clear mem
         } else {
@@ -467,6 +482,9 @@ class App extends Component {
         }
         if (this.urlHashState.expand.more === true) {
             this.r_moreDetails.current.open = true;
+        }
+        if (this.urlHashState.env != null) {
+            this.onEnvChange(this.urlHashState.env);
         }
 
         //setTimeout(() => {
@@ -587,8 +605,11 @@ class App extends Component {
             if (json.images?.length > 0) {
                 let images: Map<string, Api.Image> = new Map(json.images.map(image => [image.info.digest, image]));
                 this.s.images.value = images;
-                // check from urlhashstate and verify it is in the set, otherwise error
-                this.s.selectedImage.value = images.keys().next()?.value;
+                if (this.urlHashState.image && images.has(this.urlHashState.image)) {
+                    this.s.selectedImage.value = this.urlHashState.image;
+                } else {
+                    this.s.selectedImage.value = images.keys().next()?.value;
+                }
             }
         } else {
             console.error(response);
@@ -611,7 +632,6 @@ class App extends Component {
         if (env.length === 0) {
             this.s.env.value = null;
         } else {
-            console.log('parsingenvtext')
             this.s.env.value = parseEnvText(env);
         }
     }
@@ -620,22 +640,15 @@ class App extends Component {
         event.preventDefault();
         let s = '';
         if (this.urlHashState.expand.more === true) { s += 'more=x&'; }
-        //for (let file of this.inputEditor?.getFiles()) {
-        //    if (typeof file.data !== 'string') {
-        //        console.error('binary files not supported yet...');
-        //        return;
-        //    }
-        //}
         s += 's=' + encodeUrlHashState({
             cmd: this.s.cmd.value,
             stdin: this.s.selectedStdin.value,
-            env: this.s.env.value,
+            // doc is technically always there but .state can return an empty object
+            env: this.r_envEditor.current?.state.doc?.toString(),
             image: this.s.selectedImage.value,
             files: this.inputEditor?.getFiles().map(file => {
-                return {
-                    p: file.path,
-                    s: file.data,
-                };
+                return (typeof file.data === 'string') ?
+                {p: file.path, s: file.data} : { p: file.path, b: bufToBase64(file.data)};
             }),
         });
         window.location.hash = s;
@@ -702,15 +715,16 @@ class App extends Component {
                     <p>Runtime limited to 1 second</p>
                     <p>Input files are in <code>/run/pe/input</code></p>
                     <p>Output files go in <code>/run/pe/output</code></p>
+                    <p>Double-click a filename to rename it</p>
                     <p><code>stdout</code> and <code>stderr</code> are captured</p>
-                    <p><code>stdin</code> can be attached to an input file (under Advanced)</p>
+                    <p><code>stdin</code> can be attached to an input file (under More)</p>
                     <p><kbd>Ctrl+Enter</kbd> within text editor will run</p>
                 </details>
 
                 <form>
                     <div>
                         <label for="image">Image</label>
-                        <select name="image" onChange={e => this.onImageSelect(e)}>
+                        <select value={this.s.selectedImage} name="image" onChange={e => this.onImageSelect(e)}>
                             {imageOptions}
                         </select>
                     </div>
