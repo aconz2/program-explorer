@@ -103,7 +103,7 @@ function parseUrlHashState(s): UrlHashState {
             ret.cmd = checkString(settings.cmd);
             ret.stdin = checkString(settings.stdin);
             ret.image = checkString(settings.image);
-            ret.env = checkStringArray(settings.env);
+            ret.env = checkString(settings.env);
             ret.files = checkFiles(settings.files);
         }
     }

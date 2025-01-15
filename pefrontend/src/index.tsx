@@ -214,6 +214,15 @@ class SimpleEditor extends Component {
         });
     }
 
+    toString(): string { return this.editor.state.doc.toString(); }
+    replace(s: string) {
+        console.log('replacing', this.editor.state.doc.length, s)
+        this.editor.update([
+            this.editor.state.update({changes: {from: 0, to: this.editor.state.doc.length, insert: s}})
+        ]);
+
+    }
+
     render() {
         return (
             <div class="editor-container">
@@ -449,7 +458,7 @@ class App extends Component {
     constructor() {
         super();
         this.urlHashState = loadUrlHashState();
-        // console.log('loaded from url', this.urlHashState);
+         console.log('loaded from url', this.urlHashState);
     }
 
     get inputEditor():  Editor { return this.r_inputEditor.current; }
@@ -484,6 +493,7 @@ class App extends Component {
             this.r_moreDetails.current.open = true;
         }
         if (this.urlHashState.env != null) {
+            this.r_envEditor.current.replace(this.urlHashState.env);
             this.onEnvChange(this.urlHashState.env);
         }
 
@@ -638,19 +648,21 @@ class App extends Component {
 
     onSaveToUrl(event) {
         event.preventDefault();
-        let s = '';
-        if (this.urlHashState.expand.more === true) { s += 'more=x&'; }
-        s += 's=' + encodeUrlHashState({
+        let saveState = {
             cmd: this.s.cmd.value,
             stdin: this.s.selectedStdin.value,
             // doc is technically always there but .state can return an empty object
-            env: this.r_envEditor.current?.state.doc?.toString(),
+            env: this.r_envEditor.current.toString(),
             image: this.s.selectedImage.value,
             files: this.inputEditor?.getFiles().map(file => {
                 return (typeof file.data === 'string') ?
                 {p: file.path, s: file.data} : { p: file.path, b: bufToBase64(file.data)};
             }),
-        });
+        };
+        console.log('saving state', saveState);
+        let s = '';
+        if (this.urlHashState.expand.more === true) { s += 'more=x&'; }
+        s += 's=' + encodeUrlHashState(saveState);
         window.location.hash = s;
     }
 
