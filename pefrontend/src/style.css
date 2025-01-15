@@ -1,6 +1,6 @@
 summary { cursor: pointer; }
 
-// these are internal to code-mirror
+/* these are internal to code-mirror */
 .cm-editor { height: 100%; }
 .cm-scroller { overflow: auto; }
 
@@ -54,4 +54,17 @@ summary { cursor: pointer; }
 
 .mono {
     font-family: monospace;
+}
+
+.inline { display: inline; }
+
+/* is this comment messing thigs up */
+code {
+    padding: 1px 5px;
+    border: 1px solid #e8e8e8;
+    border-radius: 3px;
+}
+
+label.inline-label {
+    padding-right: 3px;
 }

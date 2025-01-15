@@ -215,12 +215,12 @@ class SimpleEditor extends Component {
     }
 
     toString(): string { return this.editor.state.doc.toString(); }
+
     replace(s: string) {
         console.log('replacing', this.editor.state.doc.length, s)
         this.editor.update([
             this.editor.state.update({changes: {from: 0, to: this.editor.state.doc.length, insert: s}})
         ]);
-
     }
 
     render() {
@@ -496,6 +496,9 @@ class App extends Component {
             this.r_envEditor.current.replace(this.urlHashState.env);
             this.onEnvChange(this.urlHashState.env);
         }
+        if (this.urlHashState.stdin != null) {
+            this.s.selectedStdin.value = this.urlHashState.stdin;
+        }
 
         //setTimeout(() => {
         //    let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
@@ -709,8 +712,14 @@ class App extends Component {
                         <dd class="mono">{JSON.stringify(image.config.config.Entrypoint ?? [])}</dd>
                         <dt>Cmd</dt>
                         <dd class="mono">{JSON.stringify(image.config.config.Cmd ?? [])}</dd>
-                    </dl>
+                        <dd class="mono">
 
+                        </dd>
+                    </dl>
+                    <details>
+                        <summary>Full <a href="https://github.com/opencontainers/image-spec/blob/main/config.md" rel="nofollow">OCI Image Config</a></summary>
+                        <pre>{JSON.stringify(image.config, null, '  ')}</pre>
+                    </details>
                 </details>
             );
             try {
@@ -721,6 +730,13 @@ class App extends Component {
         }
         return (
             <div className="mono">
+                <div>
+                    <button onClick={e => this.onSaveToUrl(e)}>Save To URL</button>
+                    <button onClick={e => this.onClearUrl(e)}>Clear URL</button>
+                </div>
+
+                <hr />
+
                 <details ref={this.r_helpDetails}>
                     <summary>Help</summary>
                     <p>Input size limited to 1 MB</p>
@@ -728,27 +744,32 @@ class App extends Component {
                     <p>Input files are in <code>/run/pe/input</code></p>
                     <p>Output files go in <code>/run/pe/output</code></p>
                     <p>Double-click a filename to rename it</p>
+                    <p>A default <code class="inline">PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin</code> is implicitly added on the backend if one isn't set by you or the image config as is done by docker/podman/kata</p>
                     <p><code>stdout</code> and <code>stderr</code> are captured</p>
                     <p><code>stdin</code> can be attached to an input file (under More)</p>
                     <p><kbd>Ctrl+Enter</kbd> within text editor will run</p>
                 </details>
 
+                <hr />
+
                 <form>
                     <div>
-                        <label for="image">Image</label>
+                        <label class="inline-label" for="image">Image</label>
                         <select value={this.s.selectedImage} name="image" onChange={e => this.onImageSelect(e)}>
                             {imageOptions}
                         </select>
                     </div>
                     {imageDetails}
+                    <hr />
                     <div>
+                        <label class="inline-label" for="cmd">Command</label>
                         <input autocomplete="off" id="cmd" className="mono" type="text"
                                value={cmd} onInput={e => this.onCmdChange(e)} />
                     </div>
                     <details ref={this.r_moreDetails}>
                         <summary>More</summary>
                         <label for="stdin">stdin</label>
-                        <select name="stdin" onChange={e => this.onStdinSelect(e)}>
+                        <select value={this.s.selectedStdin} name="stdin" onChange={e => this.onStdinSelect(e)}>
                             <option value="/dev/null">/dev/null</option>
                             {stdinOptions}
                         </select>
@@ -770,10 +791,6 @@ class App extends Component {
                                 <dd>{JSON.stringify(fullCommand.cmd)}</dd>
                             </dl>
                         )}
-                        <div>
-                            <button onClick={e => this.onSaveToUrl(e)}>Save To URL</button>
-                            <button onClick={e => this.onClearUrl(e)}>Clear URL</button>
-                        </div>
                     </details>
                     <div>
                         <button
