@@ -57,6 +57,7 @@ dir /run/crun 0777 0 0
 # this tmpfs then gets bind mounted into /mnt/upper/run/pe/output by crun into /run/pe/output
 dir /run/input      0777 1000 1000
 dir /run/output     0777 1000 1000
+# TODO why are these in here?
 dir /run/output/foo 0777 1000 1000
 dir /run/output/dir 0777 1000 1000
 
