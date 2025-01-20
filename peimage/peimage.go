@@ -434,7 +434,8 @@ func mainImageErofs(outfile string, args []string) (error) {
         return fmt.Errorf("fifo open %w", err)
     }
 
-    cmd := exec.Command("mkfs.erofs", "--tar=f", outfile, fifoName)
+    // tar=f is for full mode
+    cmd := exec.Command("mkfs.erofs", "--tar=f", "-zzstd,level=3", outfile, fifoName)
     if err = cmd.Start(); err != nil {
         return fmt.Errorf("error starting mkfs.erofs %w", err)
     }

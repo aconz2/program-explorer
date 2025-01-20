@@ -494,3 +494,10 @@ HOSTNAME=b74d80f01fab
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 HOME=/root
 HOSTNAME=96c0f1d08056
+
+TODO gather some examples
+test.c:
+int main() {
+    return 42;
+}
+gcc /run/pe/input/test.c -O2 -S -o -

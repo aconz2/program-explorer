@@ -3,6 +3,10 @@
 peimage="./peimage"
 storage=/var/tmp/program-explorer-ocidir
 
+# can use
+#   dump.erofs -s -S <file.erofs>
+# to view statistics
+
 mkdir -p storage
 
 if [ "$1" = "busybox" ]; then
@@ -30,4 +34,12 @@ elif [ "$1" = "ffmpeg" ]; then
 
     $peimage pull $storage ${refs[@]}
     $peimage image ffmpeg.erofs $storage ${refs[@]}
+
+elif [ "$1" = "clang" ]; then
+    refs=(
+        "index.docker.io/silkeh/clang:17"
+    )
+
+    $peimage pull $storage ${refs[@]}
+    $peimage image clang.erofs $storage ${refs[@]}
 fi

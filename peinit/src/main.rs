@@ -15,7 +15,7 @@ use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
 use libc;
 
-// rootfs on /dev/pmem0
+const IMAGE_DEVICE: &CStr = c"/dev/pmem0";
 const INOUT_DEVICE: &str = "/dev/pmem1";
 const STDOUT_FILE: &str = "/run/output/stdout";
 const STDERR_FILE: &str = "/run/output/stderr";
@@ -313,7 +313,7 @@ fn main() {
         RootfsKind::Sqfs => c"squashfs",
         RootfsKind::Erofs => c"erofs",
     };
-    mount(c"/dev/pmem0", c"/mnt/index", Some(rootfs_kind), libc::MS_SILENT, None).unwrap();
+    mount(IMAGE_DEVICE, c"/mnt/index", Some(rootfs_kind), libc::MS_SILENT, None).unwrap();
 
     // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
     let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();

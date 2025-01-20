@@ -150,7 +150,7 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
 
     // image config can be null / totally empty
     if let Some(config) = image_config.config() {
-        // TODO: handle user
+        // TODO: handle user fully
         // from oci-spec-rs/src/image/config.rs
         // user:
         //   For Linux based systems, all
