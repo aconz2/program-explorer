@@ -96,7 +96,7 @@ fn chdir(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chdir(dir.as_
 fn chown(path: &CStr, uid: libc::uid_t, gid: libc::uid_t) -> io::Result<()> { check_libc(unsafe { libc::chown(path.as_ptr(), uid, gid) }) }
 fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.as_ptr()) }) }
 fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
-fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
+//fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
 fn clear_cloexec(fd: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }) }
 
 // debugging code

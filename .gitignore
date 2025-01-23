@@ -1,6 +1,3 @@
-ignore
-_ignore
-venv
 peinit/target
 perunner/target
 pearchive/target
@@ -9,3 +6,4 @@ peimage/target
 peserver/target
 pefrontend/target
 pefrontend/node_modules
+target

@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::io::{Read,Write};
-use std::cmp::min;
 
 use http::Method;
 use std::time::Duration;
@@ -58,6 +57,9 @@ struct Args {
     stdin: Option<String>,
 
     #[arg(long)]
+    env: Vec<String>,
+
+    #[arg(long)]
     gzip: bool,
 
     #[arg(long)]
@@ -82,14 +84,14 @@ fn print_headers(prefix: &str, headers: &http::HeaderMap) {
     }
 }
 
-fn hexdump(buf: &[u8]) {
-    for chunk in buf.chunks(16) {
-        for byte in chunk {
-            print!("{:02x} ", byte);
-        }
-        println!();
-    }
-}
+//fn hexdump(buf: &[u8]) {
+//    for chunk in buf.chunks(16) {
+//        for byte in chunk {
+//            print!("{:02x} ", byte);
+//        }
+//        println!();
+//    }
+//}
 
 #[tokio::main]
 async fn main() {
@@ -105,6 +107,7 @@ async fn main() {
         cmd: Some(args.args),
         entrypoint: Some(vec![]),
         stdin: args.stdin,
+        env: Some(args.env),
     };
 
     let buf = {

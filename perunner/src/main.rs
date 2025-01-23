@@ -23,12 +23,12 @@ use perunner::create_runtime_spec;
 use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
 use perunner::worker;
 
-fn sha2_hex(buf: &[u8]) -> String {
-    use sha2::{Sha256,Digest};
-    use base16ct;
-    let hash = Sha256::digest(&buf);
-    base16ct::lower::encode_string(&hash)
-}
+//fn sha2_hex(buf: &[u8]) -> String {
+//    use sha2::{Sha256,Digest};
+//    use base16ct;
+//    let hash = Sha256::digest(&buf);
+//    base16ct::lower::encode_string(&hash)
+//}
 
 // this is kinda dupcliated with pearchive::packdev
 fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &Option<P1>, file: P2, config: &peinit::Config) {

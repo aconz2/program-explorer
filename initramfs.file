@@ -63,22 +63,14 @@ dir /run/output/dir 0777 1000 1000
 
 dir /bin   0755 0 0
 
-file /bin/crun /home/andrew/Repos/crun/crun 0555 0 0
+file /bin/crun $CRUN 0555 0 0
 
-file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/PROFILE/pearchive 0555 0 0
-file /init             peinit/target/x86_64-unknown-linux-musl/PROFILE/peinit    0555 0 0
+file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/$PROFILE/pearchive 0555 0 0
+file /init             peinit/target/x86_64-unknown-linux-musl/$PROFILE/peinit    0555 0 0
 
-# TODO exclude these in release builds
-file /bin/busybox busybox 0555 0 0   # REMOVE_IN_RELEASE
-slink /bin/sh /bin/busybox 0555 0 0  # REMOVE_IN_RELEASE
-file /bin/strace strace 0555 0 0     # REMOVE_IN_RELEASE
-#file /bin/vsockhello vsockhello 0555 0 0
-#file /bin/pivot_rootfs pivot_rootfs 0555 0 0
-#file /bin/crun crun-1.15-linux-amd64 0555 0 0
-#
-#file /run/bundle/config.json config.json 0444 0 0
-
-#dir /etc 0755 0 0
-#file /etc/passwd /etc/passwd 0555 0 0
-#
-#nod /dev/console 0600 0 0 c 5 1
+# TODO pull these from maybe somewhere else
+# busybox is https://www.busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
+# but strace was a custom build locally
+file /bin/busybox busybox 0555 0 0   #! REMOVE_IN_RELEASE
+slink /bin/sh /bin/busybox 0555 0 0  #! REMOVE_IN_RELEASE
+file /bin/strace strace 0555 0 0     #! REMOVE_IN_RELEASE
