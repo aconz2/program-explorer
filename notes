@@ -501,3 +501,6 @@ int main() {
     return 42;
 }
 gcc /run/pe/input/test.c -O2 -S -o -
+
+okay in making the arch svg, why are we unpacking into /run/input and then bind mounting that to /run/pe/input? why not just directly into /run/pe/input?
+and also since we never actually make /run/pe/input couldn't we skip the overlay and still do the mounts? I think I did that because crun compalined it couldn't bind to /run/pe/input in the container because /run/pe didn't exist
