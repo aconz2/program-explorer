@@ -2,7 +2,7 @@
 name = "peserver"
 version = "0.1.0"
 edition = "2021"
-default-run = "peserver"
+default-run = "worker"
 
 [[bin]]
 name = "testclient"
@@ -11,6 +11,10 @@ path = "src/testclient.rs"
 [[bin]]
 name = "lb"
 path = "src/lb.rs"
+
+[[bin]]
+name = "worker"
+path = "src/worker.rs"
 
 [lib]
 name = "peserver"

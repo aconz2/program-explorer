@@ -16,8 +16,12 @@ for dir in perunner peserver; do
     (cd $dir && cargo build --profile=${cargo_profile})
 done
 
-for dir in peinit pearchive; do
+# peserver with musl requires musl-gcc cmake and some compression things I think?
+# idk how cmake enters the picture
+# peimage requires erofs-utils
+
+for dir in peinit pearchive peserver; do
     (cd $dir && cargo build --profile=${cargo_profile} --target x86_64-unknown-linux-musl)
 done
 
-./makeinitramfs.sh "$profile" > target/$profile/initramfs
+./scripts/build-initramfs.sh "$profile" > target/$profile/initramfs

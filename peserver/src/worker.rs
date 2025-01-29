@@ -280,23 +280,24 @@ impl ServeHttp for HttpRunnerApp {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    // idk these are bad defaults
     #[arg(long, default_value = "../cloud-hypervisor-static")]
     ch: OsString,
 
     #[arg(long, default_value = "../vmlinux")]
     kernel: OsString,
 
-    #[arg(long, default_value = "../initramfs")]
+    #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
     #[arg(long, default_value = "../ocismall.erofs")]
     index: Vec<OsString>,
 }
 
-
 fn main() {
     env_logger::init();
     let cwd = std::env::current_dir().unwrap();
+    println!("cwd={:?}", cwd);
     let args = Args::parse();
 
     //let opt = Some(Opt::parse_args());
