@@ -1,0 +1,10 @@
+[Unit]
+Description=PE server lb
+
+[Container]
+Image=localhost/pe-server-lb:latest
+Network=host
+CpuSetCpus=1
+
+[Install]
+WantedBy=default.target

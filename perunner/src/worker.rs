@@ -77,26 +77,27 @@ impl PoolShuttingDown {
     }
 }
 
-pub fn cpuset(core_offset: usize,
-              n_workers: usize,
-              n_cores_per_worker: usize)
-    -> nix::Result<Vec<CpuSet>> {
-    // restrict to even offset and even cores per worker to keep workers
-    // on separate physical cores
-    if core_offset % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
-    if n_cores_per_worker % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
-    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
-    let mut ret = Vec::with_capacity(n_workers);
-    for i in 0..n_workers {
-        let mut c = CpuSet::new();
-        for j in 0..n_cores_per_worker {
-            let k = core_offset + i*n_cores_per_worker + j;
-            if !all.is_set(k)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
-            c.set(k)?;
+fn spawn_worker(id: usize,
+                cpuset: CpuSet,
+                input:  Receiver<Input>,
+                output: Sender<OutputResult>,
+               )
+    -> JoinHandleT {
+    spawn(move || {
+        trace!("starting worker {id}");
+        sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
+        for msg in input.iter() {
+            match output.send(run(msg)) {
+                Ok(_) => { },
+                Err(_) => {
+                    // output got disconnected somehow
+                    trace!("worker {id} got disconnected");
+                    return;
+                },
+            }
         }
-        ret.push(c);
-    }
-    Ok(ret)
+        trace!("worker {id} shutting down");
+    })
 }
 
 // TODO another idea is to preboot a task and then wait for the input, but if we want to support
@@ -136,28 +137,60 @@ pub fn run(input: Input) -> OutputResult {
     })
 }
 
-fn spawn_worker(id: usize,
-                cpuset: CpuSet,
-                input:  Receiver<Input>,
-                output: Sender<OutputResult>,
-               )
-    -> JoinHandleT {
-    spawn(move || {
-        trace!("starting worker {id}");
-        sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
-        for msg in input.iter() {
-            match output.send(run(msg)) {
-                Ok(_) => { },
-                Err(_) => {
-                    // output got disconnected somehow
-                    trace!("worker {id} got disconnected");
-                    return;
-                },
-            }
+pub fn cpuset_all_ht() -> nix::Result<Vec<CpuSet>> {
+    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
+    let mut ret = vec![];
+    let mut i = 0;
+    let count = CpuSet::count();
+    loop {
+        if i > count { break; }
+        if all.is_set(i).unwrap_or(false) && all.is_set(i + 1).unwrap_or(false) {
+            let mut c = CpuSet::new();
+            c.set(i)?;
+            c.set(i+1)?;
+            ret.push(c);
         }
-        trace!("worker {id} shutting down");
-    })
+        i += 2;
+    }
+    Ok(ret)
 }
+
+pub fn cpuset(core_offset: usize,
+              n_workers: usize,
+              n_cores_per_worker: usize)
+    -> nix::Result<Vec<CpuSet>> {
+    // restrict to even offset and even cores per worker to keep workers
+    // on separate physical cores
+    if core_offset % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
+    if n_cores_per_worker % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
+    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
+    let mut ret = Vec::with_capacity(n_workers);
+    for i in 0..n_workers {
+        let mut c = CpuSet::new();
+        for j in 0..n_cores_per_worker {
+            let k = core_offset + i*n_cores_per_worker + j;
+            if !all.is_set(k)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
+            c.set(k)?;
+        }
+        ret.push(c);
+    }
+    Ok(ret)
+}
+
+pub fn cpusets_string(xs: &[CpuSet]) -> String {
+    let n = CpuSet::count();
+    xs.iter()
+        .map(|c|
+            (0..n)
+            .filter(|i| c.is_set(*i).unwrap_or(false))
+            .map(|i| format!("{}", i))
+            .collect::<Vec<String>>()
+            .join(",")
+        )
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
 
 #[cfg(feature = "asynk")]
 pub mod asynk {

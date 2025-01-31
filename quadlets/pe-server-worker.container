@@ -1,0 +1,12 @@
+[Unit]
+Description=PE server worker
+
+[Container]
+Image=localhost/pe-server-worker:latest
+Network=host
+CpuSetCpus=2-1000
+
+# this needs a volume for the images
+
+[Install]
+WantedBy=default.target

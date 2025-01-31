@@ -504,3 +504,11 @@ gcc /run/pe/input/test.c -O2 -S -o -
 
 okay in making the arch svg, why are we unpacking into /run/input and then bind mounting that to /run/pe/input? why not just directly into /run/pe/input?
 and also since we never actually make /run/pe/input couldn't we skip the overlay and still do the mounts? I think I did that because crun compalined it couldn't bind to /run/pe/input in the container because /run/pe didn't exist
+
+ugh podman --cpuset-cpus is complaining about cgroups v2 delgation; I get
+→ cat "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers"
+cpu io memory pids
+which doesn't have cpuset
+even though I can do taskset -c just fine
+
+caddy run -c caddy/dev.caddyfile

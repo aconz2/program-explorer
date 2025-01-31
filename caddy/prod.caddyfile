@@ -1,0 +1,18 @@
+# based on https://github.com/eriksjolund/podman-caddy-socket-activation/blob/main/examples/example3/Caddyfile
+
+http://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080} {
+    bind fd/3 {
+      protocols h1
+    }
+}
+
+https://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080} {
+    bind fd/3 {
+      protocols h1 h2
+    }
+
+    encode zstd gzip
+    reverse_proxy /api/* {$API_SERVER:127.0.0.1:6188}
+    root * ${CADDY_FILE_ROOT:pefrontend/dist}
+    file_server
+}

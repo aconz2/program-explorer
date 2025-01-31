@@ -290,6 +290,9 @@ struct Args {
     #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
+    #[arg(long, default_value = "false")]
+    cpu_all: bool,
+
     #[arg(long, default_value = "../ocismall.erofs")]
     index: Vec<OsString>,
 }
@@ -316,7 +319,13 @@ fn main() {
     let mut my_server = Server::new_with_opt_and_conf(opt, conf);
     my_server.bootstrap();
 
-    let pool = worker::asynk::Pool::new(&worker::cpuset(2, 2, 2).unwrap());
+    let worker_cpuset = if args.cpu_all {
+        worker::cpuset_all_ht().unwrap()
+    } else {
+        worker::cpuset(2, 2, 2).unwrap()
+    };
+    println!("cpuset={:?}", worker::cpusets_string(&worker_cpuset));
+    let pool = worker::asynk::Pool::new(&worker_cpuset);
     let index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
     let app = HttpRunnerApp {
         pool             : pool,
