@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
 use env_logger;
-use log::log_enabled;
+use log::{info,log_enabled};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter,IntCounter};
@@ -293,17 +293,30 @@ struct Args {
     #[arg(long, default_value = "false")]
     cpu_all: bool,
 
+    #[arg(long)]
+    tcp: Option<String>,
+
+    #[arg(long)]
+    uds: Option<String>,
+
+    #[arg(long, default_value="127.0.0.1:6193")]
+    prom: Option<String>,
+
     #[arg(long, default_value = "../ocismall.erofs")]
     index: Vec<OsString>,
 }
 
 fn main() {
     env_logger::init();
+
     let cwd = std::env::current_dir().unwrap();
-    println!("cwd={:?}", cwd);
     let args = Args::parse();
 
-    //let opt = Some(Opt::parse_args());
+    if args.tcp.is_none() && args.uds.is_none() {
+        println!("--tcp or --uds must be provided");
+        std::process::exit(1);
+    }
+
     let opt = Some(Opt {
         upgrade: false,
         daemon: false,
@@ -313,41 +326,52 @@ fn main() {
     });
 
     let conf = ServerConf::default();
-    //conf.threads = 1;
-
-    //let mut my_server = Server::new(opt).unwrap();
     let mut my_server = Server::new_with_opt_and_conf(opt, conf);
     my_server.bootstrap();
+    info!("config {:#?}", my_server.configuration);
 
     let worker_cpuset = if args.cpu_all {
         worker::cpuset_all_ht().unwrap()
     } else {
         worker::cpuset(2, 2, 2).unwrap()
     };
-    println!("cpuset={:?}", worker::cpusets_string(&worker_cpuset));
+
     let pool = worker::asynk::Pool::new(&worker_cpuset);
     let index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
     let app = HttpRunnerApp {
         pool             : pool,
         index            : index,
+        // NOTE: these files are opened/passed as paths into cloud hypervisor so changes will
+        // get picked up, which may not be what we want. currently ch doesn't support passing
+        // as fd= otherwise we could open them here and be sure things didn't change. but it is a
+        // bit of a toss up whether it is nicer to just have a new file get picked up on the next
+        // run
+        // we join with cwd but if you provide an abspath it will be abs
         kernel           : cwd.join(args.kernel).into(),
         initramfs        : cwd.join(args.initramfs).into(),
         cloud_hypervisor : cwd.join(args.ch).into(),
     };
 
-    // TODO multiple kernels
     assert_file_exists(&app.kernel);
     assert_file_exists(&app.initramfs);
     assert_file_exists(&app.cloud_hypervisor);
 
     let mut runner_service_http = Service::new("Program Explorer Worker".to_string(), app);
-    runner_service_http.add_tcp("127.0.0.1:1234");
+    if let Some(addr) = args.tcp {
+        runner_service_http.add_tcp(&addr);
+    }
+    if let Some(addr) = args.uds {
+        runner_service_http.add_uds(&addr, None);
+    }
 
-    let mut prometheus_service_http = Service::prometheus_http_service();
-    prometheus_service_http.add_tcp("127.0.0.1:6193");
+    // ugh i don't think prom can scrape a uds...
+    if let Some(addr) = args.prom {
+        let mut prometheus_service_http = Service::prometheus_http_service();
+        prometheus_service_http.add_tcp(&addr);
+        my_server.add_service(prometheus_service_http);
+    }
 
     my_server.add_service(runner_service_http);
-    my_server.add_service(prometheus_service_http);
 
     my_server.run_forever();
 }

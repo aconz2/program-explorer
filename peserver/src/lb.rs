@@ -23,6 +23,7 @@ use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 use prometheus::{register_int_counter,IntCounter};
+use clap::Parser;
 
 use peserver::api::v1 as apiv1;
 use peserver::api;
@@ -101,8 +102,10 @@ impl ImageData {
     }
 }
 
+#[derive(Debug)]
 pub struct Worker {
     peer: HttpPeer,
+    // TODO make this dynamic or something
     max_conn: Arc<Semaphore>,
 }
 
@@ -382,9 +385,55 @@ impl ProxyHttp for LB {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    tcp: Option<String>,
+
+    #[arg(long)]
+    uds: Option<String>,
+
+    #[arg(long, default_value="127.0.0.1:6192")]
+    prom: Option<String>,
+
+    #[arg(long)]
+    worker: Vec<String>,
+}
+
+#[derive(Debug)]
+enum PeerParseError {
+    UdsError,
+    BadFmt,
+    BadKind,
+}
+
+fn parse_peers(args: &[String]) -> Result<Vec<Worker>, PeerParseError> {
+    use PeerParseError::*;
+    let mut ret = vec![];
+    for arg in args {
+        let (kind, addr) = arg.split_once(':').ok_or(BadFmt)?;
+        let worker = match kind {
+            // TODO maxconn!
+            "uds" => Worker::new(HttpPeer::new_uds(addr, TLS_FALSE, "".to_string()).map_err(|_| UdsError)?, 4),
+            "tcp" => Worker::new(HttpPeer::new(addr, TLS_FALSE, "".to_string()), 4),
+            _ => { return Err(BadKind); }
+        };
+        ret.push(worker);
+    }
+    Ok(ret)
+}
+
 fn main() {
     env_logger::init();
-    //let opt = Some(Opt::parse_args());
+
+    let args = Args::parse();
+
+    if args.tcp.is_none() && args.uds.is_none() {
+        println!("--tcp or --uds must be provided");
+        std::process::exit(1);
+    }
+
     let opt = Some(Opt {
         upgrade: false,
         daemon: false,
@@ -395,12 +444,16 @@ fn main() {
     let conf = ServerConf::default();
 
     let mut my_server = Server::new_with_opt_and_conf(opt, conf);
-    println!("server config {:#?}", my_server.configuration);
+    info!("config {:#?}", my_server.configuration);
     my_server.bootstrap();
 
-    let peers = vec![
-        Worker::new(HttpPeer::new("127.0.0.1:1234", TLS_FALSE, "".to_string()), 4),
-    ];
+    let peers = parse_peers(&args.worker).expect("no peers");
+    info!("peers {:#?}", peers);
+
+    if peers.is_empty() {
+        println!("no worker peers, add with --worker");
+        std::process::exit(1);
+    }
 
     let image_check_frequency = Duration::from_secs(120);
     let workers = Workers::new(peers, image_check_frequency).unwrap();
@@ -414,11 +467,19 @@ fn main() {
     let lb_maxconn = 1024;
     let lb = LB::new(lb_maxconn, workers);
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
-    lb_service.add_tcp("127.0.0.1:6188");
 
-    let mut prometheus_service_http = Service::prometheus_http_service();
-    // TODO This has to be on a different port than main
-    prometheus_service_http.add_tcp("127.0.0.1:6192");
+    if let Some(addr) = args.tcp {
+        lb_service.add_tcp(&addr);
+    }
+    if let Some(addr) = args.uds {
+        lb_service.add_uds(&addr, None);
+    }
+
+    if let Some(addr) = args.prom {
+        let mut prometheus_service_http = Service::prometheus_http_service();
+        prometheus_service_http.add_tcp(&addr);
+        my_server.add_service(prometheus_service_http);
+    }
 
     //let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
     //let key_path = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
@@ -430,7 +491,6 @@ fn main() {
 
     my_server.add_service(lb_service);
     my_server.add_service(workers_background);
-    my_server.add_service(prometheus_service_http);
 
     my_server.run_forever();
 }

@@ -512,3 +512,9 @@ which doesn't have cpuset
 even though I can do taskset -c just fine
 
 caddy run -c caddy/dev.caddyfile
+
+can we have the lb and worker not even have net access and only proxy over a file? and between lb and worker should we use h2c? between caddy and lb h2c?
+
+okay so with uds, it looks like
+cargo run --bin worker -- --uds /run/user/$(id -u)/program-explorer/worker1.sock
+cargo run --bin lb -- --uds /run/user/$(id -u)/program-explorer/lb.sock --worker uds:/run/user/$(id -u)/program-explorer/worker1.sock
