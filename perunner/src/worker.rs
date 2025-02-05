@@ -61,6 +61,10 @@ impl Pool {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
     pub fn sender(&mut self) -> &Sender<Input> { &self.sender }
     pub fn receiver(&mut self) -> &Receiver<OutputResult> { &self.receiver }
 
@@ -218,6 +222,10 @@ pub mod asynk {
                 sender: i_s,
                 handles: handles,
             }
+        }
+
+        pub fn len(&self) -> usize {
+            self.handles.len()
         }
 
         pub fn sender(&self) -> &Sender<SenderElement> { &self.sender }

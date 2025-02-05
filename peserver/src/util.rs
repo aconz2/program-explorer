@@ -70,6 +70,15 @@ pub fn response_no_body(status: StatusCode) -> Response<Vec<u8>> {
         .unwrap()
 }
 
+pub fn response_string(status: StatusCode, body: &str) -> Response<Vec<u8>> {
+    let body = body.as_bytes().to_vec();
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap()
+}
+
 pub fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Result<Response<Vec<u8>>> {
     Ok(response_json_vec(status, serde_json::to_vec(&body)?))
 }

@@ -33,7 +33,7 @@ use peserver::api::ContentType;
 use peserver::api::v1 as apiv1;
 use peserver::util::{
     read_full_server_request_body,
-    response_json,response_no_body,response_json_vec,response_pearchivev1
+    response_json,response_no_body,response_json_vec,response_pearchivev1,response_string,
 };
 
 static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
@@ -78,6 +78,7 @@ struct ErrorBody {
 
 struct HttpRunnerApp {
     pub pool: worker::asynk::Pool,
+    pub max_conn: usize,
     pub index: PEImageMultiIndex,
     pub cloud_hypervisor: OsString,
     pub initramfs: OsString,
@@ -183,7 +184,6 @@ impl HttpRunnerApp {
             kernel_inspect     : false,
         };
 
-        // TODO we should have this io_file crap not in here
         let mut io_file = NamedTempFile::new().map_err(|_| Error::TempfileCreate)?;
         match content_type {
             ContentType::ApplicationJson => {
@@ -261,6 +261,10 @@ impl HttpRunnerApp {
         response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&self.index))
             .map_err(|_| Error::Serialize)
     }
+
+    async fn api_internal_max_conn(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+        Ok(response_string(StatusCode::OK, &format!("{}", self.max_conn)))
+    }
 }
 
 #[async_trait]
@@ -269,6 +273,7 @@ impl ServeHttp for HttpRunnerApp {
         let req_parts: &http::request::Parts = session.req_header();
         //trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (req_parts.method.clone(), req_parts.uri.path()) {
+            (Method::GET,  "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
             (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session).await,
             (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session).await,
             _ => {
@@ -356,8 +361,10 @@ fn main() {
         }
         index
     };
+    let max_conn = pool.len() * 2;  // TODO is this a good amount?
     let app = HttpRunnerApp {
         pool             : pool,
+        max_conn         : max_conn,
         index            : index,
         // NOTE: these files are opened/passed as paths into cloud hypervisor so changes will
         // get picked up, which may not be what we want. currently ch doesn't support passing

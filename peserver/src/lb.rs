@@ -20,7 +20,7 @@ use env_logger;
 use bytes::Bytes;
 use http::{Method,StatusCode,header};
 use arc_swap::ArcSwap;
-use log::{error,info};
+use log::{error,info,warn};
 use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
@@ -173,12 +173,49 @@ impl Workers {
         info!("updated images for backend {}, {} images", peer, n_images);
         Ok(())
     }
+
+    async fn get_max_conn(&self, peer: &HttpPeer) -> Result<usize, Box<pingora::Error>> {
+        let connector = pingora::connectors::http::v1::Connector::new(None);
+        let (mut session, _) = connector.get_http_session(peer).await?;
+        session.read_timeout = Some(Duration::from_secs(5));
+        session.write_timeout = Some(Duration::from_secs(5));
+        let req = {
+            let x = RequestHeader::build(Method::GET, "/api/internal/maxconn".as_bytes(), None).unwrap();
+            Box::new(x)
+        };
+
+        let _ = session.write_request_header(req).await?;
+        let _ = session.read_response().await?;
+        let res_parts: &http::response::Parts = session.resp_header().unwrap();
+        if res_parts.status != StatusCode::OK {
+            error!("got bad response for maxconn {:?}", res_parts);
+            return Err(pingora::Error::new(pingora::ErrorType::InternalError));
+        }
+        let body = read_full_client_response_body(&mut session).await?;
+        let s = String::from_utf8_lossy(&body);
+        s.parse::<usize>().map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))
+    }
 }
 
 #[async_trait]
 impl BackgroundService for Workers {
     async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
         let mut interval = tokio::time::interval(self.image_check_frequency);
+            for (id, worker) in self.workers.iter().enumerate() {
+                for _ in 0..100 {
+                    match self.get_max_conn(&worker.peer).await {
+                        Ok(max_conn) => {
+                            info!("updating maxconn for worker={} to {}", id, max_conn);
+                            worker.max_conn.add_permits(max_conn);
+                            break;
+                        }
+                        Err(_) => {
+                            warn!("error getting maxconn for worker={}", id);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
         loop {
             if *shutdown.borrow() {
                 return;
@@ -416,9 +453,8 @@ fn parse_peers(args: &[String]) -> Result<Vec<Worker>, PeerParseError> {
     for arg in args {
         let (kind, addr) = arg.split_once(':').ok_or(BadFmt)?;
         let worker = match kind {
-            // TODO maxconn!
-            "uds" => Worker::new(HttpPeer::new_uds(addr, TLS_FALSE, "".to_string()).map_err(|_| UdsError)?, 4),
-            "tcp" => Worker::new(HttpPeer::new(addr, TLS_FALSE, "".to_string()), 4),
+            "uds" => Worker::new(HttpPeer::new_uds(addr, TLS_FALSE, "".to_string()).map_err(|_| UdsError)?, 0),
+            "tcp" => Worker::new(HttpPeer::new(addr, TLS_FALSE, "".to_string()), 0),
             _ => { return Err(BadKind); }
         };
         ret.push(worker);
