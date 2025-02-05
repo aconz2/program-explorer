@@ -1,14 +1,18 @@
 [Unit]
 Description=caddy
 
+[Service]
+Restart=always
+RuntimeDirectory=program-explorer
+
 [Container]
 # should I derive an image with the Caddyfile?
 Image=docker.io/library/caddy:latest
 CpuSetCpus=0
 Network=host
+Volume=caddy-files.volume:/www
 
 # this needs a volume for the config (or are we going to derive an image with the config
-# this needs a volume for the static files
 
 [Install]
 WantedBy=default.target

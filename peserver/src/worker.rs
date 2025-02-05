@@ -1,6 +1,8 @@
 use std::time::Duration;
 use std::io::{Read,Write};
 use std::ffi::OsString;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 
 use pingora_timeout::timeout;
 use pingora::services::listening::Service;
@@ -302,8 +304,11 @@ struct Args {
     #[arg(long, default_value="127.0.0.1:6193")]
     prom: Option<String>,
 
-    #[arg(long, default_value = "../ocismall.erofs")]
+    #[arg(long)]
     index: Vec<OsString>,
+
+    #[arg(long)]
+    index_dir: Vec<OsString>,
 }
 
 fn main() {
@@ -337,7 +342,20 @@ fn main() {
     };
 
     let pool = worker::asynk::Pool::new(&worker_cpuset);
-    let index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
+    let index = {
+        let mut index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
+        for dir in args.index_dir {
+            index.add_dir(dir).unwrap();
+        }
+        if index.is_empty() {
+            println!("index is empty, no images to run");
+            std::process::exit(1);
+        }
+        for (k, v) in index.map() {
+            info!("loaded image {} from {:?}: {}", k, v.path, v.image.id.name());
+        }
+        index
+    };
     let app = HttpRunnerApp {
         pool             : pool,
         index            : index,
@@ -361,7 +379,7 @@ fn main() {
         runner_service_http.add_tcp(&addr);
     }
     if let Some(addr) = args.uds {
-        runner_service_http.add_uds(&addr, None);
+        runner_service_http.add_uds(&addr, Some(Permissions::from_mode(0o600)));
     }
 
     // ugh i don't think prom can scrape a uds...

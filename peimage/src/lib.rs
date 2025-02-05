@@ -111,7 +111,7 @@ impl PEImageMultiIndex {
     pub fn from_paths<P: AsRef<Path>>(key_type: PEImageMultiIndexKeyType, paths: &[P]) -> io::Result<Self> {
         let mut ret = Self::new(key_type);
         for p in paths {
-            ret = ret.add_path(p)?;
+            ret.add_path(p)?;
         }
         Ok(ret)
     }
@@ -120,7 +120,19 @@ impl PEImageMultiIndex {
         Self::from_paths(PEImageMultiIndexKeyType::Digest, paths)
     }
 
-    pub fn add_path<P: AsRef<Path>>(mut self, path: P) -> io::Result<Self> {
+    pub fn add_dir<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+        for entry in path.as_ref().read_dir()? {
+            if let Ok(entry) = entry {
+                let p = entry.path();
+                if p.is_file() {
+                    self.add_path(p)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn add_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
         let idx = PEImageIndex::from_path(&path)?;
         let rootfs_kind = RootfsKind::try_from_path_name(&path)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "couldn't determine rootfs kind"))?;
@@ -137,7 +149,7 @@ impl PEImageMultiIndex {
             };
             self.insert(&image.id, entry);
         }
-        Ok(self)
+        Ok(())
     }
 
     fn insert(&mut self, id: &PEImageId, entry: PEImageMultiIndexEntry) {
@@ -160,5 +172,9 @@ impl PEImageMultiIndex {
 
     pub fn map<'a>(&'a self) -> &'a HashMap<String, PEImageMultiIndexEntry> {
         &self.map
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }

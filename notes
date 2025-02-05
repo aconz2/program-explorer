@@ -518,3 +518,6 @@ can we have the lb and worker not even have net access and only proxy over a fil
 okay so with uds, it looks like
 cargo run --bin worker -- --uds /run/user/$(id -u)/program-explorer/worker1.sock
 cargo run --bin lb -- --uds /run/user/$(id -u)/program-explorer/lb.sock --worker uds:/run/user/$(id -u)/program-explorer/worker1.sock
+
+curl -v --unix-socket /run/user/1000/program-explorer/lb.sock http://localhost/api/v1/images
+TODO update testclient to take unix socket

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 use std::collections::{BTreeMap};
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 
 use pingora::prelude::{timeout,HttpPeer};
 use pingora::http::{RequestHeader,ResponseHeader};
@@ -472,7 +474,7 @@ fn main() {
         lb_service.add_tcp(&addr);
     }
     if let Some(addr) = args.uds {
-        lb_service.add_uds(&addr, None);
+        lb_service.add_uds(&addr, Some(Permissions::from_mode(0o600)));
     }
 
     if let Some(addr) = args.prom {

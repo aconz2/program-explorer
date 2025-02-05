@@ -1,12 +1,16 @@
 [Unit]
 Description=PE server worker
 
+[Service]
+Restart=always
+RuntimeDirectory=program-explorer
+
 [Container]
 Image=localhost/pe-server-worker:latest
-Network=host
+Network=none
 CpuSetCpus=2-1000
-
-# this needs a volume for the images
+Volume=pe-worker-images.volume:/peimages
+Exec=--uds=${XDG_RUNTIME_DIR}/program-explorer/worker.sock --index-dir=/peimages
 
 [Install]
 WantedBy=default.target

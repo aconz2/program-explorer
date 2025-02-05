@@ -1,10 +1,15 @@
 [Unit]
 Description=PE server lb
 
+[Service]
+Restart=always
+RuntimeDirectory=program-explorer
+
 [Container]
 Image=localhost/pe-server-lb:latest
-Network=host
+Network=none
 CpuSetCpus=1
+Exec=--uds=${XDG_RUNTIME_DIR}/program-explorer/lb.sock --
 
 [Install]
 WantedBy=default.target

@@ -98,6 +98,7 @@ async fn main() {
     let args = Args::parse();
 
     let connector = pingora::connectors::http::v1::Connector::new(None);
+    // TODO support uds
     let peer = HttpPeer::new(args.addr, false, "".to_string());
     let (mut session, _) = connector.get_http_session(&peer).await.unwrap();
     session.read_timeout = Some(Duration::from_secs(5));
