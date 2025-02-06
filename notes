@@ -511,6 +511,14 @@ cpu io memory pids
 which doesn't have cpuset
 even though I can do taskset -c just fine
 
+fixed by
+sudo mkdir /etc/systemd/system/user@.service.d
+cat > /etc/systemd/system/user@.service.d/delegate.conf << EOF
+[Service]
+Delegate=cpu cpuset io memory pids
+EOF
+systemctl daemon-reload
+
 caddy run -c caddy/dev.caddyfile
 
 can we have the lb and worker not even have net access and only proxy over a file? and between lb and worker should we use h2c? between caddy and lb h2c?

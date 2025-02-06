@@ -221,9 +221,11 @@ fn main() {
     // tracing::subscriber::set_global_default(subscriber)
     //     .expect("setting default subscriber failed");
 
-    let image_index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name)
-        .add_path(&args.index)
-        .expect("failed to create image index");
+    let image_index = {
+        let mut index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name);
+        index.add_path(&args.index).expect("failed to create image index");
+        index
+    };
 
     let image_index_entry = {
         match image_index.get(&args.image) {

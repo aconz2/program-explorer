@@ -5,11 +5,13 @@ Description=PE server lb
 Restart=always
 RuntimeDirectory=program-explorer
 
+# TODO systemctl stop fails after 10s
+
 [Container]
 Image=localhost/pe-server-lb:latest
 Network=none
-CpuSetCpus=1
-Exec=--uds=${XDG_RUNTIME_DIR}/program-explorer/lb.sock --
+PodmanArgs=--cpuset-cpus=1
+Exec=--uds=${XDG_RUNTIME_DIR}/program-explorer/lb.sock --worker=uds:${XDG_RUNTIME_DIR}/program-explorer/worker.sock
 
 [Install]
 WantedBy=default.target
