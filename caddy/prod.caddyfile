@@ -1,19 +1,23 @@
 # based on https://github.com/eriksjolund/podman-caddy-socket-activation/blob/main/examples/example3/Caddyfile
+{
+    admin off
+}
 
-http://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080} {
+
+http://{$CADDY_HOST:localhost} {
     bind fd/3 {
       protocols h1
     }
     redir https://{host}{uri}
 }
 
-https://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080} {
+https://{$CADDY_HOST:localhost} {
     bind fd/4 {
       protocols h1 h2
     }
 
     encode zstd gzip
-    reverse_proxy /api/* {$API_SERVER:127.0.0.1:6188}
-    root * ${CADDY_FILE_ROOT:unix/$XDG_RUNTIME_DIR/program-explorer/lb.sock}
+    reverse_proxy /api/* {$API_SERVER:unix/$RUNTIME_DIRECTORY/lb.sock}
+    root * {$CADDY_FILE_ROOT:/www}
     file_server
 }

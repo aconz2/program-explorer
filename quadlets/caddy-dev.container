@@ -4,14 +4,11 @@ Description=caddy
 [Service]
 Restart=always
 RuntimeDirectory=program-explorer
-CPUAffinity=0
 
 [Container]
-Image=localhost/pe-caddy:latest
+Image=localhost/pe-caddy-dev:latest
 Network=host
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
-Volume=caddy-files.volume:/www
-Volume=caddy-data.volume:/data
 
 [Install]
 WantedBy=default.target

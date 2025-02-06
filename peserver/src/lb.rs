@@ -234,7 +234,7 @@ impl BackgroundService for Workers {
             for (id, worker) in self.workers.iter().enumerate() {
                 match self.do_update(id.try_into().unwrap(), &worker.peer).await {
                     Ok(()) => {}
-                    Err(e) => { error!("error getting images for peer {} {:?} {:?}", id, worker.peer, e); }
+                    Err(e) => { error!("error getting images for peer {} {:?}", id, e); }
                 }
             }
         }

@@ -1,0 +1,3 @@
+FROM docker.io/library/caddy:2.9.1
+
+COPY caddy/prod.caddyfile /etc/caddy/Caddyfile

@@ -5,6 +5,7 @@
 http://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080}
 
 encode zstd gzip
-reverse_proxy /api/* {$API_SERVER:127.0.0.1:6188}
-root * pefrontend/dist
+reverse_proxy /api/* {$API_SERVER:unix/{$RUNTIME_DIRECTORY}/lb.sock}
+# TODO here we want to reverse proxy anything else to the vite server (including websockets like the nginx conf)
+root * {$CADDY_FILE_ROOT:/home/andrew/Repos/program-explorer/pefrontend/dist}
 file_server

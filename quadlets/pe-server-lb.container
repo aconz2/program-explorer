@@ -4,13 +4,13 @@ Description=PE server lb
 [Service]
 Restart=always
 RuntimeDirectory=program-explorer
+CPUAffinity=1
 
 # TODO systemctl stop fails after 10s
 
 [Container]
 Image=localhost/pe-server-lb:latest
 Network=none
-PodmanArgs=--cpuset-cpus=1
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 Exec=--uds=${RUNTIME_DIRECTORY}/lb.sock --worker=uds:${RUNTIME_DIRECTORY}/worker.sock
 
