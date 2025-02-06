@@ -529,3 +529,8 @@ cargo run --bin lb -- --uds /run/user/$(id -u)/program-explorer/lb.sock --worker
 
 curl -v --unix-socket /run/user/1000/program-explorer/lb.sock http://localhost/api/v1/images
 TODO update testclient to take unix socket
+
+→ podman unshare
+→ podman volume vmount systemd-pe-worker-images
+→ cp peimage/busybox.erofs ~/.local/share/containers/storage/volumes/systemd-pe-worker-images/_data/
+

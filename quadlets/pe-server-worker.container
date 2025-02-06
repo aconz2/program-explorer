@@ -5,12 +5,18 @@ Description=PE server worker
 Restart=always
 RuntimeDirectory=program-explorer
 
+# This does let us use an overly high upper bound whereas using
+# [Container]
+# PodmanArgs=--cpuset-cpus=2-1000
+# doesn't
+CPUAffinity=2-1000
+
 [Container]
 Image=localhost/pe-server-worker:latest
 Network=none
-PodmanArgs=--cpuset-cpus=2-1000
 Volume=pe-worker-images.volume:/peimages
-Exec=--uds=${XDG_RUNTIME_DIR}/program-explorer/worker.sock --index-dir=/peimages
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
+Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages
 
 [Install]
 WantedBy=default.target

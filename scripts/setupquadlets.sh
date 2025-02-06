@@ -14,3 +14,5 @@ systemctl --user daemon-reload
 
 #systemctl --user start pe-server-lb.service
 #journalctl --user -feu pe-server-lb.service
+
+#systemctl --user daemon-reload && systemctl --user restart pe-server-lb.service

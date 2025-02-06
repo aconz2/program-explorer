@@ -306,7 +306,8 @@ struct Args {
     #[arg(long)]
     uds: Option<String>,
 
-    #[arg(long, default_value="127.0.0.1:6193")]
+    //#[arg(long, default_value="127.0.0.1:6193")]
+    #[arg(long)]
     prom: Option<String>,
 
     #[arg(long)]
@@ -347,6 +348,7 @@ fn main() {
     };
 
     let pool = worker::asynk::Pool::new(&worker_cpuset);
+    info!("using {} workers", pool.len());
     let index = {
         let mut index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
         for dir in args.index_dir {

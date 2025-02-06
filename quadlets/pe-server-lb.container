@@ -11,7 +11,8 @@ RuntimeDirectory=program-explorer
 Image=localhost/pe-server-lb:latest
 Network=none
 PodmanArgs=--cpuset-cpus=1
-Exec=--uds=${XDG_RUNTIME_DIR}/program-explorer/lb.sock --worker=uds:${XDG_RUNTIME_DIR}/program-explorer/worker.sock
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
+Exec=--uds=${RUNTIME_DIRECTORY}/lb.sock --worker=uds:${RUNTIME_DIRECTORY}/worker.sock
 
 [Install]
 WantedBy=default.target

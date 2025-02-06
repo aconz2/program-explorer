@@ -14,6 +14,8 @@ use pingora::proxy::{ProxyHttp, Session};
 use pingora_limits::rate::Rate;
 use pingora::protocols::http::v1::common::header_value_content_length;
 use pingora::services::listening::Service;
+use pingora::upstreams::peer::Peer;
+use pingora::protocols::l4::socket::SocketAddr;
 
 use async_trait::async_trait;
 use env_logger;
@@ -114,6 +116,10 @@ pub struct Worker {
 impl Worker {
     fn new(peer: HttpPeer, max_conn: usize) -> Self {
         Self { peer, max_conn: Semaphore::new(max_conn).into() }
+    }
+
+    fn address(&self) -> &SocketAddr {
+        self.peer.address()
     }
 }
 
@@ -433,7 +439,8 @@ struct Args {
     #[arg(long)]
     uds: Option<String>,
 
-    #[arg(long, default_value="127.0.0.1:6192")]
+    //#[arg(long, default_value="127.0.0.1:6192")]
+    #[arg(long)]
     prom: Option<String>,
 
     #[arg(long)]
@@ -486,7 +493,9 @@ fn main() {
     my_server.bootstrap();
 
     let peers = parse_peers(&args.worker).expect("no peers");
-    info!("peers {:#?}", peers);
+    for peer in &peers {
+        info!("peer {:?}", peer.address());
+    }
 
     if peers.is_empty() {
         println!("no worker peers, add with --worker");
