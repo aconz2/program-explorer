@@ -4,10 +4,10 @@ Description=PE server lb
 [Service]
 Restart=always
 RuntimeDirectory=program-explorer
+# idk if this is really the right place/way to do this
+RuntimeDirectoryPreserve=yes
 StandardError=journal
 CPUAffinity=1
-
-# TODO systemctl stop fails after 10s
 
 [Container]
 Image=localhost/pe-server-lb:latest

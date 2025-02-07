@@ -5,6 +5,7 @@ Description=PE server worker
 Restart=always
 StandardError=journal
 RuntimeDirectory=program-explorer
+RuntimeDirectoryPreserve=yes
 
 # This does let us use an overly high upper bound whereas using
 # [Container]

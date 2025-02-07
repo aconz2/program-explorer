@@ -4,11 +4,14 @@ Description=caddy
 [Service]
 Restart=always
 RuntimeDirectory=program-explorer
+RuntimeDirectoryPreserve=yes
 
 [Container]
 Image=localhost/pe-caddy-dev:latest
+Pod=pe.pod
 Network=host
-Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
+Environment=RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}
 
 [Install]
 WantedBy=default.target

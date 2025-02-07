@@ -1,11 +1,12 @@
-{
-  admin off
-}
+# admin api left on so we can check the config with
+# curl localhost:2019/config/ | jq | less
 
 http://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080}
 
 encode zstd gzip
+
 reverse_proxy /api/* {$API_SERVER:unix/{$RUNTIME_DIRECTORY}/lb.sock}
-# TODO here we want to reverse proxy anything else to the vite server (including websockets like the nginx conf)
-root * {$CADDY_FILE_ROOT:/home/andrew/Repos/program-explorer/pefrontend/dist}
-file_server
+
+# this takes care of the websockets upgrade thing that we had to
+# tell nginx to take care of
+reverse_proxy * {$FRONTEND_SERVER:localhost:5173}
