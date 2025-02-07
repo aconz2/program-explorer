@@ -17,8 +17,7 @@ use http::{Method,Response,StatusCode,header};
 use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
-use env_logger;
-use log::{info,log_enabled};
+use log::{info,error,log_enabled};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter,IntCounter};
@@ -33,7 +32,7 @@ use peserver::api::ContentType;
 use peserver::api::v1 as apiv1;
 use peserver::util::{
     read_full_server_request_body,
-    response_json,response_no_body,response_json_vec,response_pearchivev1,response_string,
+    response_json,response_no_body,response_json_vec,response_pearchivev1,response_string,setup_logs,
 };
 
 static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
@@ -318,13 +317,12 @@ struct Args {
 }
 
 fn main() {
-    env_logger::init();
-
+    setup_logs();
     let cwd = std::env::current_dir().unwrap();
     let args = Args::parse();
 
     if args.tcp.is_none() && args.uds.is_none() {
-        println!("--tcp or --uds must be provided");
+        error!("--tcp or --uds must be provided");
         std::process::exit(1);
     }
 
@@ -355,7 +353,7 @@ fn main() {
             index.add_dir(dir).unwrap();
         }
         if index.is_empty() {
-            println!("index is empty, no images to run");
+            error!("index is empty, no images to run");
             std::process::exit(1);
         }
         for (k, v) in index.map() {
@@ -385,9 +383,11 @@ fn main() {
 
     let mut runner_service_http = Service::new("Program Explorer Worker".to_string(), app);
     if let Some(addr) = args.tcp {
+        info!("listening on tcp {}", addr);
         runner_service_http.add_tcp(&addr);
     }
     if let Some(addr) = args.uds {
+        info!("listening on uds {}", addr);
         runner_service_http.add_uds(&addr, Some(Permissions::from_mode(0o600)));
     }
 

@@ -1,16 +1,51 @@
 use std::net::{IpAddr,Ipv6Addr};
+use std::io::Write;
 
 use bytes::{Bytes,BytesMut};
 use http::{Response,StatusCode};
 use serde::Serialize;
 use sha2::{Sha256,Digest};
 use base64::prelude::{BASE64_STANDARD,Engine};
+use env_logger;
+use log::Level;
+use rustix::fd::AsFd;
 
 use pingora;
 use pingora::proxy::Session;
 use pingora::protocols::http::ServerSession;
 
 use crate::api::{APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
+
+// taken from https://github.com/swsnr/systemd-journal-logger.rs/blob/main/src/lib.rs
+// which does more than I want by trying to connect to /run/systemd/journal/socket
+fn connected_to_journal() -> bool {
+    rustix::fs::fstat(std::io::stderr().as_fd())
+        .map(|stat| format!("{}:{}", stat.st_dev, stat.st_ino))
+        .ok()
+        .and_then(|stderr| {
+            std::env::var_os("JOURNAL_STREAM").map(|s| s.to_string_lossy() == stderr.as_str())
+        })
+        .unwrap_or(false)
+}
+
+pub fn setup_logs() {
+    if connected_to_journal() {
+        env_logger::builder()
+            .format(|buf, record| {
+                let priority = match record.level() {
+                    Level::Error => "3",
+                    Level::Warn => "4",
+                    Level::Info => "5",
+                    Level::Debug => "6",
+                    Level::Trace => "7",
+                };
+                writeln!(buf, "<{}> {}", priority, record.args())
+            })
+            .init();
+    } else {
+        env_logger::init();
+    }
+}
 
 pub async fn read_full_server_request_body(session: &mut ServerSession, max_len: usize) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
@@ -113,7 +148,6 @@ pub fn etag(data: &[u8]) -> String {
     ret.push('"');
     ret
 }
-
 
 pub mod premade_responses {
     use once_cell::sync::Lazy;

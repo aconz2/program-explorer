@@ -18,7 +18,6 @@ use pingora::upstreams::peer::Peer;
 use pingora::protocols::l4::socket::SocketAddr;
 
 use async_trait::async_trait;
-use env_logger;
 use bytes::Bytes;
 use http::{Method,StatusCode,header};
 use arc_swap::ArcSwap;
@@ -32,7 +31,7 @@ use clap::Parser;
 use peserver::api::v1 as apiv1;
 use peserver::api;
 
-use peserver::util::{read_full_client_response_body,session_ip_id,etag};
+use peserver::util::{read_full_client_response_body,session_ip_id,etag,setup_logs};
 use peserver::util::premade_responses;
 
 static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
@@ -208,7 +207,7 @@ impl BackgroundService for Workers {
     async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
         let mut interval = tokio::time::interval(self.image_check_frequency);
             for (id, worker) in self.workers.iter().enumerate() {
-                for _ in 0..100 {
+                for _ in 0..20 {
                     match self.get_max_conn(&worker.peer).await {
                         Ok(max_conn) => {
                             info!("updating maxconn for worker={} to {}", id, max_conn);
@@ -470,7 +469,7 @@ fn parse_peers(args: &[String]) -> Result<Vec<Worker>, PeerParseError> {
 }
 
 fn main() {
-    env_logger::init();
+    setup_logs();
 
     let args = Args::parse();
 
@@ -516,9 +515,11 @@ fn main() {
     let mut lb_service = pingora::proxy::http_proxy_service(&my_server.configuration, lb);
 
     if let Some(addr) = args.tcp {
+        info!("listening on tcp {}", addr);
         lb_service.add_tcp(&addr);
     }
     if let Some(addr) = args.uds {
+        info!("listening on uds {}", addr);
         lb_service.add_uds(&addr, Some(Permissions::from_mode(0o600)));
     }
 

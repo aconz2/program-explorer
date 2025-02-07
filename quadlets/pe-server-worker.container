@@ -3,6 +3,7 @@ Description=PE server worker
 
 [Service]
 Restart=always
+StandardError=journal
 RuntimeDirectory=program-explorer
 
 # This does let us use an overly high upper bound whereas using
@@ -13,9 +14,15 @@ CPUAffinity=2-1000
 
 [Container]
 Image=localhost/pe-server-worker:latest
+Pod=pe.pod
 Network=none
+
+# okay so using journald doesn't actually pass through JOURNAL_STREAM, so do it manually
+Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
+LogDriver=passthrough
+
 Volume=pe-worker-images.volume:/peimages
-Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
 Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages
 
 [Install]
