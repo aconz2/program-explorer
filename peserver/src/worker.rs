@@ -161,11 +161,13 @@ impl HttpRunnerApp {
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
             .map_err(|_| Error::OciSpec)?;
 
+        // TODO plumb in an arg
+        use perunner::cloudhypervisor::ChLogLevel;
         let ch_config = CloudHypervisorConfig {
             bin           : self.cloud_hypervisor.clone(),
             kernel        : self.kernel.clone(),
             initramfs     : self.initramfs.clone(),
-            log_level     : None,
+            log_level     : Some(ChLogLevel::Info),
             console       : true,
             keep_args     : true,
             event_monitor : false,
@@ -223,7 +225,7 @@ impl HttpRunnerApp {
                     eprintln!("=== {} ===", name);
                     let _ = std::io::copy(file, &mut std::io::stderr());
                 }
-                eprintln!("worker error {:?}", postmortem.error);
+                error!("worker error {:?}", postmortem.error);
                 if let Some(args) = postmortem.args { eprintln!("launched ch with {:?}", args); };
                 if let Some(mut err_file) = postmortem.logs.err_file { dump_file("ch err", &mut err_file); }
                 if let Some(mut log_file) = postmortem.logs.log_file { dump_file("ch log", &mut log_file); }

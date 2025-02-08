@@ -1,8 +1,8 @@
-use std::os::fd::AsRawFd;
+//use std::os::fd::AsRawFd;
 use std::fs;
-use std::path::{Path,PathBuf};
-use std::process::{Command,Stdio,Child};
-use std::os::unix::net::{UnixListener,UnixStream};
+use std::path::{PathBuf};
+use std::process::{Command,Child,Stdio};
+//use std::os::unix::net::{UnixListener,UnixStream};
 use std::io;
 
 use std::ffi::OsString;
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use tempfile::{NamedTempFile};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
-use serde::Serialize;
-use libc;
+//use serde::Serialize;
+//use libc;
 use api_client;
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
@@ -93,9 +93,9 @@ pub struct CloudHypervisor {
     con_file: Option<NamedTempFile>,
     err_file: NamedTempFile,
     child: Child,
-    #[allow(dead_code)]
-    socket_listen: UnixListener,
-    socket_stream: UnixStream,
+    //#[allow(dead_code)]
+    //socket_listen: UnixListener,
+    //socket_stream: UnixStream,
     args: Vec<OsString>,
     //pidfd:
 }
@@ -126,50 +126,24 @@ impl From<Error> for CloudHypervisorPostMortem {
     }
 }
 
-fn rand_path_prefix(prefix: &str) -> PathBuf {
-    use rand::distributions::{Alphanumeric,DistString};
-    let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
-    std::env::temp_dir().join(format!("{}{}", prefix, rng))
-}
-// struct TempDir {
-//     name: OsString
-// }
-//
-// impl TempDir {
-//     fn new<P: AsRef<Path>>(dir: P) -> Option<Self> {
-//         let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
-//         let ret = Self { name: dir.as_ref().join(format!("ch-{rng}")).into() };
-//         std::fs::create_dir(&ret.name).ok()?;
-//         Some(ret)
-//     }
-//
-//     fn join<O: AsRef<Path>>(&self, other: O) -> PathBuf { self.as_ref().join(other) }
-// }
-//
-// impl AsRef<Path> for TempDir {
-//     fn as_ref(&self) -> &Path {
-//         return Path::new(&self.name)
-//     }
-// }
-//
-// impl Drop for TempDir {
-//     fn drop(&mut self) {
-//         let _ = std::fs::remove_dir_all(self);
-//     }
-// }
+//fn rand_path_prefix(prefix: &str) -> PathBuf {
+//    use rand::distributions::{Alphanumeric,DistString};
+//    let rng = Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
+//    std::env::temp_dir().join(format!("{}{}", prefix, rng))
+//}
 
-fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
-    let _ = fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).ok()?;
-    let stream = UnixStream::connect(&path).ok()?;
-    // clear FD_CLOEXEC
-    unsafe {
-        let ret = libc::fcntl(listener.as_raw_fd(), libc::F_SETFD, 0);
-        if ret < 0 { return None; }
-    }
-    let _ = fs::remove_file(&path); // unlink since we've already connected
-    Some((listener, stream))
-}
+//fn setup_socket<P: AsRef<Path>>(path: P) -> Option<(UnixListener, UnixStream)> {
+//    let _ = fs::remove_file(&path);
+//    let listener = UnixListener::bind(&path).ok()?;
+//    let stream = UnixStream::connect(&path).ok()?;
+//    // clear FD_CLOEXEC
+//    unsafe {
+//        let ret = libc::fcntl(listener.as_raw_fd(), libc::F_SETFD, 0);
+//        if ret < 0 { return None; }
+//    }
+//    let _ = fs::remove_file(&path); // unlink since we've already connected
+//    Some((listener, stream))
+//}
 
 impl CloudHypervisor {
 
@@ -182,13 +156,13 @@ impl CloudHypervisor {
         let con_file = NamedTempFile::with_prefix("con-")
             .map_err(|_| Error::TempfileSetup)?;
 
-        // TODO make api setup optional
-        let (listener, stream) = setup_socket(rand_path_prefix("sock-"))
-            .ok_or(Error::Socket)?;
+        // Disabling sapi socket as don't really need it
+        //let (listener, stream) = setup_socket(rand_path_prefix("sock-"))
+        //    .ok_or(Error::Socket)?;
 
         let mut args = vec![];
         let child = {
-            let socket_fd = listener.as_raw_fd();
+            //let socket_fd = listener.as_raw_fd();
             let mut x = Command::new(config.bin);
             x.stdin(Stdio::null())
              .stdout(Stdio::null())
@@ -198,7 +172,8 @@ impl CloudHypervisor {
              .arg("--cpus").arg("boot=1")
              .arg("--memory").arg("size=1024M")
              //.arg("--pvpanic")
-             .arg("--api-socket").arg(format!("fd={socket_fd}"));
+             //.arg("--api-socket").arg(format!("fd={socket_fd}"))
+             ;
 
             // NOTE: using --cmdline console=hvc0 --console off causes the guest
             //       to do bad things (guessing because its like a write to a bad "fd"?)
@@ -244,34 +219,34 @@ impl CloudHypervisor {
             log_file: if config.log_level.is_some() { Some(log_file) } else { None },
             con_file: if config.console { Some(con_file) } else { None },
             child: child,
-            socket_listen: listener,
-            socket_stream: stream,
+            //socket_listen: listener,
+            //socket_stream: stream,
             args: args,
         };
         Ok(ret)
     }
 
-    pub fn api(&mut self, method: &str, command: &str, data: Option<&str>) -> Result<Option<String>, Error> {
-        Ok(api_client::simple_api_full_command_and_response(&mut self.socket_stream, method, command, data)?)
-    }
-
-    fn add_pmem<P: AsRef<Path>>(&mut self, file: P, discard_writes: bool) -> Result<Option<String>, Error> {
-        #[derive(Serialize)]
-        struct AddPmem<'a> {
-            file: &'a Path,
-            discard_writes: bool
-        }
-        let data = serde_json::to_string(&AddPmem { file: file.as_ref(), discard_writes }).unwrap();
-        self.api("PUT", "vm.add-pmem", Some(&data))
-    }
-
-    pub fn add_pmem_ro<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, Error> {
-        self.add_pmem(file, true)
-    }
-
-    pub fn add_pmem_rw<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, Error> {
-        self.add_pmem(file, false)
-    }
+    //pub fn api(&mut self, method: &str, command: &str, data: Option<&str>) -> Result<Option<String>, Error> {
+    //    Ok(api_client::simple_api_full_command_and_response(&mut self.socket_stream, method, command, data)?)
+    //}
+    //
+    //fn add_pmem<P: AsRef<Path>>(&mut self, file: P, discard_writes: bool) -> Result<Option<String>, Error> {
+    //    #[derive(Serialize)]
+    //    struct AddPmem<'a> {
+    //        file: &'a Path,
+    //        discard_writes: bool
+    //    }
+    //    let data = serde_json::to_string(&AddPmem { file: file.as_ref(), discard_writes }).unwrap();
+    //    self.api("PUT", "vm.add-pmem", Some(&data))
+    //}
+    //
+    //pub fn add_pmem_ro<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, Error> {
+    //    self.add_pmem(file, true)
+    //}
+    //
+    //pub fn add_pmem_rw<P: AsRef<Path>>(&mut self, file: P) -> Result<Option<String>, Error> {
+    //    self.add_pmem(file, false)
+    //}
 
     pub fn kill(&mut self) -> io::Result<()> {
         self.child.kill()

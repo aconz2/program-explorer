@@ -5,7 +5,9 @@ http://{$CADDY_HOST:localhost}:{$CADDY_PORT:8080}
 
 encode zstd gzip
 
-reverse_proxy /api/* {$API_SERVER:unix/{$RUNTIME_DIRECTORY}/lb.sock}
+# okay so this really doesn't work
+#reverse_proxy /api/* {$API_SERVER:unix/{$RUNTIME_DIRECTORY}/lb.sock}
+reverse_proxy /api/* unix/{$RUNTIME_DIRECTORY}/lb.sock
 
 # this takes care of the websockets upgrade thing that we had to
 # tell nginx to take care of

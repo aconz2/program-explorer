@@ -24,7 +24,10 @@ LogDriver=passthrough
 
 Volume=pe-worker-images.volume:/peimages
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
+PodmanArgs=--device=/dev/kvm
 Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages
+
+Tmpfs=/tmp
 
 [Install]
 WantedBy=default.target

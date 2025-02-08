@@ -1,6 +1,6 @@
 FROM scratch
 
-ADD --checksum=sha256:a250a9347d0ea9e93f88b54b25df3cdc6a9ba3c57f292aaf74bb664fb5c87496 https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v43.0/cloud-hypervisor-static /bin/cloud-hypervisor
+ADD --chmod=755 --checksum=sha256:a250a9347d0ea9e93f88b54b25df3cdc6a9ba3c57f292aaf74bb664fb5c87496 https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v43.0/cloud-hypervisor-static /bin/cloud-hypervisor
 
 # TODO build this or something
 COPY target/release/vmlinux /bin/vmlinux
