@@ -24,7 +24,7 @@ use prometheus::{register_int_counter,IntCounter};
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
-use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size};
+use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size,ChLogLevel};
 use peimage::PEImageMultiIndex;
 
 use peserver::api;
@@ -82,6 +82,8 @@ struct HttpRunnerApp {
     pub cloud_hypervisor: OsString,
     pub initramfs: OsString,
     pub kernel: OsString,
+    pub ch_console: bool,
+    pub ch_log_level: Option<ChLogLevel>,
 }
 
 //fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -162,13 +164,12 @@ impl HttpRunnerApp {
             .map_err(|_| Error::OciSpec)?;
 
         // TODO plumb in an arg
-        use perunner::cloudhypervisor::ChLogLevel;
         let ch_config = CloudHypervisorConfig {
             bin           : self.cloud_hypervisor.clone(),
             kernel        : self.kernel.clone(),
             initramfs     : self.initramfs.clone(),
-            log_level     : Some(ChLogLevel::Info),
-            console       : true,
+            log_level     : self.ch_log_level.clone(),
+            console       : self.ch_console,
             keep_args     : true,
             event_monitor : false,
         };
@@ -311,6 +312,12 @@ struct Args {
     #[arg(long)]
     prom: Option<String>,
 
+    #[arg(long, default_value="false")]
+    ch_console: bool,
+
+    #[arg(long)]
+    ch_log_level: Option<String>,
+
     #[arg(long)]
     index: Vec<OsString>,
 
@@ -377,6 +384,9 @@ fn main() {
         kernel           : cwd.join(args.kernel).into(),
         initramfs        : cwd.join(args.initramfs).into(),
         cloud_hypervisor : cwd.join(args.ch).into(),
+
+        ch_console:   args.ch_console,
+        ch_log_level: args.ch_log_level.map(|x| x.as_str().try_into().unwrap()),
     };
 
     assert_file_exists(&app.kernel);
