@@ -348,6 +348,10 @@ fn main() {
     my_server.bootstrap();
     info!("config {:#?}", my_server.configuration);
 
+    // TODO so we leave the server process running with cpuset given by systemd/taskset
+    // so the server is not actually isolated
+    // so really I think we want to pass which cpus we should use or maybe parse from isolcpus in
+    // the kernel cmdline?
     let worker_cpuset = if args.cpu_all {
         worker::cpuset_all_ht().unwrap()
     } else {
