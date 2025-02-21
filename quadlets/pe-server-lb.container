@@ -11,14 +11,14 @@ CPUAffinity=1
 
 [Container]
 Image=localhost/pe-server-lb:latest
-Pod=pe.pod
+#Pod=pe.pod
 Network=none
 
 # okay so using journald doesn't actually pass through JOURNAL_STREAM, so do it manually
 Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
 LogDriver=passthrough
 
-Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 Exec=--uds=${RUNTIME_DIRECTORY}/lb.sock --worker=uds:${RUNTIME_DIRECTORY}/worker.sock
 
 [Install]

@@ -8,9 +8,9 @@ RuntimeDirectoryPreserve=yes
 
 [Container]
 Image=localhost/pe-caddy-dev:latest
-Pod=pe.pod
+#Pod=pe.pod
 Network=host
-Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 Environment=RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}
 
 [Install]

@@ -15,7 +15,7 @@ CPUAffinity=2-1000
 
 [Container]
 Image=localhost/pe-server-worker:latest
-Pod=pe.pod
+#Pod=pe.pod
 Network=none
 
 # okay so using journald doesn't actually pass through JOURNAL_STREAM, so do it manually
@@ -23,7 +23,7 @@ Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
 LogDriver=passthrough
 
 Volume=pe-worker-images.volume:/peimages
-Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 PodmanArgs=--device=/dev/kvm
 Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages
 

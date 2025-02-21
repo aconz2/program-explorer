@@ -17,7 +17,7 @@ https://{$CADDY_HOST:localhost} {
     }
 
     encode zstd gzip
-    reverse_proxy /api/* {$API_SERVER:unix/$RUNTIME_DIRECTORY/lb.sock}
+    reverse_proxy /api/* unix/{$RUNTIME_DIRECTORY}/lb.sock
     root * {$CADDY_FILE_ROOT:/www}
     file_server
 }

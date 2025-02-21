@@ -534,3 +534,4 @@ TODO update testclient to take unix socket
 → podman volume vmount systemd-pe-worker-images
 → cp peimage/busybox.erofs ~/.local/share/containers/storage/volumes/systemd-pe-worker-images/_data/
 
+journalctl --user -feu pe-server-lb.service
