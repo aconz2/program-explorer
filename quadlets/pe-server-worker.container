@@ -18,7 +18,7 @@ LogDriver=passthrough
 Volume=pe-worker-images.volume:/peimages
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 PodmanArgs=--device=/dev/kvm
-Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages --cpu-server=0-3 --cpu-worker=4-7
+Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages --server-cpuset=0-3 --worker-cpuset=4-
 
 Tmpfs=/tmp
 
