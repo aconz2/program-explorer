@@ -3,6 +3,7 @@ use std::io::{Read,Write};
 use std::ffi::OsString;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use pingora_timeout::timeout;
 use pingora::services::listening::Service;
@@ -299,8 +300,8 @@ struct Args {
     #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
-    #[arg(long, default_value = "false")]
-    cpu_all: bool,
+    #[arg(long)]
+    cpu: Option<String>,
 
     #[arg(long)]
     tcp: Option<String>,
@@ -324,6 +325,15 @@ struct Args {
     #[arg(long)]
     index_dir: Vec<OsString>,
 }
+
+fn parse_cpu_arg(x: &str) -> Option<(usize, usize, usize)> {
+    let mut parts = x.split(":");
+    let a = parts.next()?.parse::<usize>().ok()?;
+    let b = parts.next()?.parse::<usize>().ok()?;
+    let c = parts.next()?.parse::<usize>().ok()?;
+    Some((a, b, c))
+}
+
 
 fn main() {
     setup_logs();
@@ -352,10 +362,13 @@ fn main() {
     // so the server is not actually isolated
     // so really I think we want to pass which cpus we should use or maybe parse from isolcpus in
     // the kernel cmdline?
-    let worker_cpuset = if args.cpu_all {
-        worker::cpuset_all_ht().unwrap()
-    } else {
-        worker::cpuset(2, 2, 2).unwrap()
+    let worker_cpuset = {
+        if let Some(cpuspec) = args.cpu {
+            let (offset, workers, cores_per) = parse_cpu_arg(&cpuspec).unwrap();
+            worker::cpuset(offset, workers, cores_per).unwrap()
+        } else {
+            worker::cpuset(0, 2, 2).unwrap()
+        }
     };
 
     let pool = worker::asynk::Pool::new(&worker_cpuset);
@@ -419,7 +432,6 @@ fn main() {
     my_server.run_forever();
 }
 
-use std::path::Path;
 fn assert_file_exists<P: AsRef<Path>>(p: P) {
     assert!(p.as_ref().is_file(), "{:?} is not a file", p.as_ref());
 }

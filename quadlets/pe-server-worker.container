@@ -11,7 +11,8 @@ RuntimeDirectoryPreserve=yes
 # [Container]
 # PodmanArgs=--cpuset-cpus=2-1000
 # doesn't
-CPUAffinity=2-1000
+# CPUAffinity=2-1000
+# AllowedCPUs=4-7
 
 [Container]
 Image=localhost/pe-server-worker:latest
@@ -25,7 +26,7 @@ LogDriver=passthrough
 Volume=pe-worker-images.volume:/peimages
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 PodmanArgs=--device=/dev/kvm
-Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages
+Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages --cpu=4:4:1
 
 Tmpfs=/tmp
 
