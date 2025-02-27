@@ -1276,6 +1276,7 @@ dependencies = [
  "flate2",
  "http",
  "log",
+ "nix 0.29.0",
  "oci-spec",
  "once_cell",
  "pearchive",

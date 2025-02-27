@@ -7,11 +7,10 @@ RuntimeDirectory=program-explorer
 # idk if this is really the right place/way to do this
 RuntimeDirectoryPreserve=yes
 StandardError=journal
-CPUAffinity=1
+AllowedCPUs=0-3
 
 [Container]
 Image=localhost/pe-server-lb:latest
-#Pod=pe.pod
 Network=none
 
 # okay so using journald doesn't actually pass through JOURNAL_STREAM, so do it manually

@@ -5,13 +5,12 @@ Description=caddy
 Restart=always
 RuntimeDirectory=program-explorer
 RuntimeDirectoryPreserve=yes
-CPUAffinity=0
+AllowedCPUs=0-3
 
 [Container]
 Image=localhost/pe-caddy:latest
-Pod=pe.pod
 Network=host
-Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:Z
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 Volume=caddy-files.volume:/www
 Volume=caddy-data.volume:/data
 Environment=RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}

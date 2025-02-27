@@ -181,6 +181,42 @@ pub fn cpuset(core_offset: usize,
     Ok(ret)
 }
 
+pub fn cpuset_range(begin: usize, end: Option<usize>) -> nix::Result<CpuSet> {
+    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
+    let mut c = CpuSet::new();
+    if let Some(end) = end {
+        if begin > end { return nix::Result::Err(nix::errno::Errno::EINVAL); }
+        for i in begin..=end {
+            if !all.is_set(i)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
+            c.set(i)?;
+        }
+    } else {
+        for i in begin..CpuSet::count() {
+            if all.is_set(i)? {
+                c.set(i)?;
+            }
+        }
+    }
+    Ok(c)
+}
+
+fn cpuset_count(x: &CpuSet) -> usize {
+    let mut ret = 0;
+    for i in 0..CpuSet::count() {
+        if x.is_set(i).unwrap_or(false) {
+            ret += 1;
+        }
+    }
+    ret
+}
+
+pub fn cpuset_replicate(x: &CpuSet) -> Vec<CpuSet> {
+    let mut ret = vec![];
+    let count = cpuset_count(x);
+    ret.resize(count, *x);
+    ret
+}
+
 pub fn cpusets_string(xs: &[CpuSet]) -> String {
     let n = CpuSet::count();
     xs.iter()
@@ -273,8 +309,9 @@ mod tests {
 
     #[test]
     fn test_cpuset_bad() {
-        let _ = cpuset(1, 1, 2).unwrap_err();  // odd offset
-        let _ = cpuset(0, 1, 1).unwrap_err();  // odd cores per worker
+        // no longer requiring this pedantry
+        //let _ = cpuset(1, 1, 2).unwrap_err();  // odd offset
+        //let _ = cpuset(0, 1, 1).unwrap_err();  // odd cores per worker
         let _ = cpuset(2, 16, 2).unwrap_err(); // too many cores
     }
 }

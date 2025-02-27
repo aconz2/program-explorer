@@ -22,6 +22,7 @@ use log::{info,error,log_enabled};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter,IntCounter};
+use nix;
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -301,7 +302,15 @@ struct Args {
     initramfs: OsString,
 
     #[arg(long)]
-    cpu: Option<String>,
+    server_cpuset: Option<String>,
+
+    // can either be
+    // 1) offset:num_workers:cores_per_worker
+    //   apply an exclusive mask
+    // 2) begin-end
+    //   apply the same mask to end-begin+1 workers
+    #[arg(long)]
+    worker_cpuset: Option<String>,
 
     #[arg(long)]
     tcp: Option<String>,
@@ -326,7 +335,7 @@ struct Args {
     index_dir: Vec<OsString>,
 }
 
-fn parse_cpu_arg(x: &str) -> Option<(usize, usize, usize)> {
+fn parse_cpuset_colon(x: &str) -> Option<(usize, usize, usize)> {
     let mut parts = x.split(":");
     let a = parts.next()?.parse::<usize>().ok()?;
     let b = parts.next()?.parse::<usize>().ok()?;
@@ -334,6 +343,12 @@ fn parse_cpu_arg(x: &str) -> Option<(usize, usize, usize)> {
     Some((a, b, c))
 }
 
+fn parse_cpuset_range(x: &str) -> Option<(usize, Option<usize>)> {
+    let mut parts = x.split("-");
+    let a = parts.next()?.parse::<usize>().ok()?;
+    let b = parts.next().map(|x| x.parse::<usize>()).transpose().ok()?;
+    Some((a, b))
+}
 
 fn main() {
     setup_logs();
@@ -362,17 +377,33 @@ fn main() {
     // so the server is not actually isolated
     // so really I think we want to pass which cpus we should use or maybe parse from isolcpus in
     // the kernel cmdline?
-    let worker_cpuset = {
-        if let Some(cpuspec) = args.cpu {
-            let (offset, workers, cores_per) = parse_cpu_arg(&cpuspec).unwrap();
-            worker::cpuset(offset, workers, cores_per).unwrap()
+    let server_cpuset = {
+        if let Some(cpuspec) = args.server_cpuset {
+            let (begin, end) = parse_cpuset_range(&cpuspec).unwrap();
+            worker::cpuset_range(begin, end).unwrap()
         } else {
-            worker::cpuset(0, 2, 2).unwrap()
+            worker::cpuset_range(0, Some(3)).unwrap()
+        }
+    };
+    let worker_cpuset = {
+        if let Some(cpuspec) = args.worker_cpuset {
+            if cpuspec.contains(":") {
+                let (offset, workers, cores_per) = parse_cpuset_colon(&cpuspec).unwrap();
+                worker::cpuset(offset, workers, cores_per).unwrap()
+            } else {
+                let (begin, end) = parse_cpuset_range(&cpuspec).unwrap();
+                worker::cpuset_replicate(&worker::cpuset_range(begin, end).unwrap())
+            }
+        } else {
+            worker::cpuset_replicate(&worker::cpuset_range(4, None).unwrap())
         }
     };
 
     let pool = worker::asynk::Pool::new(&worker_cpuset);
     info!("using {} workers", pool.len());
+
+    nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &server_cpuset).unwrap();
+
     let index = {
         let mut index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
         for dir in args.index_dir {
