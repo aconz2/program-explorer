@@ -346,7 +346,12 @@ fn parse_cpuset_colon(x: &str) -> Option<(usize, usize, usize)> {
 fn parse_cpuset_range(x: &str) -> Option<(usize, Option<usize>)> {
     let mut parts = x.split("-");
     let a = parts.next()?.parse::<usize>().ok()?;
-    let b = parts.next().map(|x| x.parse::<usize>()).transpose().ok()?;
+    // isn't this right?
+    //let b = parts.next().map(|x| x.parse::<usize>()).transpose().ok()?;
+    let b = match parts.next() {
+        Some("") | None => None,
+        Some(x) => Some(x.parse::<usize>().ok()?),
+    };
     Some((a, b))
 }
 
@@ -465,4 +470,14 @@ fn main() {
 
 fn assert_file_exists<P: AsRef<Path>>(p: P) {
     assert!(p.as_ref().is_file(), "{:?} is not a file", p.as_ref());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parse_cpuset_range_good() {
+        assert_eq!(Some((4, Some(8))), parse_cpuset_range("4-8"));
+        assert_eq!(Some((4, None)), parse_cpuset_range("4-"));
+    }
 }
