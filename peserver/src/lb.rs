@@ -175,7 +175,7 @@ impl Workers {
 
         self.update_data(worker_id, resp);
 
-        info!("updated images for backend {}, {} images", peer, n_images);
+        debug!("updated images for backend {}, {} images", peer, n_images);
         Ok(())
     }
 
@@ -206,6 +206,7 @@ impl Workers {
 impl BackgroundService for Workers {
     async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
         let mut interval = tokio::time::interval(self.image_check_frequency);
+            // TODO do this better
             for (id, worker) in self.workers.iter().enumerate() {
                 for _ in 0..20 {
                     match self.get_max_conn(&worker.peer).await {
@@ -216,7 +217,7 @@ impl BackgroundService for Workers {
                         }
                         Err(_) => {
                             warn!("error getting maxconn for worker={}", id);
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                     }
                 }
