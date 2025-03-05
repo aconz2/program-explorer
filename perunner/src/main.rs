@@ -149,7 +149,7 @@ struct Args {
     #[arg(long, default_value = "../vmlinux")]
     kernel: OsString,
 
-    #[arg(long, default_value = "../initramfs")]
+    #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
     #[arg(long, default_value = "../ocismall.sqfs")]

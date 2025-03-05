@@ -3,16 +3,28 @@
 set -e
 
 profile=${1:-debug}
-crun=${CRUN:-vendor/crun-1.15-linux-amd64}
+crun=${CRUN}
+crun_url=https://github.com/containers/crun/releases/download/1.20/crun-1.20-linux-amd64
 
-echo "using profile=$profile crun=$crun" 1>2
+if [[ -z $crun || ! -f $crun ]]; then
+    crun=target/$(basename $crun_url)
+fi
 
-# TODO figure out a better way to refer to this tool (or vendor or rewrite it)
-# sed with ! separator to avoid problem of var subs with / in it... bad bad bad
-../linux/usr/gen_init_cpio <(
+if [ ! -f $crun ]; then
+    (cd target && wget $crun_url)
+fi
+
+echo "using profile=$profile crun=$crun" 1>&2
+
+if [ ! -f vendor/gen_init_cpio ]; then
+    gcc -O1 vendor/gen_init_cpio.c -o vendor/gen_init_cpio
+fi
+
+./vendor/gen_init_cpio <(
   sed \
     -e "s/\$PROFILE/$profile/" \
     -e "s!\$CRUN!$crun!" \
     -e "s/.*#! REMOVE_IN_RELEASE//" \
-    initramfs.file)
+    initramfs.file) \
+    > target/$profile/initramfs
 
