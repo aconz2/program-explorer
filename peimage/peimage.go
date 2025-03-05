@@ -393,7 +393,6 @@ func readPeIndexJson(infile string) (*PEImageIndex, error) {
     return peImageIndex, nil
 }
 
-// TODO this doesn't do the uid/gid mapping!
 func mainImageSqfs(outfile string, args []string) (error) {
     cmd := exec.Command("sqfstar", "-comp", "zstd", "-force", outfile)
     stdin, err := cmd.StdinPipe()
@@ -455,9 +454,15 @@ func mainImageErofs(outfile string, args []string) (error) {
 
 func mainImage(args []string) (error) {
     if len(args) < 3 {
-        return fmt.Errorf("expected <image.sqfs|image.erofs> <oci-dir> <names...>")
+        return fmt.Errorf("expected [--force] <image.sqfs|image.erofs> <oci-dir> <names...>")
+    }
+    force := false
+    if args[0] == "--force" {
+        force = true
+        args = args[1:]
     }
     image := args[0]
+    argsOciRefs := args[1:]
     isSqfs := strings.HasSuffix(image, ".sqfs")
     isErofs := strings.HasSuffix(image, ".erofs")
     if !isSqfs && !isErofs {
@@ -468,10 +473,40 @@ func mainImage(args []string) (error) {
         format = "erofs"
     }
 
+    err := mainPull(argsOciRefs)
+    if err != nil {
+        return fmt.Errorf("error pulling %w", err)
+    }
+
+    if !force {
+        existingIndex, err := readPeIndexJson(image)
+        if err == nil {
+            seen := make(map[string]bool)
+            fmt.Printf("existing image contents %s\n", image)
+            for _, image := range existingIndex.Images {
+                stringId := fmt.Sprintf("%s/%s:%s", image.Id.Registry, image.Id.Repository, image.Id.Tag)
+                seen[stringId] = true
+                fmt.Println(stringId)
+            }
+            for _, ref := range argsOciRefs[1:] {
+                parsed, err := name.ParseReference(ref)
+                if err != nil {
+                    return fmt.Errorf("parsing ref %w", err)
+                }
+                _, ok := seen[parsed.Name()]
+                if !ok {
+                    fmt.Printf("missing %s, rebuilding\n", parsed.Name())
+                    break;
+                }
+            }
+            fmt.Println("all images already present")
+            return nil
+        }
+    }
+
     switch format {
     case "sqfs":
         return mainImageSqfs(image, args[1:])
-
     case "erofs":
         return mainImageErofs(image, args[1:])
     default:
@@ -651,7 +686,7 @@ func main() {
         fmt.Fprintf(os.Stderr, "  export <oci-dir> <names...>; writes to stdout\n");
         fmt.Fprintf(os.Stderr, "  list <oci-dir>\n");
         fmt.Fprintf(os.Stderr, "  parse <names...>\n");
-        fmt.Fprintf(os.Stderr, "  image <image.sqfs|image.erofs> <oci-dir> <names...>\n");
+        fmt.Fprintf(os.Stderr, "  image [--force] <image.sqfs|image.erofs> <oci-dir> <names...>\n");
         fmt.Fprintf(os.Stderr, "  dump <image.sqfs|image.erofs>\n");
         os.Exit(1)
     }
