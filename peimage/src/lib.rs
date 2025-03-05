@@ -121,10 +121,19 @@ impl PEImageMultiIndex {
     }
 
     pub fn add_dir<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+        fn is_erofs_or_sqfs(p: &Path) -> bool {
+            match p.extension() {
+                // boo we can't match a static str against OsStr...
+                //Some("erofs") | Some("sqfs") => true,
+                Some(s) => s == "erofs" || s == "sqfs",
+                _ => false
+            }
+        }
+
         for entry in path.as_ref().read_dir()? {
             if let Ok(entry) = entry {
                 let p = entry.path();
-                if p.is_file() {
+                if p.is_file() && is_erofs_or_sqfs(&p) {
                     self.add_path(p)?;
                 }
             }
@@ -176,5 +185,11 @@ impl PEImageMultiIndex {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+impl Default for PEImageMultiIndex {
+    fn default() -> PEImageMultiIndex {
+        PEImageMultiIndex::new(PEImageMultiIndexKeyType::Digest)
     }
 }

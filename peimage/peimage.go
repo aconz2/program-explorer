@@ -196,7 +196,6 @@ func makePEImageIndex(selected map[string]OCIIndexEntry, rootfsPrefix map[v1.Has
     }
 
     slices.SortFunc(images, func(a, b PEImageIndexEntry) int {
-        // TODO computes string every time
         return strings.Compare(a.Id.Digest.String(), b.Id.Digest.String())
     })
 

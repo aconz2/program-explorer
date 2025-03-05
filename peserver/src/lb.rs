@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::{Method,StatusCode,header};
 use arc_swap::ArcSwap;
-use log::{error,info,warn};
+use log::{error,info,warn,debug};
 use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};

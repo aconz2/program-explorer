@@ -3,7 +3,7 @@ use std::io::{Read,Write};
 use std::ffi::OsString;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path,PathBuf};
 
 use pingora_timeout::timeout;
 use pingora::services::listening::Service;
@@ -18,11 +18,12 @@ use http::{Method,Response,StatusCode,header};
 use tempfile::NamedTempFile;
 use serde_json;
 use serde::{Serialize};
-use log::{info,error,log_enabled};
+use log::{info,error,log_enabled,debug};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter,IntCounter};
 use nix;
+use arc_swap::ArcSwap;
 
 use peinit;
 use perunner::{worker,create_runtime_spec};
@@ -80,12 +81,14 @@ struct ErrorBody {
 struct HttpRunnerApp {
     pub pool: worker::asynk::Pool,
     pub max_conn: usize,
-    pub index: PEImageMultiIndex,
+    pub index: ArcSwap<PEImageMultiIndex>,
     pub cloud_hypervisor: OsString,
     pub initramfs: OsString,
     pub kernel: OsString,
     pub ch_console: bool,
     pub ch_log_level: Option<ChLogLevel>,
+    pub index_files: Vec<PathBuf>,
+    pub index_dirs: Vec<PathBuf>,
 }
 
 //fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -135,7 +138,8 @@ impl HttpRunnerApp {
         let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path())
             .ok_or(Error::BadImagePath)?;
 
-        let image_entry = self.index.get(&uri_path_image)
+        let index = self.index.load();
+        let image_entry = index.get(&uri_path_image)
             .ok_or(Error::NoSuchImage)?;
 
         let content_type = session.req_header()
@@ -165,7 +169,6 @@ impl HttpRunnerApp {
         let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
             .map_err(|_| Error::OciSpec)?;
 
-        // TODO plumb in an arg
         let ch_config = CloudHypervisorConfig {
             bin           : self.cloud_hypervisor.clone(),
             kernel        : self.kernel.clone(),
@@ -262,12 +265,32 @@ impl HttpRunnerApp {
 
     async fn apiv1_images(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         REQ_IMAGES_COUNT.inc();
-        response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&self.index))
+        if let Err(e) = self.reload_index() {
+            error!("error loading index {}", e);
+            return Ok(response_no_body(StatusCode::INTERNAL_SERVER_ERROR));
+        }
+        let index = self.index.load();
+        response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&**index))
             .map_err(|_| Error::Serialize)
     }
 
     async fn api_internal_max_conn(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         Ok(response_string(StatusCode::OK, &format!("{}", self.max_conn)))
+    }
+
+    fn reload_index(&self) -> std::io::Result<()> {
+        let index = {
+            let mut index = PEImageMultiIndex::from_paths_by_digest_with_colon(&self.index_files)?;
+            for dir in &self.index_dirs {
+                index.add_dir(dir)?;
+            }
+            for (k, v) in index.map() {
+                debug!("loaded image {} from {:?}: {}", k, v.path, v.image.id.name());
+            }
+            index
+        };
+        self.index.store(index.into());
+        Ok(())
     }
 }
 
@@ -329,10 +352,10 @@ struct Args {
     ch_log_level: Option<String>,
 
     #[arg(long)]
-    index: Vec<OsString>,
+    index: Vec<PathBuf>,
 
     #[arg(long)]
-    index_dir: Vec<OsString>,
+    index_dir: Vec<PathBuf>,
 }
 
 fn parse_cpuset_colon(x: &str) -> Option<(usize, usize, usize)> {
@@ -361,7 +384,7 @@ fn main() {
     let args = Args::parse();
 
     if args.tcp.is_none() && args.uds.is_none() {
-        error!("--tcp or --uds must be provided");
+        eprintln!("--tcp or --uds must be provided");
         std::process::exit(1);
     }
 
@@ -378,10 +401,6 @@ fn main() {
     my_server.bootstrap();
     info!("config {:#?}", my_server.configuration);
 
-    // TODO so we leave the server process running with cpuset given by systemd/taskset
-    // so the server is not actually isolated
-    // so really I think we want to pass which cpus we should use or maybe parse from isolcpus in
-    // the kernel cmdline?
     let server_cpuset = {
         if let Some(cpuspec) = args.server_cpuset {
             let (begin, end) = parse_cpuset_range(&cpuspec).unwrap();
@@ -409,30 +428,17 @@ fn main() {
 
     nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &server_cpuset).unwrap();
 
-    let index = {
-        let mut index = PEImageMultiIndex::from_paths_by_digest_with_colon(&args.index).unwrap();
-        for dir in args.index_dir {
-            index.add_dir(dir).unwrap();
-        }
-        if index.is_empty() {
-            error!("index is empty, no images to run");
-            std::process::exit(1);
-        }
-        for (k, v) in index.map() {
-            info!("loaded image {} from {:?}: {}", k, v.path, v.image.id.name());
-        }
-        index
-    };
     let max_conn = pool.len() * 2;  // TODO is this a good amount?
     let app = HttpRunnerApp {
         pool             : pool,
         max_conn         : max_conn,
-        index            : index,
+        index            : ArcSwap::from_pointee(PEImageMultiIndex::default()),
         // NOTE: these files are opened/passed as paths into cloud hypervisor so changes will
         // get picked up, which may not be what we want. currently ch doesn't support passing
         // as fd= otherwise we could open them here and be sure things didn't change. but it is a
         // bit of a toss up whether it is nicer to just have a new file get picked up on the next
         // run
+        // and really for these things, I am bundling them in a container so won't get switched
         // we join with cwd but if you provide an abspath it will be abs
         kernel           : cwd.join(args.kernel).into(),
         initramfs        : cwd.join(args.initramfs).into(),
@@ -440,6 +446,9 @@ fn main() {
 
         ch_console:   args.ch_console,
         ch_log_level: args.ch_log_level.map(|x| x.as_str().try_into().unwrap()),
+
+        index_files: args.index,
+        index_dirs : args.index_dir,
     };
 
     assert_file_exists(&app.kernel);
