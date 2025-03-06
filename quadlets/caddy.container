@@ -12,6 +12,7 @@ Image=localhost/pe-caddy:latest
 Network=host
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 Volume=caddy-files.volume:/www
+# NOTE: the docker.io/library/caddy dockerfil sents Env XDG_DATA_HOME to /data
 Volume=caddy-data.volume:/data
 Environment=RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}
 

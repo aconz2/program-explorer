@@ -537,3 +537,6 @@ TODO update testclient to take unix socket
 journalctl --user -feu pe-server-lb.service
 
 TODO okay so if I use hyperthreads, then waiting for wall clock 1 second is not the same as 1 second of execution if you have a busy neighbor. Should I get a better way to wait for 1 second rusage? Or ditch hyperthreads for the VM? still could be all the cloud-hypervisor things and vm sharing the 2 hyperthreads, but not 1 worker per hyperthread. yeah that is probably what I want
+
+tar unlinks an existing file if it exists
+rsync writes to "foo.8ajWj" tmp name then does a rename

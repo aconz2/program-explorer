@@ -15,7 +15,8 @@ Network=none
 Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
 LogDriver=passthrough
 
-Volume=pe-worker-images.volume:/peimages
+# tried using %D for XDG_DATA_HOME but no luck ("failed to resolve specifier")
+Volume=${HOME}/.local/share/pe/images:/peimages:z
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 PodmanArgs=--device=/dev/kvm
 Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock --index-dir=/peimages --server-cpuset=0-3 --worker-cpuset=4:2:2
