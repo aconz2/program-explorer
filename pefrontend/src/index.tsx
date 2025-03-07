@@ -16,7 +16,14 @@ import './style.css';
 const DEFAULT_IMAGE_HASH = "sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
 
 const DEFAULT_INPUT_FILES = [
-    {path:'test.sh', data:'echo "hello world"\nfind /run/pe\ncat /run/pe/input/folder/data.txt\necho "an error" 1>&2'},
+    {path:'test.sh', data:`
+echo "hello world"
+find /run/pe
+cat /run/pe/input/folder/data.txt
+echo "an error" 1>&2
+echo "an output file" > /run/pe/output/output.txt
+`
+    },
     {path:'folder/data.txt', data:'hi this is some data'},
 ];
 
