@@ -16,6 +16,7 @@ Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
 LogDriver=passthrough
 
 # tried using %D for XDG_DATA_HOME but no luck ("failed to resolve specifier")
+# NOTE: in testing, .local/share/pe/images can't be a symbolic link unfortunately; TODO do something better
 Volume=${HOME}/.local/share/pe/images:/peimages:z
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 PodmanArgs=--device=/dev/kvm

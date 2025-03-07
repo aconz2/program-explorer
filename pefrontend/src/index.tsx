@@ -15,6 +15,11 @@ import './style.css';
 // busybox 1.36.0
 const DEFAULT_IMAGE_HASH = "sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
 
+const DEFAULT_INPUT_FILES = [
+    {path:'test.sh', data:'echo "hello world"\nfind /run/pe\ncat /run/pe/input/folder/data.txt\necho "an error" 1>&2'},
+    {path:'folder/data.txt', data:'hi this is some data'},
+];
+
 enum FileKind {
     Editor,
     Blob,
@@ -473,10 +478,7 @@ class App extends Component {
             this.inputEditor.setFiles(this.urlHashState.files);
             this.urlHashState.files = null; // clear mem
         } else {
-            this.inputEditor.setFiles([
-                {path:'test.sh', data:'echo "hello world"\nls -ln /run/pe\necho "an error" 1>&2'},
-                {path:'folder/data.txt', data:'hi this is some data'},
-            ]);
+            this.inputEditor.setFiles(DEFAULT_INPUT_FILES);
         }
         this.s.cmd.value = this.urlHashState.cmd ?? 'sh /run/pe/input/test.sh';
 
