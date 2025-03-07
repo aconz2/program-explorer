@@ -7,7 +7,6 @@ RuntimeDirectory=program-explorer
 # idk if this is really the right place/way to do this
 RuntimeDirectoryPreserve=yes
 StandardError=journal
-AllowedCPUs=0-3
 
 [Container]
 Image=localhost/pe-server-lb:latest

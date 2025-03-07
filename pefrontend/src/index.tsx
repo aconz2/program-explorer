@@ -12,6 +12,9 @@ import {UrlHashState, loadUrlHashState, encodeUrlHashState} from './urlstate';
 
 import './style.css';
 
+// busybox 1.36.0
+const DEFAULT_IMAGE_HASH = "sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
+
 enum FileKind {
     Editor,
     Blob,
@@ -467,19 +470,12 @@ class App extends Component {
     componentDidMount() {
         if (this.urlHashState.files != null) {
             console.log('loading files from url');
-            //for (let f of this.urlHashState.files) {
-            //    console.log(f);
-            //}
             this.inputEditor.setFiles(this.urlHashState.files);
             this.urlHashState.files = null; // clear mem
         } else {
             this.inputEditor.setFiles([
-                {path:'test.sh', data:'echo "hello world"\ncat /run/pe/input/f1/dataf1.txt > /run/pe/output/data.txt\nls -ln /run/pe\ncat /run/pe/input/blob > /run/pe/output/blob\necho "an error" 1>&2'},
-                {path:'blob', data: new Uint8Array([254, 237, 186, 202, 0, 10, 0]).buffer},
-                //{path:'data.txt', data:'hi this is some data'},
-                {path:'f1/dataf1.txt', data:'hi this is some data1'},
-                {path:'f1/f2/dataf1f2.txt', data:'hi this is some data2'},
-                {path:'f2/dataf2.txt', data:'hi this is some datar3'},
+                {path:'test.sh', data:'echo "hello world"\nls -ln /run/pe\necho "an error" 1>&2'},
+                {path:'folder/data.txt', data:'hi this is some data'},
             ]);
         }
         this.s.cmd.value = this.urlHashState.cmd ?? 'sh /run/pe/input/test.sh';
@@ -499,27 +495,9 @@ class App extends Component {
         if (this.urlHashState.stdin != null) {
             this.s.selectedStdin.value = this.urlHashState.stdin;
         }
-
-        //setTimeout(() => {
-        //    let y = pearchive.packArchiveV1(this.inputEditor.getFiles());
-        //    // only firefox has a Blob.bytes() method
-        //
-        //    y.arrayBuffer().then(buf=>{
-        //        let bytes = new Uint8Array(buf);
-        //        console.log('----------------   packed -----------------------');
-        //        console.log(bytes);
-        //        console.log('---------------- unpacked (uint8array) -----------------------');
-        //        console.log(pearchive.unpackArchiveV1(bytes));
-        //        console.log('---------------- unpacked2 (arraybuffer) -----------------------');
-        //        console.log(pearchive.unpackArchiveV1(buf));
-        //        //console.log('---------------- unpacked2 (dataview) -----------------------');
-        //        //console.log(pearchive.unpackArchiveV1(new DataView(buf, 62)));
-        //    });
-        //}, 100);
     }
 
     async run() {
-        //let {images,selectedImage,cmd} = this.state;
         let selectedImage = this.s.selectedImage.value;
         let selectedStdin = this.s.selectedStdin.value;
         let cmd = this.s.cmd.value;
@@ -620,12 +598,14 @@ class App extends Component {
                 this.s.images.value = images;
                 if (this.urlHashState.image && images.has(this.urlHashState.image)) {
                     this.s.selectedImage.value = this.urlHashState.image;
+                } else if (images.has(DEFAULT_IMAGE_HASH)) {
+                    this.s.selectedImage.value = DEFAULT_IMAGE_HASH;
                 } else {
                     this.s.selectedImage.value = images.keys().next()?.value;
                 }
             }
         } else {
-            console.error(response);
+            console.error('error getting images', response);
         }
     }
 

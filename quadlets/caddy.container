@@ -5,7 +5,6 @@ Description=caddy
 Restart=always
 RuntimeDirectory=program-explorer
 RuntimeDirectoryPreserve=yes
-AllowedCPUs=0-3
 
 [Container]
 Image=localhost/pe-caddy:latest

@@ -8,7 +8,6 @@ RuntimeDirectoryPreserve=yes
 
 [Container]
 Image=localhost/pe-caddy-dev:latest
-#Pod=pe.pod
 Network=host
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
 Environment=RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}
