@@ -731,7 +731,7 @@ class App extends Component {
                     <p>Input size limited to 1 MB</p>
                     <p>Runtime limited to 1 second</p>
                     <p>Input files are in <code>/run/pe/input</code></p>
-                    <p>Output files go in <code>/run/pe/output</code></p>
+                    <p>Output files go in <code>/run/pe/output</code> (they will get prefixed with a <code>dir/</code>)</p>
                     <p>Double-click a filename to rename it</p>
                     <p>A default <code class="inline">PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin</code> is implicitly added on the backend if one isn't set by you or the image config as is done by docker/podman/kata</p>
                     <p><code>stdout</code> and <code>stderr</code> are captured</p>
