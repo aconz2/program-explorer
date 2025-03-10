@@ -5,7 +5,6 @@ use std::io::{Seek,SeekFrom,Read};
 use std::collections::HashMap;
 
 use serde::{Serialize,Deserialize};
-use serde_json;
 use oci_spec::image as oci_image;
 use byteorder::{ReadBytesExt,LE};
 use peinit::RootfsKind;
@@ -130,12 +129,10 @@ impl PEImageMultiIndex {
             }
         }
 
-        for entry in path.as_ref().read_dir()? {
-            if let Ok(entry) = entry {
-                let p = entry.path();
-                if p.is_file() && is_erofs_or_sqfs(&p) {
-                    self.add_path(p)?;
-                }
+        for entry in (path.as_ref().read_dir()?).flatten() {
+            let p = entry.path();
+            if p.is_file() && is_erofs_or_sqfs(&p) {
+                self.add_path(p)?;
             }
         }
         Ok(())
@@ -179,7 +176,7 @@ impl PEImageMultiIndex {
         self.map.get(key)
     }
 
-    pub fn map<'a>(&'a self) -> &'a HashMap<String, PEImageMultiIndexEntry> {
+    pub fn map(&self) -> &HashMap<String, PEImageMultiIndexEntry> {
         &self.map
     }
 

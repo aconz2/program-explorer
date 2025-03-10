@@ -3,7 +3,6 @@ use std::io;
 use std::time::Duration;
 use std::process::Child;
 
-use libc;
 use libc::{c_int,idtype_t,id_t,siginfo_t};
 use libc::rusage as rusage_t;
 
@@ -35,6 +34,7 @@ pub enum Error {
     Errno(i32),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum WaitIdData {
     Exited{siginfo: siginfo_t, rusage: rusage_t},
     NotExited,
