@@ -68,3 +68,8 @@ code {
 label.inline-label {
     padding-right: 3px;
 }
+
+#disclaimer-bar {
+    padding: 5px;
+    background: azure;
+}
