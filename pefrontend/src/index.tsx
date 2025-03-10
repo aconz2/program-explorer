@@ -676,8 +676,9 @@ class App extends Component {
         let env = this.s.env.value;
 
         // firefox supports Map().values().map(), but chrome doesn't
-        let imageOptions = Array.from(images.values(), ({info,links}) => {
-            let name = imageName(info);
+        let imageOptionsArr = Array.from(images.values(), ({info}) => [imageName(info), info]);
+        imageOptionsArr.sort(([sa, _1], [sb, _2]) => sa < sb ? -1 : sa > sb ? 1 : 0);
+        let imageOptions = imageOptionsArr.map(([name, info]) => {
             return <option key={info.digest} value={info.digest}>{name}</option>;
         });
 
