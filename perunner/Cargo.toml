@@ -35,3 +35,6 @@ log = "0.4.22"
 
 [features]
 asynk = ["tokio"]
+
+[lints]
+workspace = true

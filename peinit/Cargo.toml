@@ -22,3 +22,6 @@ libc = "0.2.164"
 serde = { version = "1.0.210", features = ["derive"] }
 sha2 = "0.10.8"
 serde_json = "1.0.132"
+
+[lints]
+workspace = true

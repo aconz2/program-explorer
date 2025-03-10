@@ -13,3 +13,6 @@ libc = "0.2.159"
 mio = { version = "1.0.2", features = ["os-ext"] }
 mio-pidfd = "0.4.0"
 # syscalls = { version = "0.6.18", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

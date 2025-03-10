@@ -79,7 +79,7 @@ pub trait PackMemVisitor {
 }
 
 pub trait UnpackVisitor {
-    fn on_file(&mut self, path: &PathBuf, data: &[u8]) -> bool;
+    fn on_file(&mut self, path: &Path, data: &[u8]) -> bool;
 }
 
 struct PackFsToFile {
@@ -170,6 +170,12 @@ impl<W: Write> PackMemVisitor for PackMemToWriter<W> {
 pub type PackMemToFile = PackMemToWriter<File>;
 pub struct PackMemToVec(PackMemToWriter<Cursor<Vec<u8>>>);
 
+impl Default for PackMemToVec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PackMemToVec {
     pub fn new() -> Self { Self(PackMemToWriter::new(Cursor::new(vec![]))) }
     pub fn with_vec(v: Vec<u8>) -> Self {
@@ -179,7 +185,7 @@ impl PackMemToVec {
         Self(PackMemToWriter::new(c))
     }
     pub fn into_vec(self) -> Result<Vec<u8>, Error> {
-        self.0.into_inner().and_then(|x| Ok(x.into_inner()))
+        self.0.into_inner().map(|x| x.into_inner())
     }
 }
 
@@ -246,7 +252,7 @@ fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
 
 fn read_cstr<'a>(input: &mut &'a[u8]) -> Result<&'a CStr, Error> {
     // memchr ...
-    if input.len() == 0 { return Err(Error::BadName); }
+    if input.is_empty() { return Err(Error::BadName); }
     if input.len() == 1 && input[0] == 0 { return Err(Error::BadName); }
 
     for i in 1..std::cmp::min(input.len(), MAX_NAME_LEN + 1) {
@@ -256,7 +262,7 @@ fn read_cstr<'a>(input: &mut &'a[u8]) -> Result<&'a CStr, Error> {
             return Ok(unsafe { CStr::from_bytes_with_nul_unchecked(l) });
         }
     }
-    return Err(Error::BadName);
+    Err(Error::BadName)
 }
 
 fn file_size<Fd: AsRawFd>(fd: &Fd) -> Result<u64, Error> {
@@ -346,7 +352,7 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
 
     let mut cur = data;
     loop {
-        match cur.get(0).map(|x| x.try_into()) {
+        match cur.first().map(|x| x.try_into()) {
             Some(Ok(ArchiveFormat1Tag::File)) => {
                 cur = &cur[1..];
                 let parent = stack.last().unwrap();
@@ -362,7 +368,7 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                 let parent = stack.last().unwrap();
                 let name = read_cstr(&mut cur)?;
                 mkdirat(parent, name).unwrap();
-                match cur.get(0).map(|x| x.try_into()) {
+                match cur.first().map(|x| x.try_into()) {
                     Some(Ok(ArchiveFormat1Tag::Pop)) => {
                         // fast path for empty dir, never open the dir or push it
                         cur = &cur[1..]; // advance past Pop
@@ -396,7 +402,7 @@ pub fn unpack_visitor<V: UnpackVisitor>(data: &[u8], v: &mut V) -> Result<(), Er
     let mut depth = 0;
     let mut cur = data;
     loop {
-        match cur.get(0).map(|x| x.try_into()) {
+        match cur.first().map(|x| x.try_into()) {
             Some(Ok(ArchiveFormat1Tag::File)) => {
                 cur = &cur[1..];
                 let name = read_cstr(&mut cur)?;
@@ -445,8 +451,8 @@ impl UnpackToHashmap {
 }
 
 impl UnpackVisitor for UnpackToHashmap {
-    fn on_file(&mut self, path: &PathBuf, data: &[u8]) -> bool {
-        self.map.insert(path.clone(), data.to_vec());
+    fn on_file(&mut self, path: &Path, data: &[u8]) -> bool {
+        self.map.insert(path.into(), data.to_vec());
         true
     }
 }
@@ -469,7 +475,7 @@ pub fn unpack_file_to_dir_with_unshare_chroot(file: File, dir: &Path) -> Result<
 
 pub fn unpack_data_to_dir_with_unshare_chroot(data: &[u8], dir: &Path) -> Result<(), Error> {
     unshare_user()?;
-    chroot(&dir)?;
+    chroot(dir)?;
 
     let starting_dir = opendirat_cwd(c".")?;
 

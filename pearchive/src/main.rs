@@ -20,6 +20,7 @@ enum Error {
 }
 
 /// args: <input dir> <output file>
+#[allow(clippy::get_first)]
 fn pack(args: &[String]) {
     let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
     let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
@@ -32,6 +33,7 @@ fn pack(args: &[String]) {
 }
 
 /// args: <input file> <output dir>
+#[allow(clippy::get_first)]
 fn unpack(args: &[String]) {
     let inname = args.get(0).ok_or(Error::MissingArg).unwrap();
     let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
@@ -49,6 +51,7 @@ fn unpack(args: &[String]) {
 
 /// args: <input fd> <output dir> <len>
 /// uses stream offset as beginning of map
+#[allow(clippy::get_first)]
 fn unpackfd(args: &[String]) {
     let in_fd = args.get(0).ok_or(Error::MissingArg).unwrap().parse::<libc::c_int>().unwrap();
     let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
@@ -74,6 +77,7 @@ fn unpackfd(args: &[String]) {
 }
 
 /// args: <input dir> <output fd>
+#[allow(clippy::get_first)]
 fn packfd(args: &[String]) {
     let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
     let out_fd = args.get(1).ok_or(Error::MissingArg).unwrap().parse::<libc::c_int>().unwrap();

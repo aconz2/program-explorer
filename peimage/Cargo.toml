@@ -12,3 +12,6 @@ serde_json = "1.0.132"
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true

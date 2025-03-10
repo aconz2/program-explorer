@@ -21,3 +21,6 @@ rustix = { version = "0.38.37", features = ["fs"] }
 
 [dev-dependencies]
 rand = "0.8.5"
+
+[lints]
+workspace = true
