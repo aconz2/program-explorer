@@ -21,8 +21,8 @@ fn escape_dump(input: &[u8]) {
             output.push(e);
         }
     }
-    let _ = std::io::stdout().write_all(output.as_slice()).unwrap();
-    println!("");
+    std::io::stdout().write_all(output.as_slice()).unwrap();
+    println!();
 }
 
 fn zcat(input: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -38,7 +38,7 @@ impl UnpackVisitor for UnpackVisitorPrinter {
     fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
         println!("=== {:?} ({}) ===", name, data.len());
         if !data.is_empty() {
-            escape_dump(&data);
+            escape_dump(data);
         }
         true
     }
@@ -186,5 +186,5 @@ async fn main() {
     println!("api  response {:#?}", response);
 
     let mut unpacker = UnpackVisitorPrinter{};
-    unpack_visitor(&archive, &mut unpacker).unwrap();
+    unpack_visitor(archive, &mut unpacker).unwrap();
 }

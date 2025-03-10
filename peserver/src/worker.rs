@@ -13,19 +13,15 @@ use pingora::apps::http_app::ServeHttp;
 use pingora::protocols::http::ServerSession;
 
 use async_trait::async_trait;
-use http;
 use http::{Method,Response,StatusCode,header};
 use tempfile::NamedTempFile;
-use serde_json;
 use serde::{Serialize};
 use log::{info,error,log_enabled,debug};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter,IntCounter};
-use nix;
 use arc_swap::ArcSwap;
 
-use peinit;
 use perunner::{worker,create_runtime_spec};
 use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size,ChLogLevel};
 use peimage::PEImageMultiIndex;
@@ -58,7 +54,7 @@ const CH_TIMEOUT_EXTRA: Duration = Duration::from_millis(300);
 #[derive(Debug,Serialize,Clone)]
 enum Error {
     ReadTimeout,
-    ReadError,
+    Read,
     BadRequest,
     BadImagePath,
     NoSuchImage,
@@ -67,7 +63,7 @@ enum Error {
     WorkerRecv,
     BadContentType,
     ResponseRead,
-    WorkerError,
+    Worker,
     Internal,
     Serialize,
     OciSpec,
@@ -100,12 +96,12 @@ struct HttpRunnerApp {
 //        .unwrap()
 //}
 
-impl Into<StatusCode> for Error {
-    fn into(self: Error) -> StatusCode {
+impl From<Error> for StatusCode {
+    fn from(val: Error) -> Self {
         use Error::*;
-        match self {
+        match val {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
-            ReadError |
+            Read |
             NoSuchImage |
             BadContentType |
             BadImagePath |
@@ -115,7 +111,7 @@ impl Into<StatusCode> for Error {
             WorkerRecv |
             TempfileCreate |
             ResponseRead |
-            WorkerError |
+            Worker |
             Serialize |
             Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -123,10 +119,10 @@ impl Into<StatusCode> for Error {
 }
 
 // TODO use lazy static for most cmmon responses
-impl Into<Response<Vec<u8>>> for Error {
-    fn into(self: Error) -> Response<Vec<u8>> {
+impl From<Error> for Response<Vec<u8>> {
+    fn from(val: Error) -> Self {
         // response_no_body(self.into())
-        response_json(self.clone().into(), ErrorBody{ error: self }).unwrap()
+        response_json(val.clone().into(), ErrorBody{ error: val }).unwrap()
     }
 }
 
@@ -139,7 +135,7 @@ impl HttpRunnerApp {
             .ok_or(Error::BadImagePath)?;
 
         let index = self.index.load();
-        let image_entry = index.get(&uri_path_image)
+        let image_entry = index.get(uri_path_image)
             .ok_or(Error::NoSuchImage)?;
 
         let content_type = session.req_header()
@@ -161,7 +157,7 @@ impl HttpRunnerApp {
         let body = timeout(read_timeout, read_full_server_request_body(session, api::MAX_BODY_SIZE))
             .await
             .map_err(|_| Error::ReadTimeout)?
-            .map_err(|_| Error::ReadError)?;
+            .map_err(|_| Error::Read)?;
 
         let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
             .ok_or(Error::BadRequest)?;
@@ -211,7 +207,7 @@ impl HttpRunnerApp {
             ch_config  : ch_config,
             ch_timeout : RUN_TIMEOUT + CH_TIMEOUT_EXTRA,
             io_file    : io_file,
-            rootfs     : image_entry.path.clone().into(),
+            rootfs     : image_entry.path.clone(),
         };
 
         let (resp_sender, resp_receiver) = tokio::sync::oneshot::channel();
@@ -236,7 +232,7 @@ impl HttpRunnerApp {
                 if let Some(mut err_file) = postmortem.logs.err_file { dump_file("ch err", &mut err_file); }
                 if let Some(mut log_file) = postmortem.logs.log_file { dump_file("ch log", &mut log_file); }
                 if let Some(mut con_file) = postmortem.logs.con_file { dump_file("ch con", &mut con_file); }
-                Error::WorkerError
+                Error::Worker
             })?;
 
         if log_enabled!(log::Level::Debug) {

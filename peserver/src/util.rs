@@ -49,17 +49,10 @@ pub fn setup_logs() {
 
 pub async fn read_full_server_request_body(session: &mut ServerSession, max_len: usize) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
-    loop {
-        match session.read_request_body().await? {
-            Some(bytes) => {
-                acc.extend_from_slice(&bytes);
-                if acc.len() > max_len {
-                    return Err(pingora::Error::new(pingora::ErrorType::ReadError).into());
-                }
-            }
-            None => {
-                break;
-            }
+    while let Some(bytes) = session.read_request_body().await? {
+        acc.extend_from_slice(&bytes);
+        if acc.len() > max_len {
+            return Err(pingora::Error::new(pingora::ErrorType::ReadError));
         }
     }
     Ok(acc.freeze())
@@ -67,15 +60,8 @@ pub async fn read_full_server_request_body(session: &mut ServerSession, max_len:
 
 pub async fn read_full_client_response_body(session: &mut pingora::protocols::http::v1::client::HttpSession) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
-    loop {
-        match session.read_body_ref().await? {
-            Some(ref bytes) => {
-                acc.extend_from_slice(&bytes);
-            }
-            None => {
-                break;
-            }
-        }
+    while let Some(bytes) = session.read_body_ref().await? {
+        acc.extend_from_slice(bytes);
     }
     Ok(acc.freeze())
 }
@@ -139,7 +125,7 @@ pub fn response_pearchivev1(status: StatusCode, body: Vec<u8>) -> Response<Vec<u
 }
 
 pub fn etag(data: &[u8]) -> String {
-    let hash = Sha256::digest(&data);
+    let hash = Sha256::digest(data);
     let mut ret = String::with_capacity(16);
     ret.push('W');
     ret.push('/');

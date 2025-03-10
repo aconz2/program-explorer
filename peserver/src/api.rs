@@ -32,9 +32,9 @@ impl TryFrom<&str> for ContentType {
     }
 }
 
-impl Into<&str> for ContentType {
-    fn into(self) -> &'static str {
-        match self {
+impl From<ContentType> for &str {
+    fn from(val: ContentType) -> Self {
+        match val {
             ContentType::ApplicationJson => APPLICATION_JSON,
             ContentType::PeArchiveV1 => APPLICATION_X_PE_ARCHIVEV1,
         }
@@ -73,7 +73,7 @@ pub mod v1 {
         pub fn parse_request(body: &[u8], content_type: &ContentType) -> Option<(usize, Request)> {
             match content_type {
                 ContentType::ApplicationJson => {
-                    let req = serde_json::from_slice(&body).ok()?;
+                    let req = serde_json::from_slice(body).ok()?;
                     Some((0, req))
                 }
                 ContentType::PeArchiveV1 => {

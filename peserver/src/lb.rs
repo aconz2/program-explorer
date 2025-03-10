@@ -22,7 +22,6 @@ use bytes::Bytes;
 use http::{Method,StatusCode,header};
 use arc_swap::ArcSwap;
 use log::{error,info,warn,debug};
-use serde_json;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 use prometheus::{register_int_counter,IntCounter};
@@ -134,7 +133,7 @@ impl Workers {
         if workers.is_empty() { return None; }
         if workers.len() > WorkerId::MAX.into() { return None; }
 
-        let workers: Vec<_> = workers.into_iter().map(|x| Arc::new(x)).collect();
+        let workers: Vec<_> = workers.into_iter().map(Arc::new).collect();
 
         Some(Self {
             workers,
@@ -264,7 +263,7 @@ impl LBCtx {
     fn peer(&self) -> Option<HttpPeer> { self.inner.as_ref().map(|inner| inner.worker.peer.clone()) }
     fn replace(&mut self, inner: LBCtxInner) {
         assert!(self.inner.is_none());
-        self.inner.replace(inner.into());
+        self.inner.replace(inner);
     }
 }
 
@@ -283,7 +282,7 @@ impl LB {
             Some(etag) if etag.as_bytes() == data.premade_json_etag.as_bytes() => {
                 REQ_IMAGES_CACHE_HIT.inc();
                 return session.downstream_session
-                    .write_response_header_ref(&*premade_responses::NOT_MODIFIED)
+                    .write_response_header_ref(&premade_responses::NOT_MODIFIED)
                     .await
                     .map(|_| ())
                 }
@@ -306,9 +305,9 @@ impl LB {
         match header_value_content_length(req_parts.headers.get(header::CONTENT_LENGTH)) {
             Some(l) if l > api::MAX_BODY_SIZE => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_responses::PAYLOAD_TOO_LARGE)
+                    .write_response_header_ref(&premade_responses::PAYLOAD_TOO_LARGE)
                     .await?;
-                return Err(pingora::Error::new(pingora::ErrorType::ReadError).into())
+                return Err(pingora::Error::new(pingora::ErrorType::ReadError))
             }
             _ => {}
         }
@@ -318,14 +317,14 @@ impl LB {
         let image_map = &self.workers.data.load().image_map;
 
         let worker = uri_path_image
-            .and_then(|image_id| image_map.get(image_id).map(|x| *x))
+            .and_then(|image_id| image_map.get(image_id).copied())
             .and_then(|worker_id| self.workers.get_worker(worker_id));
 
         let worker = match worker {
             Some(worker) => worker,
             None => {
                 return session.downstream_session
-                    .write_response_header_ref(&*premade_responses::NOT_FOUND)
+                    .write_response_header_ref(&premade_responses::NOT_FOUND)
                     .await
                     .map(|_| true);
             }
@@ -338,7 +337,7 @@ impl LB {
             }
             None => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_responses::SERVICE_UNAVAILABLE)
+                    .write_response_header_ref(&premade_responses::SERVICE_UNAVAILABLE)
                     .await
                     .map(|_| true)
             }
@@ -388,7 +387,7 @@ impl ProxyHttp for LB {
     async fn request_filter(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         if self.rate_limit(session, ctx) {
             return session.downstream_session
-                .write_response_header_ref(&*premade_responses::TOO_MANY_REQUESTS)
+                .write_response_header_ref(&premade_responses::TOO_MANY_REQUESTS)
                 .await
                 .map(|_| true)
         }
@@ -400,7 +399,7 @@ impl ProxyHttp for LB {
             (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, ctx).await,
             _ => {
                 session.downstream_session
-                    .write_response_header_ref(&*premade_responses::NOT_FOUND)
+                    .write_response_header_ref(&premade_responses::NOT_FOUND)
                     .await
                     .map(|_| true)
             }
