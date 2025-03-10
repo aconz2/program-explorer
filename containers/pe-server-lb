@@ -1,6 +1,6 @@
 FROM scratch
 
-COPY peserver/target/x86_64-unknown-linux-musl/release/lb /bin/pe-lb
+COPY target/x86_64-unknown-linux-musl/release/lb /bin/pe-lb
 
 ENV RUST_LOG=info
 

@@ -13,8 +13,6 @@ use peinit::{Config,Response,RootfsKind,ResponseFormat};
 use peinit::{write_io_file_response,read_io_file_config};
 use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
 
-use libc;
-
 const IMAGE_DEVICE: &CStr = c"/dev/pmem0";
 const INOUT_DEVICE: &str = "/dev/pmem1";
 const STDOUT_FILE: &str = "/run/output/stdout";
@@ -158,7 +156,7 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
 // kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
-    let mut f = File::open(&archive).unwrap();
+    let mut f = File::open(archive).unwrap();
     let (archive_size, config) = read_io_file_config(&mut f).unwrap();
 
     //let offset = f.stream_position().unwrap();
@@ -214,7 +212,7 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     let outfile = File::create_new(STDOUT_FILE).unwrap();
     let errfile = File::create_new(STDERR_FILE).unwrap();
     let run_input = Path::new("/run/input");
-    let stdin: Stdio = config.stdin.clone().map(|x| {
+    let stdin: Stdio = config.stdin.clone().and_then(|x| {
         // TODO this is annoying
         let p = match run_input.join(x).canonicalize() {
             Ok(p) => { p },
@@ -228,7 +226,7 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
             Ok(f) => { Some(Stdio::from(f)) }
             Err(_) => { None }
         }
-    }).flatten().unwrap_or_else(|| Stdio::null());
+    }).unwrap_or_else(Stdio::null);
 
     let start = Instant::now();
     let mut cmd = if config.strace {

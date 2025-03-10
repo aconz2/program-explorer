@@ -65,8 +65,8 @@ dir /bin   0755 0 0
 
 file /bin/crun $CRUN 0555 0 0
 
-file /bin/pearchive pearchive/target/x86_64-unknown-linux-musl/$PROFILE/pearchive 0555 0 0
-file /init             peinit/target/x86_64-unknown-linux-musl/$PROFILE/peinit    0555 0 0
+file /bin/pearchive    target/x86_64-unknown-linux-musl/$PROFILE/pearchive 0555 0 0
+file /init             target/x86_64-unknown-linux-musl/$PROFILE/peinit    0555 0 0
 
 # TODO pull these from maybe somewhere else
 # busybox is https://www.busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox

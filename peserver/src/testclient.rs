@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::io::{Read,Write};
 
 use http::Method;
@@ -35,7 +35,7 @@ fn zcat(input: &[u8]) -> std::io::Result<Vec<u8>> {
 struct UnpackVisitorPrinter {}
 
 impl UnpackVisitor for UnpackVisitorPrinter {
-    fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
+    fn on_file(&mut self, name: &Path, data: &[u8]) -> bool {
         println!("=== {:?} ({}) ===", name, data.len());
         if !data.is_empty() {
             escape_dump(data);
