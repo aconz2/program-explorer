@@ -1,5 +1,3 @@
-use serde_json;
-
 pub mod cloudhypervisor;
 pub mod worker;
 
@@ -175,14 +173,14 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
 }
 
 fn parse_user_string(s: &str) -> Result<oci_runtime::User, Error> {
-    if s == "" { return Err(Error::EmptyUser); }
+    if s.is_empty() { return Err(Error::EmptyUser); }
     if let Ok(uid) = s.parse::<u32>() {
         // TODO this is also supposed to lookup the gid in /etc/group I think
         return oci_runtime::UserBuilder::default().uid(uid).gid(uid).build().map_err(|_| Error::OciUser);
     }
     let mut iter = s.splitn(2, ":");
-    let a = iter.next().and_then(|x| Some(x.parse::<u32>()));
-    let b = iter.next().and_then(|x| Some(x.parse::<u32>()));
+    let a = iter.next().map(|x| x.parse::<u32>());
+    let b = iter.next().map(|x| x.parse::<u32>());
     match (a, b) {
         (Some(Ok(uid)), Some(Ok(gid))) => oci_runtime::UserBuilder::default().uid(uid).gid(gid).build().map_err(|_| Error::OciUser),
         _ => Err(Error::UnhandledUser)

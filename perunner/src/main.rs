@@ -6,13 +6,11 @@ use std::ffi::{OsString};
 use std::path::{Path,PathBuf};
 
 use tempfile::NamedTempFile;
-use serde_json;
 use byteorder::{WriteBytesExt,LE};
 use memmap2::{Mmap,MmapOptions};
 use clap::{Parser};
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
-use peinit;
 use peinit::{ResponseFormat};
 use peimage::{PEImageMultiIndex,PEImageMultiIndexKeyType};
 
@@ -63,11 +61,11 @@ fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
 }
 
 fn write_escaped<W: Write>(r: &[u8], w: &mut W) {
-    let mut cur = &r[..];
+    let mut cur = r;
     let mut ebuf = vec![0; 8192];
     while !cur.is_empty() {
         let (l, r) = cur.split_at(std::cmp::min(cur.len(), 4096));
-        escape_bytes(&l, &mut ebuf);
+        escape_bytes(l, &mut ebuf);
         w.write_all(ebuf.as_slice()).unwrap();
         cur = r;
     }
@@ -78,12 +76,12 @@ struct UnpackVisitorPrinter {
 }
 
 impl UnpackVisitor for UnpackVisitorPrinter {
-    fn on_file(&mut self, name: &PathBuf, data: &[u8]) -> bool {
+    fn on_file(&mut self, name: &Path, data: &[u8]) -> bool {
         if self.stdout && AsRef::<Path>::as_ref(name) == AsRef::<Path>::as_ref("stdout") {
-            write_escaped(&data, &mut io::stdout());
+            write_escaped(data, &mut io::stdout());
         } else {
             eprintln!("=== {:?} ({}) ===", name, data.len());
-            write_escaped(&data, &mut io::stderr());
+            write_escaped(data, &mut io::stderr());
         }
         true
     }
@@ -292,7 +290,7 @@ fn main() {
                 ch_config: ch_config.clone(),
                 ch_timeout: ch_timeout,
                 io_file: io_file,
-                rootfs: image_index_entry.path.clone().into(),
+                rootfs: image_index_entry.path.clone(),
             };
             pool.sender().try_send(worker_input).expect("couldn't submit work");
         }
@@ -313,7 +311,7 @@ fn main() {
             ch_config: ch_config,
             ch_timeout: ch_timeout,
             io_file: io_file,
-            rootfs: image_index_entry.path.clone().into(),
+            rootfs: image_index_entry.path.clone(),
         };
         handle_worker_output(worker::run(worker_input), &response_format, args.stdout);
     }
