@@ -22,7 +22,7 @@ find /run/pe
 cat /run/pe/input/folder/data.txt
 echo "an error" 1>&2
 echo "an output file" > /run/pe/output/output.txt
-`
+`.trimStart()
     },
     {path:'folder/data.txt', data:'hi this is some data'},
 ];
