@@ -1,3 +1,7 @@
+:root {
+  color-scheme: light dark;
+}
+
 summary { cursor: pointer; }
 
 /* these are internal to code-mirror */
@@ -71,5 +75,5 @@ label.inline-label {
 
 #disclaimer-bar {
     padding: 5px;
-    background: azure;
+    background: light-dark(azure, darkslategray);
 }
