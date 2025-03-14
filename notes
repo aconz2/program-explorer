@@ -540,3 +540,32 @@ TODO okay so if I use hyperthreads, then waiting for wall clock 1 second is not 
 
 tar unlinks an existing file if it exists
 rsync writes to "foo.8ajWj" tmp name then does a rename
+
+revisiting the dedupe, mkfs.erofs only does dedupe with -Ededupe, for silkeh/clang 17&19
+mkfs.erofs has their own sha256 impl which is probably really slow
+build size
+2m45s 634M clang17_19_dedupe.erofs
+  54s 858M clang17_19.erofs
+  27s 426M clang17.erofs
+  27s 432M clang19.erofs
+  21s 1.3G clang19_nozstd.erofs
+
+GOPROC=1 mkfs.erofs --workers=1
+  54s clang17.erofs
+
+GOPROC=1 mkfs.erofs --workers=2
+  38s clang17.erofs
+
+GOPROC=1 mkfs.erofs --workers=4
+  30s clang17.erofs
+
+GOPROC=1 mkfs.erofs --workers=8
+  27s clang17.erofs
+
+GOPROC=2 mkfs.erofs --workers=1
+  54s clang17.erofs
+
+perf record of peimage image build shows top 3 at 8.35 6.79 3.71 % in compress.flate
+
+in just building clang19 by itself, we get Filesystem total deduplicated bytes (of source files): 34435072 (34M)
+

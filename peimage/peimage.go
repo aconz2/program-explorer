@@ -414,7 +414,7 @@ func mainImageSqfs(outfile string, args []string) (error) {
     return nil
 }
 
-func mainImageErofs(outfile string, args []string) (error) {
+func mainImageErofs(outfile string, dedupe bool, args []string) (error) {
     f, err := os.CreateTemp("", "fifo")
     if err != nil {
         return fmt.Errorf("tempfile %w", err)
@@ -433,7 +433,14 @@ func mainImageErofs(outfile string, args []string) (error) {
     }
 
     // tar=f is for full mode
-    cmd := exec.Command("mkfs.erofs", "--tar=f", "-zzstd,level=3", outfile, fifoName)
+    cmdArgs := []string{"--tar=f", "-zzstd,level=3"}
+    if dedupe {
+        cmdArgs = append(cmdArgs, "-Ededupe")
+    }
+    cmdArgs = append(cmdArgs, outfile, fifoName)
+    cmd := exec.Command("mkfs.erofs", cmdArgs...)
+    cmd.Stdout = os.Stdout
+    cmd.Stderr = os.Stderr
     if err = cmd.Start(); err != nil {
         return fmt.Errorf("error starting mkfs.erofs %w", err)
     }
@@ -453,13 +460,19 @@ func mainImageErofs(outfile string, args []string) (error) {
 
 func mainImage(args []string) (error) {
     if len(args) < 3 {
-        return fmt.Errorf("expected [--force] <image.sqfs|image.erofs> <oci-dir> <names...>")
+        return fmt.Errorf("expected [--force] [--dedupe] <image.sqfs|image.erofs> <oci-dir> <names...>")
     }
     force := false
+    dedupe := false
     if args[0] == "--force" {
         force = true
         args = args[1:]
     }
+    if args[0] == "--dedupe" {
+        dedupe = true
+        args = args[1:]
+    }
+
     image := args[0]
     argsOciRefs := args[1:]
     isSqfs := strings.HasSuffix(image, ".sqfs")
@@ -507,7 +520,7 @@ func mainImage(args []string) (error) {
     case "sqfs":
         return mainImageSqfs(image, args[1:])
     case "erofs":
-        return mainImageErofs(image, args[1:])
+        return mainImageErofs(image, dedupe, args[1:])
     default:
         return fmt.Errorf("got unexpected format %s", format)
     }
