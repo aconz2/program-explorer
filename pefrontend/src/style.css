@@ -73,7 +73,21 @@ label.inline-label {
     padding-right: 3px;
 }
 
-#disclaimer-bar {
+#top-bar {
+    display: flex;
+    justify-content: space-between;
+}
+
+#disclaimer {
     padding: 5px;
     background: light-dark(azure, darkslategray);
+}
+
+#github-svg {
+    display: inline;
+    height: 2ch;
+}
+
+#links {
+    /*align-items: flex-end;*/
 }
