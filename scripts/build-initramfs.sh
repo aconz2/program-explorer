@@ -7,11 +7,11 @@ crun=${CRUN}
 crun_url=https://github.com/containers/crun/releases/download/1.20/crun-1.20-linux-amd64
 
 if [[ -z $crun || ! -f $crun ]]; then
-    crun=target/$(basename $crun_url)
+    crun=vendor/$(basename $crun_url)
     if [ ! -f $crun ]; then
-        (cd target && wget $crun_url)
+        (cd vendor && wget $crun_url)
     fi
-    echo 'e19a9a35484f3c75567219a7b6a4a580b43a0baa234df413655f48db023a200e  target/crun-1.20-linux-amd64' | sha256sum -c
+    echo 'e19a9a35484f3c75567219a7b6a4a580b43a0baa234df413655f48db023a200e  vendor/crun-1.20-linux-amd64' | sha256sum -c
 fi
 
 
