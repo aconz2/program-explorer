@@ -150,7 +150,7 @@ struct Args {
     #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
-    #[arg(long, default_value = "../ocismall.sqfs")]
+    #[arg(long, default_value = "../busybox.erofs")]
     index: String,
 
     #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]

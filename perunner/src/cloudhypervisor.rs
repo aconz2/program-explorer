@@ -171,6 +171,10 @@ impl CloudHypervisor {
              .arg("--initramfs").arg(config.initramfs)
              .arg("--cpus").arg("boot=1")
              .arg("--memory").arg("size=1024M")
+             // almalinux 9.5 doesn't have landlock enabled in the kernel config ...
+             // zgrep -h "^CONFIG_SECURITY_LANDLOCK=" "/boot/config-$(uname -r)"
+             //.arg("--landlock")
+             //
              //.arg("--pvpanic")
              //.arg("--api-socket").arg(format!("fd={socket_fd}"))
              ;
