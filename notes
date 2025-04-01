@@ -569,3 +569,6 @@ perf record of peimage image build shows top 3 at 8.35 6.79 3.71 % in compress.f
 
 in just building clang19 by itself, we get Filesystem total deduplicated bytes (of source files): 34435072 (34M)
 
+playing with index.docker.io/library/postgres
+# this works, but needs 5 seconds for postgres to launch, spends a while on "syncing data to disk"
+podman run --rm -it index.docker.io/library/postgres:latest bash -c 'POSTGRES_HOST_AUTH_METHOD=trust docker-entrypoint.sh postgres & sleep 5; psql -U postgres -c "select 1;"'

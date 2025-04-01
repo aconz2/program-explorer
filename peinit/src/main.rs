@@ -9,6 +9,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use rustix::fs::{chown, mkdir};
+use rustix::io::FdFlags;
+use rustix::mount::MountFlags as MS;
+use rustix::mount::{mount, mount_bind, mount_bind_recursive};
+use rustix::process::{chdir, chroot};
+use rustix::system::{reboot, RebootCommand};
+
 use peinit::{read_io_file_config, write_io_file_response};
 use peinit::{Config, Response, ResponseFormat, RootfsKind};
 use waitid_timeout::{PidFd, PidFdWaiter, WaitIdDataOvertime};
@@ -36,11 +43,9 @@ fn exit() {
     //kernel_panic();
     //unsafe { core::arch::asm!("hlt", options(att_syntax, nomem, nostack)); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
-    unsafe {
-        libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
-    }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_SW_SUSPEND); }
+    let _ = reboot(RebootCommand::PowerOff);
     std::process::exit(1);
 }
 
@@ -77,41 +82,9 @@ fn setup_panic() {
     }));
 }
 
-fn check_libc(ret: i32) -> io::Result<()> {
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn mount(
-    source: &CStr,
-    target: &CStr,
-    filesystem: Option<&CStr>,
-    flags: libc::c_ulong,
-    data: Option<&CStr>,
-) -> io::Result<()> {
-    let filesystem = filesystem.map_or(std::ptr::null(), |x| x.as_ptr());
-    let data = data.map_or(std::ptr::null(), |x| x.as_ptr() as *const libc::c_void);
-    check_libc(unsafe { libc::mount(source.as_ptr(), target.as_ptr(), filesystem, flags, data) })
-}
-
-//fn unshare(flags: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::unshare(flags) }) }
-fn chdir(dir: &CStr) -> io::Result<()> {
-    check_libc(unsafe { libc::chdir(dir.as_ptr()) })
-}
-fn chown(path: &CStr, uid: libc::uid_t, gid: libc::uid_t) -> io::Result<()> {
-    check_libc(unsafe { libc::chown(path.as_ptr(), uid, gid) })
-}
-fn chroot(dir: &CStr) -> io::Result<()> {
-    check_libc(unsafe { libc::chroot(dir.as_ptr()) })
-}
-fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> {
-    check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) })
-}
-//fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
-fn clear_cloexec(fd: libc::c_int) -> io::Result<()> {
-    check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) })
+fn clear_cloexec<Fd: rustix::fd::AsFd>(fd: Fd) -> rustix::io::Result<()> {
+    //check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) })
+    rustix::io::fcntl_setfd(fd, FdFlags::empty())
 }
 
 // debugging code
@@ -161,13 +134,7 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
     // from https://lore.kernel.org/linux-fsdevel/20200305193511.28621-1-ignat@cloudflare.com/T/
     // also seems to work okay
     //mountinfo("before"); println!("");
-    mount(
-        c"/",
-        c"/",
-        None,
-        libc::MS_BIND | libc::MS_REC | libc::MS_SILENT,
-        None,
-    )?;
+    mount_bind_recursive(c"/", c"/")?;
     //mountinfo("mount / /"); println!("");
     chdir(c"/..")?; // TODO: what??
                     //mountinfo("chdir /.."); println!();
@@ -179,8 +146,8 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
 // kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
-    let mut f = File::open(archive).unwrap();
-    let (archive_size, config) = read_io_file_config(&mut f).unwrap();
+    let mut file = File::open(archive).unwrap();
+    let (archive_size, config) = read_io_file_config(&mut file).unwrap();
 
     //let offset = f.stream_position().unwrap();
     // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
@@ -188,8 +155,8 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     //and we also maybe need to modify the umask
     //let mut cmd = Command::new("strace").arg("/bin/pearchive");
     let mut cmd = Command::new("/bin/pearchive");
-    let fd = f.as_raw_fd();
-    clear_cloexec(fd).unwrap();
+    let fd = file.as_raw_fd();
+    clear_cloexec(file).unwrap();
 
     cmd.arg("unpackfd")
         .arg(format!("{fd}"))
@@ -214,10 +181,10 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 // TODO: maybe do this in process?
-fn pack_output<P: AsRef<OsStr>, F: AsRawFd>(dir: P, archive: F) {
+fn pack_output<P: AsRef<OsStr>, F: rustix::fd::AsFd + AsRawFd>(dir: P, archive: F) {
     //let ret = Command::new("strace").arg("/bin/pearchive")
+    clear_cloexec(&archive).unwrap();
     let fd = archive.as_raw_fd();
-    clear_cloexec(fd).unwrap();
     let ret = Command::new("/bin/pearchive")
         .arg("packfd")
         .arg(dir)
@@ -331,29 +298,27 @@ fn main() {
 
     {
         // initial mounts
-        mount(c"none", c"/proc", Some(c"proc"), libc::MS_SILENT, None).unwrap();
-        mount(
-            c"none",
-            c"/sys/fs/cgroup",
-            Some(c"cgroup2"),
-            libc::MS_SILENT,
-            None,
-        )
-        .unwrap();
-        mount(c"none", c"/dev", Some(c"devtmpfs"), libc::MS_SILENT, None).unwrap();
+        mount(c"none", c"/proc", c"proc", MS::SILENT, None).unwrap();
+        mount(c"none", c"/sys/fs/cgroup", c"cgroup2", MS::SILENT, None).unwrap();
+        mount(c"none", c"/dev", c"devtmpfs", MS::SILENT, None).unwrap();
         mount(
             c"none",
             c"/run/output",
-            Some(c"tmpfs"),
-            libc::MS_SILENT,
+            c"tmpfs",
+            MS::SILENT,
             Some(c"size=2M,mode=777"),
         )
         .unwrap();
         // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
         // have set umask
-        mkdir(c"/run/output/dir", 0o777).unwrap();
+        mkdir(c"/run/output/dir", 0o777.into()).unwrap();
         //chmod(c"/run/output/dir", 0o777).unwrap();
-        chown(c"/run/output/dir", 1000, 1000).unwrap();
+        chown(
+            c"/run/output/dir",
+            Some(rustix::fs::Uid::from_raw(1000)),
+            Some(rustix::fs::Gid::from_raw(1000)),
+        )
+        .unwrap();
     }
 
     let config = unpack_input(INOUT_DEVICE, "/run/input");
@@ -363,26 +328,12 @@ fn main() {
         RootfsKind::Sqfs => c"squashfs",
         RootfsKind::Erofs => c"erofs",
     };
-    mount(
-        IMAGE_DEVICE,
-        c"/mnt/index",
-        Some(rootfs_kind),
-        libc::MS_SILENT,
-        None,
-    )
-    .unwrap();
+    mount(IMAGE_DEVICE, c"/mnt/index", rootfs_kind, MS::SILENT, None).unwrap();
 
     // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
     let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
-    mount(
-        &rootfs_dir,
-        c"/mnt/rootfs",
-        None,
-        libc::MS_SILENT | libc::MS_BIND,
-        None,
-    )
-    .unwrap();
+    mount_bind(&rootfs_dir, c"/mnt/rootfs").unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
 
@@ -391,8 +342,8 @@ fn main() {
     mount(
         c"none",
         c"/run/bundle/rootfs",
-        Some(c"overlay"),
-        libc::MS_SILENT,
+        c"overlay",
+        MS::SILENT,
         Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"),
     )
     .unwrap();

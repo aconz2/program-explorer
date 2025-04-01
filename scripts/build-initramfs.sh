@@ -5,6 +5,7 @@ set -e
 profile=${1:-debug}
 crun=${CRUN}
 crun_url=https://github.com/containers/crun/releases/download/1.20/crun-1.20-linux-amd64
+outfile=target/$profile/initramfs
 
 if [[ -z $crun || ! -f $crun ]]; then
     crun=vendor/$(basename $crun_url)
@@ -27,5 +28,8 @@ fi
     -e "s!\$CRUN!$crun!" \
     -e "s/.*#! REMOVE_IN_RELEASE//" \
     initramfs.file) \
-    > target/$profile/initramfs
+    > $outfile
 
+echo "wrote to $outfile"
+ls -lh $outfile
+cpio -vt < $outfile

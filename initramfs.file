@@ -19,6 +19,7 @@
 #
 # VARIABLES SUBSTITUTED
 # PROFILE -- to select between target/{debug,release}/pefoo
+# CRUN    -- path to crun binary
 #
 # TODO some of this might be faster/easier to just create in peinit
 # dirs should be faster in here since it is all kernel esp the owner + perms
@@ -33,7 +34,6 @@ dir /sys/fs/cgroup 0755 0 0
 # pivot dir for parent rootfs
 dir /abc   0755 0 0
 
-
 dir /mnt                   0755 0 0
 # workdir for overlayfs
 dir /mnt/work              0755 0 0
@@ -43,8 +43,6 @@ dir /mnt/index             0755 0 0
 dir /mnt/rootfs            0755 0 0
 # root of upper in overlayfs to overlay the /run dir over rootfs
 dir /mnt/upper             0777 1000 1000
-dir /mnt/upper/run         0777 1000 1000
-dir /mnt/upper/run/pe      0777 1000 1000
 
 dir /run               0777 0 0
 
@@ -57,9 +55,6 @@ dir /run/crun 0777 0 0
 # this tmpfs then gets bind mounted into /mnt/upper/run/pe/output by crun into /run/pe/output
 dir /run/input      0777 1000 1000
 dir /run/output     0777 1000 1000
-# TODO why are these in here?
-dir /run/output/foo 0777 1000 1000
-dir /run/output/dir 0777 1000 1000
 
 dir /bin   0755 0 0
 
