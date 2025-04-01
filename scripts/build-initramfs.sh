@@ -8,11 +8,12 @@ crun_url=https://github.com/containers/crun/releases/download/1.20/crun-1.20-lin
 
 if [[ -z $crun || ! -f $crun ]]; then
     crun=target/$(basename $crun_url)
+    if [ ! -f $crun ]; then
+        (cd target && wget $crun_url)
+    fi
+    echo 'e19a9a35484f3c75567219a7b6a4a580b43a0baa234df413655f48db023a200e  target/crun-1.20-linux-amd64' | sha256sum -c
 fi
 
-if [ ! -f $crun ]; then
-    (cd target && wget $crun_url)
-fi
 
 echo "using profile=$profile crun=$crun" 1>&2
 
