@@ -1,10 +1,10 @@
 use std::fs::File;
-use std::io::{Read,Write,Seek,SeekFrom,Cursor};
-use std::time::Duration;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::Duration;
 
-use byteorder::{WriteBytesExt,ReadBytesExt,LE};
-use serde::{Serialize, Deserialize};
+use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum RootfsKind {
@@ -18,14 +18,12 @@ pub enum RootfsKind {
 impl RootfsKind {
     pub fn try_from_path_name<P: AsRef<Path>>(p: P) -> Option<Self> {
         match p.as_ref().extension() {
-            Some(e) => {
-                match e.to_str() {
-                    Some("sqfs") => Some(RootfsKind::Sqfs),
-                    Some("erofs") => Some(RootfsKind::Erofs),
-                    _ => None
-                }
-            }
-            None => None
+            Some(e) => match e.to_str() {
+                Some("sqfs") => Some(RootfsKind::Sqfs),
+                Some("erofs") => Some(RootfsKind::Erofs),
+                _ => None,
+            },
+            None => None,
         }
     }
 }
@@ -42,7 +40,7 @@ pub struct Config {
     // fully filled in config.json ready to pass to crun
     pub oci_runtime_config: String,
     pub timeout: Duration,
-    pub stdin: Option<String>,  // name of file in user's archive, not contents
+    pub stdin: Option<String>, // name of file in user's archive, not contents
     pub strace: bool,
     pub crun_debug: bool,
     pub rootfs_dir: String,
@@ -55,24 +53,24 @@ pub struct Config {
 #[serde(tag = "kind")]
 pub enum Response {
     Ok {
-        siginfo : SigInfoRedux,
-        rusage  : Rusage,
+        siginfo: SigInfoRedux,
+        rusage: Rusage,
         #[serde(skip_serializing_if = "Option::is_none")]
-        stdout  : Option<String>,  // not included in ResponseFormat::PeArchiveV1
+        stdout: Option<String>, // not included in ResponseFormat::PeArchiveV1
         #[serde(skip_serializing_if = "Option::is_none")]
-        stderr  : Option<String>,  // not included in ResponseFormat::PeArchiveV1
+        stderr: Option<String>, // not included in ResponseFormat::PeArchiveV1
     },
     Overtime {
-        siginfo : SigInfoRedux,
-        rusage  : Rusage,
+        siginfo: SigInfoRedux,
+        rusage: Rusage,
         #[serde(skip_serializing_if = "Option::is_none")]
-        stdout  : Option<String>,
+        stdout: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        stderr  : Option<String>,
+        stderr: Option<String>,
     },
     Panic {
-        message : String,
-    }
+        message: String,
+    },
 }
 
 //#[derive(Debug, Serialize, Deserialize, Clone)]
@@ -98,27 +96,27 @@ pub enum SigInfoRedux {
     Stopped(i32),
     Trapped(i32),
     Continued(i32),
-    Unk{status: i32, code: i32},
+    Unk { status: i32, code: i32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Rusage {
-    pub ru_utime    : TimeVal,     /* user CPU time used */
-    pub ru_stime    : TimeVal,     /* system CPU time used */
-    pub ru_maxrss   : i64,         /* maximum resident set size */
-    pub ru_ixrss    : i64,         /* integral shared memory size */
-    pub ru_idrss    : i64,         /* integral unshared data size */
-    pub ru_isrss    : i64,         /* integral unshared stack size */
-    pub ru_minflt   : i64,         /* page reclaims (soft page faults) */
-    pub ru_majflt   : i64,         /* page faults (hard page faults) */
-    pub ru_nswap    : i64,         /* swaps */
-    pub ru_inblock  : i64,         /* block input operations */
-    pub ru_oublock  : i64,         /* block output operations */
-    pub ru_msgsnd   : i64,         /* IPC messages sent */
-    pub ru_msgrcv   : i64,         /* IPC messages received */
-    pub ru_nsignals : i64,         /* signals received */
-    pub ru_nvcsw    : i64,         /* voluntary context switches */
-    pub ru_nivcsw   : i64,         /* involuntary context switches */
+    pub ru_utime: TimeVal, /* user CPU time used */
+    pub ru_stime: TimeVal, /* system CPU time used */
+    pub ru_maxrss: i64,    /* maximum resident set size */
+    pub ru_ixrss: i64,     /* integral shared memory size */
+    pub ru_idrss: i64,     /* integral unshared data size */
+    pub ru_isrss: i64,     /* integral unshared stack size */
+    pub ru_minflt: i64,    /* page reclaims (soft page faults) */
+    pub ru_majflt: i64,    /* page faults (hard page faults) */
+    pub ru_nswap: i64,     /* swaps */
+    pub ru_inblock: i64,   /* block input operations */
+    pub ru_oublock: i64,   /* block output operations */
+    pub ru_msgsnd: i64,    /* IPC messages sent */
+    pub ru_msgrcv: i64,    /* IPC messages received */
+    pub ru_nsignals: i64,  /* signals received */
+    pub ru_nvcsw: i64,     /* voluntary context switches */
+    pub ru_nivcsw: i64,    /* involuntary context switches */
 }
 
 // impl From<libc::c_int> for Status {
@@ -139,7 +137,10 @@ impl From<libc::siginfo_t> for SigInfoRedux {
             libc::CLD_DUMPED => SigInfoRedux::Dumped(status),
             libc::CLD_TRAPPED => SigInfoRedux::Trapped(status),
             libc::CLD_CONTINUED => SigInfoRedux::Continued(status),
-            _ => SigInfoRedux::Unk{code: siginfo.si_code, status: status},
+            _ => SigInfoRedux::Unk {
+                code: siginfo.si_code,
+                status: status,
+            },
         }
     }
 }
@@ -147,7 +148,7 @@ impl From<libc::siginfo_t> for SigInfoRedux {
 impl From<libc::timeval> for TimeVal {
     fn from(tv: libc::timeval) -> Self {
         TimeVal {
-            sec:  tv.tv_sec,
+            sec: tv.tv_sec,
             usec: tv.tv_usec,
         }
     }
@@ -156,22 +157,22 @@ impl From<libc::timeval> for TimeVal {
 impl From<libc::rusage> for Rusage {
     fn from(u: libc::rusage) -> Self {
         Rusage {
-            ru_utime    : u.ru_utime.into(),
-            ru_stime    : u.ru_stime.into(),
-            ru_maxrss   : u.ru_maxrss,
-            ru_ixrss    : u.ru_ixrss,
-            ru_idrss    : u.ru_idrss,
-            ru_isrss    : u.ru_isrss,
-            ru_minflt   : u.ru_minflt,
-            ru_majflt   : u.ru_majflt,
-            ru_nswap    : u.ru_nswap,
-            ru_inblock  : u.ru_inblock,
-            ru_oublock  : u.ru_oublock,
-            ru_msgsnd   : u.ru_msgsnd,
-            ru_msgrcv   : u.ru_msgrcv,
-            ru_nsignals : u.ru_nsignals,
-            ru_nvcsw    : u.ru_nvcsw,
-            ru_nivcsw   : u.ru_nivcsw,
+            ru_utime: u.ru_utime.into(),
+            ru_stime: u.ru_stime.into(),
+            ru_maxrss: u.ru_maxrss,
+            ru_ixrss: u.ru_ixrss,
+            ru_idrss: u.ru_idrss,
+            ru_isrss: u.ru_isrss,
+            ru_minflt: u.ru_minflt,
+            ru_majflt: u.ru_majflt,
+            ru_nswap: u.ru_nswap,
+            ru_inblock: u.ru_inblock,
+            ru_oublock: u.ru_oublock,
+            ru_msgsnd: u.ru_msgsnd,
+            ru_msgrcv: u.ru_msgrcv,
+            ru_nsignals: u.ru_nsignals,
+            ru_nvcsw: u.ru_nvcsw,
+            ru_nivcsw: u.ru_nivcsw,
         }
     }
 }
@@ -206,7 +207,11 @@ fn read_u32_le_pair(file: &mut File) -> std::io::Result<(u32, u32)> {
 // file is left with cursor at beginning of archive but you then must
 // seek back to 0 to write the archive size
 // file should be at 0, but we don't seek it so
-pub fn write_io_file_config(file: &mut File, config: &Config, archive_size: u32) -> Result<(), Error> {
+pub fn write_io_file_config(
+    file: &mut File,
+    config: &Config,
+    archive_size: u32,
+) -> Result<(), Error> {
     let config_bytes = bincode::serialize(&config).map_err(|_| Error::Ser)?;
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     write_u32_le_slice(file, &[archive_size, config_size]).map_err(|_| Error::Io)?;

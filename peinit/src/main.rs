@@ -1,17 +1,17 @@
+use std::ffi::{CStr, CString, OsStr};
 use std::fs;
-use std::fs::{File,DirEntry};
-use std::process::{Stdio, Command};
-use std::io::{Read};
-use std::ffi::{CStr,OsStr,CString};
-use std::path::Path;
+use std::fs::{DirEntry, File};
 use std::io;
-use std::time::Instant;
+use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::Instant;
 
-use peinit::{Config,Response,RootfsKind,ResponseFormat};
-use peinit::{write_io_file_response,read_io_file_config};
-use waitid_timeout::{PidFdWaiter,PidFd,WaitIdDataOvertime};
+use peinit::{read_io_file_config, write_io_file_response};
+use peinit::{Config, Response, ResponseFormat, RootfsKind};
+use waitid_timeout::{PidFd, PidFdWaiter, WaitIdDataOvertime};
 
 const IMAGE_DEVICE: &CStr = c"/dev/pmem0";
 const INOUT_DEVICE: &str = "/dev/pmem1";
@@ -36,7 +36,9 @@ fn exit() {
     //kernel_panic();
     //unsafe { core::arch::asm!("hlt", options(att_syntax, nomem, nostack)); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
-    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF); }
+    unsafe {
+        libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
+    }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
     //unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_SW_SUSPEND); }
     std::process::exit(1);
@@ -68,10 +70,9 @@ fn setup_panic() {
         //} else {
         //    write_panic_response("unknown panic");
         //}
-        let _ = write_panic_response(&format!("{}", p))
-            .map_err(|e| {
-                println!("Error writing panic response {e:?}");
-            });
+        let _ = write_panic_response(&format!("{}", p)).map_err(|e| {
+            println!("Error writing panic response {e:?}");
+        });
         exit();
     }));
 }
@@ -83,19 +84,35 @@ fn check_libc(ret: i32) -> io::Result<()> {
     Ok(())
 }
 
-fn mount(source: &CStr, target: &CStr, filesystem: Option<&CStr>, flags: libc::c_ulong, data: Option<&CStr>) -> io::Result<()> {
+fn mount(
+    source: &CStr,
+    target: &CStr,
+    filesystem: Option<&CStr>,
+    flags: libc::c_ulong,
+    data: Option<&CStr>,
+) -> io::Result<()> {
     let filesystem = filesystem.map_or(std::ptr::null(), |x| x.as_ptr());
     let data = data.map_or(std::ptr::null(), |x| x.as_ptr() as *const libc::c_void);
     check_libc(unsafe { libc::mount(source.as_ptr(), target.as_ptr(), filesystem, flags, data) })
 }
 
 //fn unshare(flags: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::unshare(flags) }) }
-fn chdir(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chdir(dir.as_ptr()) }) }
-fn chown(path: &CStr, uid: libc::uid_t, gid: libc::uid_t) -> io::Result<()> { check_libc(unsafe { libc::chown(path.as_ptr(), uid, gid) }) }
-fn chroot(dir: &CStr) -> io::Result<()> { check_libc(unsafe { libc::chroot(dir.as_ptr()) }) }
-fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) }) }
+fn chdir(dir: &CStr) -> io::Result<()> {
+    check_libc(unsafe { libc::chdir(dir.as_ptr()) })
+}
+fn chown(path: &CStr, uid: libc::uid_t, gid: libc::uid_t) -> io::Result<()> {
+    check_libc(unsafe { libc::chown(path.as_ptr(), uid, gid) })
+}
+fn chroot(dir: &CStr) -> io::Result<()> {
+    check_libc(unsafe { libc::chroot(dir.as_ptr()) })
+}
+fn mkdir(dir: &CStr, mode: libc::mode_t) -> io::Result<()> {
+    check_libc(unsafe { libc::mkdir(dir.as_ptr(), mode) })
+}
 //fn chmod(path: &CStr, mode: libc::mode_t) -> io::Result<()> { check_libc(unsafe { libc::chmod(path.as_ptr(), mode) }) }
-fn clear_cloexec(fd: libc::c_int) -> io::Result<()> { check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }) }
+fn clear_cloexec(fd: libc::c_int) -> io::Result<()> {
+    check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) })
+}
 
 // debugging code
 //fn mountinfo(name: &str) {
@@ -144,10 +161,16 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
     // from https://lore.kernel.org/linux-fsdevel/20200305193511.28621-1-ignat@cloudflare.com/T/
     // also seems to work okay
     //mountinfo("before"); println!("");
-    mount(c"/", c"/", None, libc::MS_BIND | libc::MS_REC | libc::MS_SILENT, None)?;
+    mount(
+        c"/",
+        c"/",
+        None,
+        libc::MS_BIND | libc::MS_REC | libc::MS_SILENT,
+        None,
+    )?;
     //mountinfo("mount / /"); println!("");
     chdir(c"/..")?; // TODO: what??
-    //mountinfo("chdir /.."); println!();
+                    //mountinfo("chdir /.."); println!();
     chroot(c".")?;
     //mountinfo("chroot ."); println!();
     Ok(())
@@ -169,9 +192,9 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     clear_cloexec(fd).unwrap();
 
     cmd.arg("unpackfd")
-       .arg(format!("{fd}"))
-       .arg(dir)
-       .arg(format!("{archive_size}"));
+        .arg(format!("{fd}"))
+        .arg(dir)
+        .arg(format!("{archive_size}"));
 
     cmd.uid(1000).gid(1000);
     //unsafe {
@@ -212,21 +235,27 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     let outfile = File::create_new(STDOUT_FILE).unwrap();
     let errfile = File::create_new(STDERR_FILE).unwrap();
     let run_input = Path::new("/run/input");
-    let stdin: Stdio = config.stdin.clone().and_then(|x| {
-        // TODO this is annoying
-        let p = match run_input.join(x).canonicalize() {
-            Ok(p) => { p },
-            Err(_) => { return None; },
-        };
-        if !p.starts_with(run_input) {
-            // println!("V warn stdin traversal avoided");
-            return None;
-        }
-        match File::open(p) {
-            Ok(f) => { Some(Stdio::from(f)) }
-            Err(_) => { None }
-        }
-    }).unwrap_or_else(Stdio::null);
+    let stdin: Stdio = config
+        .stdin
+        .clone()
+        .and_then(|x| {
+            // TODO this is annoying
+            let p = match run_input.join(x).canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    return None;
+                }
+            };
+            if !p.starts_with(run_input) {
+                // println!("V warn stdin traversal avoided");
+                return None;
+            }
+            match File::open(p) {
+                Ok(f) => Some(Stdio::from(f)),
+                Err(_) => None,
+            }
+        })
+        .unwrap_or_else(Stdio::null);
 
     let start = Instant::now();
     let mut cmd = if config.strace {
@@ -235,13 +264,18 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
         Command::new("/bin/crun")
     };
     if config.strace {
-        cmd.arg("-e").arg("write,openat,unshare,clone,clone3").arg("-f").arg("-o").arg("/run/crun.strace").arg("--decode-pids=comm").arg("/bin/crun");
+        cmd.arg("-e")
+            .arg("write,openat,unshare,clone,clone3")
+            .arg("-f")
+            .arg("-o")
+            .arg("/run/crun.strace")
+            .arg("--decode-pids=comm")
+            .arg("/bin/crun");
     }
     if config.crun_debug {
         cmd.arg("--debug").arg("--log=/run/crun.log");
     }
-    cmd
-        .arg("run")
+    cmd.arg("run")
         .arg("-b") // --bundle
         .arg("/run/bundle")
         .arg("-d") // --detach
@@ -251,17 +285,17 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
         .stderr(Stdio::from(errfile))
         .stdin(stdin);
 
-    let exit_status = cmd
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
+    let exit_status = cmd.spawn().unwrap().wait().unwrap();
 
     let elapsed = start.elapsed();
     println!("V crun ran in {elapsed:?}");
 
-    if config.strace { cat_file_if_exists("crun.strace", "/run/crun.strace"); }
-    if config.crun_debug {cat_file_if_exists("crun.log", "/run/crun.log"); }
+    if config.strace {
+        cat_file_if_exists("crun.strace", "/run/crun.strace");
+    }
+    if config.crun_debug {
+        cat_file_if_exists("crun.log", "/run/crun.log");
+    }
 
     if !exit_status.success() {
         // println!("V crun stdout");
@@ -276,7 +310,10 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     // we wait on crun since it should run to completion and leave the pid in pidfd
 
     //Command::new("busybox").arg("ls").arg("/run").spawn().unwrap().wait().unwrap();
-    let pid = fs::read_to_string("/run/pid").unwrap().parse::<i32>().unwrap();
+    let pid = fs::read_to_string("/run/pid")
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
 
     // Command::new("/bin/busybox").arg("cat").arg("/run/crun/cid-1234/status").spawn().unwrap().wait().unwrap();
     // this can verify the Uid/Gid is not 0 0 0 0 DOES NOT WORK WITH STRACE
@@ -292,11 +329,26 @@ fn main() {
 
     parent_rootfs(c"/abc").unwrap();
 
-    { // initial mounts
-        mount(c"none", c"/proc",          Some(c"proc"),     libc::MS_SILENT, None).unwrap();
-        mount(c"none", c"/sys/fs/cgroup", Some(c"cgroup2"),  libc::MS_SILENT, None).unwrap();
-        mount(c"none", c"/dev",           Some(c"devtmpfs"), libc::MS_SILENT, None).unwrap();
-        mount(c"none", c"/run/output",    Some(c"tmpfs"),    libc::MS_SILENT, Some(c"size=2M,mode=777")).unwrap();
+    {
+        // initial mounts
+        mount(c"none", c"/proc", Some(c"proc"), libc::MS_SILENT, None).unwrap();
+        mount(
+            c"none",
+            c"/sys/fs/cgroup",
+            Some(c"cgroup2"),
+            libc::MS_SILENT,
+            None,
+        )
+        .unwrap();
+        mount(c"none", c"/dev", Some(c"devtmpfs"), libc::MS_SILENT, None).unwrap();
+        mount(
+            c"none",
+            c"/run/output",
+            Some(c"tmpfs"),
+            libc::MS_SILENT,
+            Some(c"size=2M,mode=777"),
+        )
+        .unwrap();
         // the umask 022 means mkdir creates with 755, mkdir(1) does a mkdir then chmod. we could also
         // have set umask
         mkdir(c"/run/output/dir", 0o777).unwrap();
@@ -311,29 +363,60 @@ fn main() {
         RootfsKind::Sqfs => c"squashfs",
         RootfsKind::Erofs => c"erofs",
     };
-    mount(IMAGE_DEVICE, c"/mnt/index", Some(rootfs_kind), libc::MS_SILENT, None).unwrap();
+    mount(
+        IMAGE_DEVICE,
+        c"/mnt/index",
+        Some(rootfs_kind),
+        libc::MS_SILENT,
+        None,
+    )
+    .unwrap();
 
     // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
     let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
-    mount(&rootfs_dir, c"/mnt/rootfs", None, libc::MS_SILENT | libc::MS_BIND, None).unwrap();
+    mount(
+        &rootfs_dir,
+        c"/mnt/rootfs",
+        None,
+        libc::MS_SILENT | libc::MS_BIND,
+        None,
+    )
+    .unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
 
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
-    mount(c"none", c"/run/bundle/rootfs", Some(c"overlay"), libc::MS_SILENT,
-          Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work")).unwrap();
+    mount(
+        c"none",
+        c"/run/bundle/rootfs",
+        Some(c"overlay"),
+        libc::MS_SILENT,
+        Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"),
+    )
+    .unwrap();
 
     // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     // println!("V config is {config:?}");
-    fs::write("/run/bundle/config.json", config.oci_runtime_config.as_bytes()).unwrap();
+    fs::write(
+        "/run/bundle/config.json",
+        config.oci_runtime_config.as_bytes(),
+    )
+    .unwrap();
 
     if config.kernel_inspect {
         walkdir_files("/proc/sys".as_ref(), &|entry: &DirEntry| {
-            println!("{:?} {}", entry.path(), fs::read_to_string(entry.path()).unwrap_or_else(|_| "\n".to_string()).trim_end());
-        }).unwrap();
+            println!(
+                "{:?} {}",
+                entry.path(),
+                fs::read_to_string(entry.path())
+                    .unwrap_or_else(|_| "\n".to_string())
+                    .trim_end()
+            );
+        })
+        .unwrap();
     }
 
     // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
@@ -345,51 +428,45 @@ fn main() {
         ResponseFormat::JsonV1 => (
             read_if_exists_max_len_lossy(STDOUT_FILE, RESPSONSE_JSON_STDOUT_SIZE),
             read_if_exists_max_len_lossy(STDERR_FILE, RESPSONSE_JSON_STDOUT_SIZE),
-        )
+        ),
     };
 
     let response = match container_output {
-        Err(e) => {
-            Response::Panic {
-                message: format!("{:?}", e),
-            }
-        }
-        Ok(WaitIdDataOvertime::NotExited) => {
-            Response::Panic {
-                message: "ch not exited overtime".into(),
-            }
-        }
-        Ok(WaitIdDataOvertime::Exited{siginfo, rusage}) => {
-            Response::Ok {
-                siginfo: siginfo.into(),
-                rusage: rusage.into(),
-                stdout: stdout,
-                stderr: stderr,
-            }
-        }
-        Ok(WaitIdDataOvertime::ExitedOvertime{siginfo, rusage}) => {
-            Response::Overtime {
-                siginfo: siginfo.into(),
-                rusage: rusage.into(),
-                stdout: stdout,
-                stderr: stderr,
-            }
-        }
+        Err(e) => Response::Panic {
+            message: format!("{:?}", e),
+        },
+        Ok(WaitIdDataOvertime::NotExited) => Response::Panic {
+            message: "ch not exited overtime".into(),
+        },
+        Ok(WaitIdDataOvertime::Exited { siginfo, rusage }) => Response::Ok {
+            siginfo: siginfo.into(),
+            rusage: rusage.into(),
+            stdout: stdout,
+            stderr: stderr,
+        },
+        Ok(WaitIdDataOvertime::ExitedOvertime { siginfo, rusage }) => Response::Overtime {
+            siginfo: siginfo.into(),
+            rusage: rusage.into(),
+            stdout: stdout,
+            stderr: stderr,
+        },
     };
 
-    { // output
+    {
+        // output
         let mut f = File::create(INOUT_DEVICE).unwrap();
         write_io_file_response(&mut f, &response).unwrap();
 
         match config.response_format {
-            ResponseFormat::PeArchiveV1 => { pack_output("/run/output", f); }
-            ResponseFormat::JsonV1 => { }
+            ResponseFormat::PeArchiveV1 => {
+                pack_output("/run/output", f);
+            }
+            ResponseFormat::JsonV1 => {}
         }
     }
 
     exit()
 }
-
 
 fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) -> String {
     match File::open(&path) {
@@ -398,7 +475,7 @@ fn read_n_or_str_error<P: AsRef<Path> + std::fmt::Display>(path: P, n: usize) ->
             let mut buf = String::with_capacity(n);
             match f.take(n as u64).read_to_string(&mut buf) {
                 Ok(_) => buf,
-                Err(e) => format!("error reading file {} {:?}", path, e)
+                Err(e) => format!("error reading file {} {:?}", path, e),
             }
         }
     }
@@ -412,7 +489,7 @@ fn read_if_exists_max_len_lossy<P: AsRef<Path>>(p: P, len: u64) -> Option<String
 }
 
 fn cat_file_if_exists<P: AsRef<Path>>(name: &str, file: P) {
-    if let Ok(mut f ) = File::open(file) {
+    if let Ok(mut f) = File::open(file) {
         println!("=== {name} ===");
         let _ = io::copy(&mut f, &mut io::stdout());
         println!("======");
