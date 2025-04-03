@@ -16,8 +16,6 @@ use peimage::{PEImageMultiIndex,PEImageMultiIndexKeyType};
 
 use perunner::create_runtime_spec;
 
-//mod worker;
-//mod cloudhypervisor;
 use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
 use perunner::worker;
 
@@ -257,9 +255,9 @@ fn main() {
     }
 
     let ch_config = CloudHypervisorConfig {
-        bin      : cwd.join(args.ch).into(),
-        kernel   : cwd.join(args.kernel).into(),
-        initramfs: cwd.join(args.initramfs).into(),
+        bin      : cwd.join(&args.ch).into(),
+        kernel   : cwd.join(&args.kernel).into(),
+        initramfs: cwd.join(&args.initramfs).into(),
         log_level: Some(ch_log_level),
         console  : args.console,
         keep_args: true,

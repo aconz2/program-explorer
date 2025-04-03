@@ -433,7 +433,8 @@ func mainImageErofs(outfile string, dedupe bool, args []string) (error) {
     }
 
     // tar=f is for full mode
-    cmdArgs := []string{"--tar=f", "-zzstd,level=3"}
+    cmdArgs := []string{"--tar=f", "-zzstd,level=3", "--workers=1"}
+    // cmdArgs := []string{"--tar=f", "-zlz4", "--workers=1"}
     if dedupe {
         cmdArgs = append(cmdArgs, "-Ededupe")
     }

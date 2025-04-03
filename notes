@@ -572,3 +572,19 @@ in just building clang19 by itself, we get Filesystem total deduplicated bytes (
 playing with index.docker.io/library/postgres
 # this works, but needs 5 seconds for postgres to launch, spends a while on "syncing data to disk"
 podman run --rm -it index.docker.io/library/postgres:latest bash -c 'POSTGRES_HOST_AUTH_METHOD=trust docker-entrypoint.sh postgres & sleep 5; psql -U postgres -c "select 1;"'
+
+some timings on gzip tar reading, counting number of files, dirs, links, symlinks
+139M sha256/38e599e367e116e9ce85f0015f97ce8e035cde32148f442bac57f5d9a3571e7d
+nfiles=1781 nlinks=10 nslinks=32 ndirs=184
+gzip 1.13 1633 ms (sh -c gzip -cd file > /dev/null)
+Go        1543 ms
+rust with default rust backend 720 ms
+rust with cloudflare-zlib 538 ms
+rust with libz-ng 517 ms
+
+some timings on erofs compression type
+mkfs.erofs with --workers=1
+silkeh/clang:{17,19}
+      size, buildtime, runtime,
+zstd: 858 MB, 108s, 312 ms
+lz4: 1279 MB,  45s, 214 ms

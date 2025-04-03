@@ -17,8 +17,8 @@ for package in perunner peserver; do
 done
 
 # todo would get this building in a container, but it seems caching deps locally is hard
-# peserver with musl requires musl-gcc cmake and some compression things I think?
-# idk how cmake enters the picture
+# peserver with musl requires musl-gcc (cmake OR zlib-ng-devel)
+# pingora requires flate2 with the zlib-ng feature
 # peimage requires erofs-utils (at runtime)
 
 for package in peinit pearchive peserver; do

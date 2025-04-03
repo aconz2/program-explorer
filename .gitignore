@@ -1,9 +1,2 @@
-peinit/target
-perunner/target
-pearchive/target
-waitid_timeout/target
-peimage/target
-peserver/target
-pefrontend/target
 pefrontend/node_modules
 target
