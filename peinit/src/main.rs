@@ -149,14 +149,11 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut file = File::open(archive).unwrap();
     let (archive_size, config) = read_io_file_config(&mut file).unwrap();
 
-    //let offset = f.stream_position().unwrap();
-    // println!("read offset and archive size from as config_size={config_size} archive_size={archive_size} offset={offset}");
-    //let ret = Command::new("/bin/pearchive")
-    //and we also maybe need to modify the umask
     //let mut cmd = Command::new("strace").arg("/bin/pearchive");
     let mut cmd = Command::new("/bin/pearchive");
+
+    clear_cloexec(&file).unwrap();
     let fd = file.as_raw_fd();
-    clear_cloexec(file).unwrap();
 
     cmd.arg("unpackfd")
         .arg(format!("{fd}"))
@@ -182,7 +179,6 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 
 // TODO: maybe do this in process?
 fn pack_output<P: AsRef<OsStr>, F: rustix::fd::AsFd + AsRawFd>(dir: P, archive: F) {
-    //let ret = Command::new("strace").arg("/bin/pearchive")
     clear_cloexec(&archive).unwrap();
     let fd = archive.as_raw_fd();
     let ret = Command::new("/bin/pearchive")
