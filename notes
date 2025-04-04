@@ -588,3 +588,6 @@ silkeh/clang:{17,19}
       size, buildtime, runtime,
 zstd: 858 MB, 108s, 312 ms
 lz4: 1279 MB,  45s, 214 ms
+noz  2585 MB,  42s, 197 ms
+
+just building the squashed tar stream (peimage export) for clang:{17,19} takes 42s writing to a tmpfile, the mkfs.erofs for that takes 2.68s (5.4 with lz4 compression)

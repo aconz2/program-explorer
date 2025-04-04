@@ -392,8 +392,9 @@ func readPeIndexJson(infile string) (*PEImageIndex, error) {
     return peImageIndex, nil
 }
 
-func mainImageSqfs(outfile string, args []string) (error) {
-    cmd := exec.Command("sqfstar", "-comp", "zstd", "-force", outfile)
+func mainImageSqfs(outfile string, exportArgs, mkfsArgs []string) (error) {
+    mkfsArgs = append(mkfsArgs, outfile)
+    cmd := exec.Command("sqfstar", mkfsArgs...)
     stdin, err := cmd.StdinPipe()
     if err != nil {
         return fmt.Errorf("error getting stdin %w", err)
@@ -401,7 +402,7 @@ func mainImageSqfs(outfile string, args []string) (error) {
     if err = cmd.Start(); err != nil {
         return fmt.Errorf("error starting sqfstar %w", err)
     }
-    idxBuf, err := mainExport(stdin, args)
+    idxBuf, err := mainExport(stdin, exportArgs)
     if err != nil {
         return fmt.Errorf("error exporting %w", err)
     }
@@ -414,7 +415,7 @@ func mainImageSqfs(outfile string, args []string) (error) {
     return nil
 }
 
-func mainImageErofs(outfile string, dedupe bool, args []string) (error) {
+func mainImageErofs(outfile string, exportArgs, mkfsArgs []string) (error) {
     f, err := os.CreateTemp("", "fifo")
     if err != nil {
         return fmt.Errorf("tempfile %w", err)
@@ -433,11 +434,12 @@ func mainImageErofs(outfile string, dedupe bool, args []string) (error) {
     }
 
     // tar=f is for full mode
-    cmdArgs := []string{"--tar=f", "-zzstd,level=3", "--workers=1"}
-    // cmdArgs := []string{"--tar=f", "-zlz4", "--workers=1"}
-    if dedupe {
-        cmdArgs = append(cmdArgs, "-Ededupe")
-    }
+    cmdArgs := []string{"--tar=f"}
+    // common options to adjust would be
+    // --workers=
+    // -zlz4
+    // -zzstd
+    cmdArgs = append(cmdArgs, mkfsArgs...)
     cmdArgs = append(cmdArgs, outfile, fifoName)
     cmd := exec.Command("mkfs.erofs", cmdArgs...)
     cmd.Stdout = os.Stdout
@@ -445,7 +447,7 @@ func mainImageErofs(outfile string, dedupe bool, args []string) (error) {
     if err = cmd.Start(); err != nil {
         return fmt.Errorf("error starting mkfs.erofs %w", err)
     }
-    idxBuf, err := mainExport(fifo, args)
+    idxBuf, err := mainExport(fifo, exportArgs)
     if err != nil {
         return fmt.Errorf("error exporting %w", err)
     }
@@ -461,29 +463,24 @@ func mainImageErofs(outfile string, dedupe bool, args []string) (error) {
 
 func mainImage(args []string) (error) {
     if len(args) < 3 {
-        return fmt.Errorf("expected [--force] [--dedupe] <image.sqfs|image.erofs> <oci-dir> <names...>")
+        return fmt.Errorf("expected [--force] <image.sqfs|image.erofs> <oci-dir> <names...>")
     }
     force := false
-    dedupe := false
     if args[0] == "--force" {
         force = true
         args = args[1:]
     }
-    if args[0] == "--dedupe" {
-        dedupe = true
-        args = args[1:]
-    }
 
     image := args[0]
-    argsOciRefs := args[1:]
-    isSqfs := strings.HasSuffix(image, ".sqfs")
-    isErofs := strings.HasSuffix(image, ".erofs")
-    if !isSqfs && !isErofs {
-        return fmt.Errorf("expected image to end with .sqfs or .erofs")
-    }
-    format := "sqfs"
-    if isErofs {
+    argsOciRefs, mkfsArgs := splitArgsAtDashDash(args[1:])
+
+    format := ""
+    if strings.HasSuffix(image, ".sqfs") {
+        format = "sqfs"
+    } else if strings.HasSuffix(image, ".erofs") {
         format = "erofs"
+    } else {
+        return fmt.Errorf("couldn't determine format from name %s", image)
     }
 
     err := mainPull(argsOciRefs)
@@ -519,9 +516,9 @@ func mainImage(args []string) (error) {
 
     switch format {
     case "sqfs":
-        return mainImageSqfs(image, args[1:])
+        return mainImageSqfs(image, argsOciRefs, mkfsArgs)
     case "erofs":
-        return mainImageErofs(image, dedupe, args[1:])
+        return mainImageErofs(image, argsOciRefs, mkfsArgs)
     default:
         return fmt.Errorf("got unexpected format %s", format)
     }
@@ -696,10 +693,10 @@ func main() {
     if len(os.Args) == 1 {
         fmt.Fprintf(os.Stderr, "expected <pull|export|list|parse|image|dump>\n");
         fmt.Fprintf(os.Stderr, "  pull <oci-dir> <names...>\n");
-        fmt.Fprintf(os.Stderr, "  export <oci-dir> <names...>; writes to stdout\n");
+        fmt.Fprintf(os.Stderr, "  export <oci-dir> <names...>; writes tar to stdout\n");
         fmt.Fprintf(os.Stderr, "  list <oci-dir>\n");
         fmt.Fprintf(os.Stderr, "  parse <names...>\n");
-        fmt.Fprintf(os.Stderr, "  image [--force] <image.sqfs|image.erofs> <oci-dir> <names...>\n");
+        fmt.Fprintf(os.Stderr, "  image [--force] <image.sqfs|image.erofs|image.tar> <oci-dir> <names...> [--] [args for mkfs.erofs/sqfstar]\n");
         fmt.Fprintf(os.Stderr, "  dump <image.sqfs|image.erofs>\n");
         os.Exit(1)
     }
@@ -894,4 +891,13 @@ func openFile(s string) (*os.File, error) {
 
 func roundUpTo(x, N int) int {
     return ((x + (N - 1)) / N) * N
+}
+
+func splitArgsAtDashDash(args []string) ([]string, []string) {
+    for i := range args {
+        if args[i] == "--" {
+            return args[:i], args[i+1:]
+        }
+    }
+    return args, []string{}
 }
