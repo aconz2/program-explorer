@@ -24,7 +24,7 @@ use arc_swap::ArcSwap;
 
 use perunner::{worker,create_runtime_spec};
 use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size,ChLogLevel};
-use peimage::PEImageMultiIndex;
+use peimage::index::PEImageMultiIndex;
 
 use peserver::api;
 use peserver::api::ContentType;

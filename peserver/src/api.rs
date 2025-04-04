@@ -117,7 +117,7 @@ pub mod v1 {
         #[derive(Deserialize,Serialize)]
         pub struct Image {
             pub links: ImageLinks,
-            pub info: peimage::PEImageId,
+            pub info: peimage::index::PEImageId,
             pub config: oci_image::ImageConfiguration,
         }
 
@@ -126,8 +126,8 @@ pub mod v1 {
             pub images: Vec<Image>,
         }
 
-        impl From<&peimage::PEImageMultiIndex> for Response {
-            fn from(index: &peimage::PEImageMultiIndex) -> Self {
+        impl From<&peimage::index::PEImageMultiIndex> for Response {
+            fn from(index: &peimage::index::PEImageMultiIndex) -> Self {
                 let images: Vec<_> = index.map().iter()
                     .map(|(_k, v)| {
                         Image {

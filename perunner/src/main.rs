@@ -12,7 +12,7 @@ use clap::{Parser};
 
 use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
 use peinit::{ResponseFormat};
-use peimage::{PEImageMultiIndex,PEImageMultiIndexKeyType};
+use peimage::index::{PEImageMultiIndex,PEImageMultiIndexKeyType};
 
 use perunner::create_runtime_spec;
 
