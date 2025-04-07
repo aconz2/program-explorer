@@ -1,13 +1,18 @@
 use std::collections::BTreeSet;
 use std::io;
-use std::io::{Read,Write};
+use std::io::{Read,Write,Seek,SeekFrom};
 use std::path::{PathBuf,Path};
-use tar::{Archive,Entry,EntryType};
+use tar::{Archive,Entry,EntryType,Builder as ArchiveBuilder};
+use std::ops::Bound;
+use std::cmp::Ord;
+use std::borrow::Borrow;
+use flate2::read::GzDecoder;
 
 #[derive(Debug)]
 pub enum SquashError {
     Io(io::Error),
     OpaqueWhiteoutNoParent,
+    HardlinkNoLink,
 }
 
 impl From<io::Error> for SquashError {
@@ -22,55 +27,127 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
-pub fn squash<W, R>(layers: &mut [Archive<R>], _out: &mut W)
+// so GzDecoder doesn't have an option for R+Seek, so we instead take the underlying
+// reader directly. That does mean we are not agnostic to the compression which is a bit annoying
+// but in practice I think everything is (unfortunately) tgz
+
+pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W)
     -> Result<(), SquashError>
     where W: Write,
-          R: Sized + Read,
+          R: Read + Seek,
 {
 
-    let mut deleted_files = BTreeSet::new();
-    let mut deleted_opaques = BTreeSet::new();
+    let mut deletions = Deletions::default();
+    let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
-    for layer in layers.iter_mut().rev() {
-        for entry in layer.entries()? {
-            let entry = entry?;
+    let mut aw = ArchiveBuilder::new(out);
 
-            //let name = entry.path()?.file_name()
-            match whiteout(&entry)? {
-                Some(Whiteout::File(path)) => {
-                    deleted_files.insert(path);
-                    continue;
+    for reader in layer_readers.iter_mut().rev() {
+        { // pass 1
+            // &mut * creates a fresh borrow
+            let mut layer = Archive::new(GzDecoder::new(&mut *reader));
+            for entry in layer.entries()? {
+                let entry = entry?;
+
+                match whiteout(&entry)? {
+                    Some(Whiteout::File(path)) => {
+                        deletions.push_file(path);
+                        continue;
+                    }
+                    Some(Whiteout::Opaque(path)) => {
+                        deletions.push_opaque(path);
+                        continue;
+                    }
+                    _ => {}
                 }
-                Some(Whiteout::Opaque(path)) => {
-                    deleted_opaques.insert(path);
-                    continue;
+
+                if entry.header().entry_type() == EntryType::Link && !deletions.is_deleted(&entry.path()?) {
+                    if let Some(link) = entry.link_name()? {
+                        hardlinks.insert(link.into());
+                    } else {
+                        return Err(SquashError::HardlinkNoLink);
+                    }
                 }
-                _ => {}
+            }
+        }
+
+        reader.seek(SeekFrom::Start(0))?;
+
+        { // pass 2
+            let mut layer = Archive::new(GzDecoder::new(&mut *reader));
+            for entry in layer.entries()? {
+                let mut entry = entry?;
+
+                // skip whiteouts
+                match whiteout(&entry)? {
+                    Some(Whiteout::File(_)) |
+                    Some(Whiteout::Opaque(_)) => {
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                if deletions.is_deleted(entry.path()?) {
+
+                }
+
+                // annoying we have to clone the header
+                aw.append(&entry.header().clone(), &mut entry)?;
+
             }
 
-            let path = &entry.path()?;
-            if deleted_files.contains(path.as_ref()) {
-                println!("yo this file got deleted {:?}", path);
-            }
+        }
 
-            if opaque_deleted(&deleted_opaques, path) {
-                println!("yo this file got deleted because of an opaque {:?}", path);
-            }
-
-            drop(entry);
+        { // end of layer, updated deleted_{files,opaques}
+            deletions.end_of_layer();
         }
     }
-    for path in deleted_files.iter() {
-        println!("deleted file {:?}", path);
-    }
-    for path in deleted_opaques.iter() {
-        println!("deleted opaques {:?}", path);
-    }
+
     Ok(())
 }
 
+#[derive(Default)]
+struct Deletions {
+    files: BTreeSet<PathBuf>,
+    opaques: BTreeSet<PathBuf>,
+
+    files_q: Vec<PathBuf>,
+    opaques_q: Vec<PathBuf>,
+}
+
+
+impl Deletions {
+    fn push_file(&mut self, p: PathBuf) {
+        self.files_q.push(p);
+    }
+    fn push_opaque(&mut self, p: PathBuf) {
+        self.opaques_q.push(p.into());
+    }
+
+    fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> bool {
+        self.files.contains(p.as_ref()) || opaque_deleted(&self.opaques, p)
+    }
+
+    fn end_of_layer(&mut self) {
+        self.files.extend(self.files_q.drain(..));
+        self.opaques.extend(self.opaques_q.drain(..));
+    }
+}
+
+
 fn opaque_deleted<P: AsRef<Path>>(opaques: &BTreeSet<PathBuf>, path: P) -> bool {
-    todo!()
+    if let Some(prefix) = lower_bound(opaques, path.as_ref()) {
+        path.as_ref().starts_with(prefix)
+    } else {
+        false
+    }
+}
+
+fn lower_bound<'a, K, T>(set: &'a BTreeSet<T>, key: &K) -> Option<&'a T>
+    where T: Borrow<K> + Ord,
+          K: Ord + ?Sized {
+    let mut iter = set.range((Bound::Unbounded, Bound::Excluded(key)));
+    iter.next_back()
 }
 
 fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> {
@@ -105,7 +182,6 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
 
 #[cfg(test)]
 mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
     use tar::{Builder,Header};
@@ -122,23 +198,14 @@ mod tests {
         h.set_size(data.len() as u64);
         h.set_cksum();
 
-        let mut b = Builder::new(io::Cursor::new(vec![]));
-        b.append(&h, data).unwrap();
-        let mut buf = b.into_inner().unwrap();
-        buf.seek(SeekFrom::Start(0)).unwrap();
+        let buf = {
+            let mut b = Builder::new(io::Cursor::new(vec![]));
+            b.append(&h, data).unwrap();
+            let mut buf = b.into_inner().unwrap();
+            buf.seek(SeekFrom::Start(0)).unwrap();
+            buf
+        };
 
-        {
-        use std::fs::File;
-        let mut f = File::create("/tmp/myarchive.tar").unwrap();
-        std::io::copy(&mut buf, &mut f).unwrap();
-        }
-
-        buf.seek(SeekFrom::Start(0)).unwrap();
-        //println!("{:?}", buf);
-        {
-        let mut ar = Archive::new(buf.clone());
-        println!("got count {}", ar.entries().unwrap().count());
-        }
         let mut ar = Archive::new(buf);
         let entry = ar.entries()
             .unwrap()
@@ -150,9 +217,34 @@ mod tests {
 
     #[test]
     fn test_opaque() {
-        make_entry("foo", &b"foooo"[..], |e| {
-            assert!(whiteout(&e).unwrap().is_none());
+        make_entry("foo", &b"data"[..], |e| {
+            assert_eq!(whiteout(&e).unwrap(), None);
         });
 
+        make_entry(".wh.foo", &b"data"[..], |e| {
+            assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::File("foo".into())));
+        });
+
+        make_entry("dir/.wh..wh..opq", &b""[..], |e| {
+            assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Opaque("dir".into())));
+        });
+
+    }
+
+    #[test]
+    fn test_lower_bound() {
+        let set: BTreeSet<_> = vec!["dir1/", "dir2/dir3/"].into_iter().collect();
+        assert_eq!(lower_bound(&set, "dir1/file"), Some("dir1/").as_ref());
+        assert_eq!(lower_bound(&set, "dir0/file"), None);
+        assert_eq!(lower_bound(&set, "dir2/file"), Some("dir2/dir3/").as_ref());
+    }
+
+    #[test]
+    fn test_opaque_deleted() {
+        let set: BTreeSet<PathBuf> = vec!["dir1/", "dir2/dir3/"].into_iter().map(|x| x.into()).collect();
+        assert!(opaque_deleted(&set, "dir1/file"));
+        assert!(opaque_deleted(&set, "dir2/dir3/file"));
+        assert!(!opaque_deleted(&set, "dir0/file"));
+        assert!(!opaque_deleted(&set, "dir2/file"));
     }
 }

@@ -9,7 +9,7 @@ use peimage::squash::squash;
 fn main() {
     let mut layers: Vec<_> = env::args().skip(1)
         .map(|x| File::open(x).unwrap())
-        .map(|x| Archive::new(GzDecoder::new(x)))
+        //.map(|x| Archive::new(GzDecoder::new(x)))
         .collect();
 
     squash(&mut layers, &mut io::stdout()).unwrap();
