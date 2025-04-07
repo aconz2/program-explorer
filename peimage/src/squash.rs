@@ -29,10 +29,29 @@ enum Whiteout {
 
 // important notes about the OCI spec
 // "Extracting a layer with hardlink references to files outside of the layer may fail."
-
-// so GzDecoder doesn't have an option for R+Seek, so we instead take the underlying
+//
+// so GzDecoder doesn't have an option for Read+Seek, so we instead take the underlying
 // reader directly. That does mean we are not agnostic to the compression which is a bit annoying
 // but in practice I think everything is (unfortunately) tgz
+// this does make testing slightly more annoying since we first compress our layers. I
+// considered either dynamically checking or something like that but gets complicated
+//
+// compared to sylabs https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go
+// we do not store the contents of every file in memory, but we do have to have a seekable
+// stream since we take a second pass. Using libz-ng, a second pass through is less of a time
+// concern, but it does still mean you can't stream in. This also implements a better check of
+// opaque deleted/shadowed files in my opinion because they check each path component of each file
+// against a map from string to (bool, bool) which is a huge number of lookups. Here we can use
+// a btree and then check the prefix (cry for a trie, but idk if it would really be
+// worth it here)
+// Hardlinks are annoying means that on our first pass through TODO
+//
+// Total memory usage is something like the sum of path lengths from all entries, since we store
+// deleted ones, opaque ones, and non-deleted ones since these then get shown as, minus the size of
+// those paths lengths from the first layer. This is actually pretty good for containers with a
+// big first layer and some smaller layers after that.
+// note we don't have to store deletions on the first (last iteration) layer since we wouldn't
+// check them
 
 pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<(), SquashError>
 where
@@ -44,9 +63,10 @@ where
 
     let mut aw = ArchiveBuilder::new(out);
 
+    // TODO use itertools and with_position to skip storing deletions on last iteration
     for reader in layer_readers.iter_mut().rev() {
         {
-            // pass 1
+            // pass 1: gather all whiteouts and hard links
             // &mut * creates a fresh borrow
             let mut layer = Archive::new(GzDecoder::new(&mut *reader));
             for entry in layer.entries()? {
@@ -79,7 +99,7 @@ where
         reader.seek(SeekFrom::Start(0))?;
 
         {
-            // pass 2
+            // pass 2:
             let mut layer = Archive::new(GzDecoder::new(&mut *reader));
             for entry in layer.entries()? {
                 let mut entry = entry?;
@@ -99,6 +119,7 @@ where
                 // annoying we have to clone the header
                 aw.append(&entry.header().clone(), &mut entry)?;
 
+                // once we write a file, we mark it as deleted so we do not write it again
                 deletions.push_file(entry.path()?.into());
             }
         }
@@ -128,11 +149,9 @@ impl Deletions {
     fn push_opaque(&mut self, p: PathBuf) {
         self.opaques_q.push(p.into());
     }
-
     fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> bool {
         self.files.contains(p.as_ref()) || opaque_deleted(&self.opaques, p)
     }
-
     fn end_of_layer(&mut self) {
         self.files.extend(self.files_q.drain(..));
         self.opaques.extend(self.opaques_q.drain(..));
@@ -194,7 +213,7 @@ mod tests {
     use std::io::{Cursor, Seek, SeekFrom};
     use tar::{Builder, Header};
 
-    // E is a standalone redux entry
+    // E is a standalone redux Entry
     #[derive(Debug, PartialOrd, Ord, PartialEq, Eq)]
     enum E {
         File { path: PathBuf, data: Vec<u8> },
@@ -216,13 +235,6 @@ mod tests {
             Self::Link {
                 path: path.into(),
                 link: link.into(),
-            }
-        }
-        fn path(&self) -> &PathBuf {
-            match self {
-                E::File { path, .. } => path,
-                E::Dir { path } => path,
-                E::Link { path, .. } => path,
             }
         }
     }
@@ -307,8 +319,6 @@ mod tests {
         let mut h = Header::new_ustar();
         h.set_path(path).unwrap();
         h.set_entry_type(EntryType::Regular);
-        h.set_uid(1000);
-        h.set_gid(1000);
         h.set_size(data.len() as u64);
         h.set_cksum();
 
