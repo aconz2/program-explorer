@@ -1,13 +1,13 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
-use std::path::{Path,PathBuf};
-use std::io::{Seek,SeekFrom,Read};
-use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-use serde::{Serialize,Deserialize};
+use byteorder::{ReadBytesExt, LE};
 use oci_spec::image as oci_image;
-use byteorder::{ReadBytesExt,LE};
 use peinit::RootfsKind;
+use serde::{Deserialize, Serialize};
 
 const INDEX_JSON_MAGIC: u64 = 0x1db56abd7b82da38;
 
@@ -30,14 +30,16 @@ impl PEImageId {
                 let tag = &self.tag;
                 let repository = &self.repository;
                 let digest = self.digest.replace(":", "-");
-                Some(format!("https://hub.docker.com/layers/{repository}/{tag}/images/{digest}"))
+                Some(format!(
+                    "https://hub.docker.com/layers/{repository}/{tag}/images/{digest}"
+                ))
             }
             "quay.io" => {
                 let repository = &self.repository;
                 let digest = &self.digest;
                 Some(format!("https://quay.io/repository/{repository}/{digest}"))
             }
-            _ => None
+            _ => None,
         }
     }
 }
@@ -52,7 +54,7 @@ pub struct PEImageIndexEntry {
 
 #[derive(Debug, Deserialize)]
 pub struct PEImageIndex {
-    pub images: Vec<PEImageIndexEntry>
+    pub images: Vec<PEImageIndexEntry>,
 }
 
 impl PEImageIndex {
@@ -63,22 +65,35 @@ impl PEImageIndex {
     pub fn from_file(f: &mut File) -> io::Result<Self> {
         let len = f.metadata()?.len();
         if len < (8 + 4) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "file too short to have magic"))
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file too short to have magic",
+            ));
         }
         f.seek(SeekFrom::End(-i64::from(8 + 4)))?;
         let data_size = f.read_u32::<LE>()?;
         let magic = f.read_u64::<LE>()?;
         if magic != INDEX_JSON_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "file doesn't end with magic"))
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file doesn't end with magic",
+            ));
         }
         if u64::from(data_size) + 8 + 4 > len {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "file too short to hold index.json"))
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file too short to hold index.json",
+            ));
         }
         f.seek(SeekFrom::End(-i64::from(8 + 4 + data_size)))?;
         let mut buf = vec![0; data_size as usize];
         f.read_exact(&mut buf)?;
-        serde_json::from_slice(buf.as_slice())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "index.json not valid PEImageIndex"))
+        serde_json::from_slice(buf.as_slice()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index.json not valid PEImageIndex",
+            )
+        })
     }
 }
 
@@ -103,11 +118,14 @@ impl PEImageMultiIndex {
     pub fn new(key_type: PEImageMultiIndexKeyType) -> PEImageMultiIndex {
         Self {
             key_type: key_type,
-            map: HashMap::new()
+            map: HashMap::new(),
         }
     }
 
-    pub fn from_paths<P: AsRef<Path>>(key_type: PEImageMultiIndexKeyType, paths: &[P]) -> io::Result<Self> {
+    pub fn from_paths<P: AsRef<Path>>(
+        key_type: PEImageMultiIndexKeyType,
+        paths: &[P],
+    ) -> io::Result<Self> {
         let mut ret = Self::new(key_type);
         for p in paths {
             ret.add_path(p)?;
@@ -125,7 +143,7 @@ impl PEImageMultiIndex {
                 // boo we can't match a static str against OsStr...
                 //Some("erofs") | Some("sqfs") => true,
                 Some(s) => s == "erofs" || s == "sqfs",
-                _ => false
+                _ => false,
             }
         }
 
@@ -140,15 +158,19 @@ impl PEImageMultiIndex {
 
     pub fn add_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
         let idx = PEImageIndex::from_path(&path)?;
-        let rootfs_kind = RootfsKind::try_from_path_name(&path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "couldn't determine rootfs kind"))?;
+        let rootfs_kind = RootfsKind::try_from_path_name(&path).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "couldn't determine rootfs kind")
+        })?;
         let pathbuf: PathBuf = path.as_ref().to_path_buf();
         for image in idx.images {
             let key = image.id.name();
             if self.map.contains_key(&key) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "duplicate image id name"))
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "duplicate image id name",
+                ));
             }
-            let entry = PEImageMultiIndexEntry{
+            let entry = PEImageMultiIndexEntry {
                 path: pathbuf.clone(),
                 image: image.clone(),
                 rootfs_kind: rootfs_kind,

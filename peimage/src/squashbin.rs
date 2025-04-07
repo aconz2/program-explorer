@@ -7,7 +7,8 @@ use std::io;
 use peimage::squash::squash;
 
 fn main() {
-    let mut layers: Vec<_> = env::args().skip(1)
+    let mut layers: Vec<_> = env::args()
+        .skip(1)
         .map(|x| File::open(x).unwrap())
         //.map(|x| Archive::new(GzDecoder::new(x)))
         .collect();
