@@ -27,6 +27,9 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
+// important notes about the OCI spec
+// "Extracting a layer with hardlink references to files outside of the layer may fail."
+
 // so GzDecoder doesn't have an option for R+Seek, so we instead take the underlying
 // reader directly. That does mean we are not agnostic to the compression which is a bit annoying
 // but in practice I think everything is (unfortunately) tgz
@@ -187,6 +190,101 @@ mod tests {
     use tar::{Builder,Header};
     use std::io::{Seek,SeekFrom,Cursor};
 
+    // E is a standalone redux entry
+    #[derive(Debug,PartialOrd,Ord,PartialEq,Eq)]
+    enum E {
+        File {
+            path: PathBuf,
+            data: Vec<u8>,
+        },
+        Dir {
+            path: PathBuf,
+        },
+        Link {
+            path: PathBuf,
+            link: PathBuf,
+        }
+    }
+
+    impl E {
+        fn file(path: &str, data: &[u8]) -> Self {
+            Self::File {path: path.into(), data: Vec::from(data)}
+        }
+        fn dir(path: &str) -> Self {
+            Self::Dir {path: path.into()}
+        }
+        fn link(path: &str, link: &str) -> Self {
+            Self::Link {path: path.into(), link: link.into()}
+        }
+        fn path(&self) -> &PathBuf {
+            match self {
+                E::File{path,..} => path,
+                E::Dir{path} => path,
+                E::Link{path,..} => path,
+            }
+        }
+    }
+
+    type EList = BTreeSet<E>;
+
+    fn serialize(entries: &[E]) -> Vec<u8> {
+        let mut writer = ArchiveBuilder::new(io::Cursor::new(vec![]));
+        for entry in entries {
+            let mut h = Header::new_ustar();
+            match entry {
+                E::File{path, data} => {
+                    h.set_path(path.clone()).unwrap();
+                    h.set_entry_type(EntryType::Regular);
+                    h.set_size(data.len() as u64);
+                    h.set_cksum();
+                    writer.append(&h, io::Cursor::new(&data)).unwrap();
+                }
+                E::Dir{path} => {
+                    h.set_path(path.clone()).unwrap();
+                    h.set_entry_type(EntryType::Directory);
+                    h.set_cksum();
+                    h.set_size(0);
+                    writer.append(&h, &b""[..]).unwrap();
+                }
+                E::Link{path,link} => {
+                    h.set_path(path.clone()).unwrap();
+                    h.set_entry_type(EntryType::Link);
+                    h.set_link_name(link).unwrap();
+                    h.set_size(0);
+                    h.set_cksum();
+                    writer.append(&h, &b""[..]).unwrap();
+                }
+            }
+        }
+        writer.into_inner().unwrap().into_inner()
+    }
+
+    fn deserialize(data: &[u8]) -> EList {
+        let mut reader = Archive::new(io::Cursor::new(data));
+        reader.entries()
+            .unwrap()
+            .map(|x| x.unwrap())
+            .map(|mut x| {
+                let path = x.path().unwrap().into();
+                match x.header().entry_type() {
+                    EntryType::Regular => {
+                        let mut data = vec![];
+                        x.read_to_end(&mut data).unwrap();
+                        E::File{path, data}
+                    }
+                    EntryType::Directory => {
+                        E::Dir{path}
+                    }
+                    EntryType::Link => {
+                        let link = x.link_name().unwrap().unwrap().into();
+                        E::Link{path, link}
+                    }
+                    x => { panic!("unhandled entry type {x:?}"); }
+                }
+            })
+            .collect()
+    }
+
     fn make_entry<P, F, B>(path: P, data: &[u8], f: F) -> B
         where P: AsRef<Path>,
               F: Fn(Entry<'_, Cursor<Vec<u8>>>) -> B {
@@ -233,7 +331,8 @@ mod tests {
 
     #[test]
     fn test_lower_bound() {
-        let set: BTreeSet<_> = vec!["dir1/", "dir2/dir3/"].into_iter().collect();
+        // ascii / is l
+        let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
         assert_eq!(lower_bound(&set, "dir1/file"), Some("dir1/").as_ref());
         assert_eq!(lower_bound(&set, "dir0/file"), None);
         assert_eq!(lower_bound(&set, "dir2/file"), Some("dir2/dir3/").as_ref());
@@ -241,10 +340,20 @@ mod tests {
 
     #[test]
     fn test_opaque_deleted() {
-        let set: BTreeSet<PathBuf> = vec!["dir1/", "dir2/dir3/"].into_iter().map(|x| x.into()).collect();
+        let set: BTreeSet<PathBuf> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().map(|x| x.into()).collect();
         assert!(opaque_deleted(&set, "dir1/file"));
         assert!(opaque_deleted(&set, "dir2/dir3/file"));
         assert!(!opaque_deleted(&set, "dir0/file"));
         assert!(!opaque_deleted(&set, "dir2/file"));
+    }
+
+    #[test]
+    fn test_serde() {
+        let entries = vec![
+            E::file("x", b"hi"),
+            E::link("y", "x"),
+        ];
+        let buf = serialize(&entries);
+        assert_eq!(entries.into_iter().collect::<EList>(), deserialize(&buf));
     }
 }
