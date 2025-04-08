@@ -19,5 +19,9 @@ path = "src/lib.rs"
 name = "squash"
 path = "src/squashbin.rs"
 
+[[bin]]
+name = "squash-podman"
+path = "src/squashpodman.rs"
+
 [lints]
 workspace = true

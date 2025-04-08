@@ -30,9 +30,11 @@ enum Whiteout {
 // important notes about the OCI spec
 // "Extracting a layer with hardlink references to files outside of the layer may fail."
 //
-// so GzDecoder doesn't have an option for Read+Seek, so we instead take the underlying
-// reader directly. That does mean we are not agnostic to the compression which is a bit annoying
-// but in practice I think everything is (unfortunately) tgz
+// so GzDecoder doesn't have an option for Read+Seek,. What we really want is a trait for
+// SeekStart since we don't expect to be able to randomly seek in a compressed stream but we can
+// easily restart from the beginning. Instead take the underlying reader directly.
+// That does mean we are not agnostic to the compression which is a bit annoying
+// but in practice I think everything is (unfortunately) tgz TODO not true, tar+{,gzip,zstd}
 // this does make testing slightly more annoying since we first compress our layers. I
 // considered either dynamically checking or something like that but gets complicated
 //
@@ -59,58 +61,44 @@ where
     R: Read + Seek,
 {
     let mut deletions = Deletions::default();
-    let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
+    //let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
     let mut aw = ArchiveBuilder::new(out);
 
-    // TODO use itertools and with_position to skip storing deletions on last iteration
-    for reader in layer_readers.iter_mut().rev() {
+    // we do enumerate, then rev, so i==0 is layer_readers[0] and is our last layer to be processed
+    // where we can skip storing deletions
+    for (i, reader) in layer_readers.iter_mut().enumerate().rev() {
         {
             // pass 1: gather all whiteouts and hard links
             // &mut * creates a fresh borrow
             let mut layer = Archive::new(GzDecoder::new(&mut *reader));
             for entry in layer.entries()? {
-                let entry = entry?;
-
-                match whiteout(&entry)? {
-                    Some(Whiteout::File(path)) => {
-                        deletions.push_file(path);
-                        continue;
-                    }
-                    Some(Whiteout::Opaque(path)) => {
-                        deletions.push_opaque(path);
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                if entry.header().entry_type() == EntryType::Link
-                    && !deletions.is_deleted(&entry.path()?)
-                {
-                    if let Some(link) = entry.link_name()? {
-                        hardlinks.insert(link.into());
-                    } else {
-                        return Err(SquashError::HardlinkNoLink);
-                    }
-                }
-            }
-        }
-
-        reader.seek(SeekFrom::Start(0))?;
-
-        {
-            // pass 2:
-            let mut layer = Archive::new(GzDecoder::new(&mut *reader));
-            for entry in layer.entries()? {
                 let mut entry = entry?;
 
-                // skip whiteouts
-                match whiteout(&entry)? {
-                    Some(Whiteout::File(_)) | Some(Whiteout::Opaque(_)) => {
-                        continue;
+                // only have to store deletions
+                if i != 0 {
+                    match whiteout(&entry)? {
+                        Some(Whiteout::File(path)) => {
+                            deletions.push_file(path);
+                            continue;
+                        }
+                        Some(Whiteout::Opaque(path)) => {
+                            deletions.push_opaque(path);
+                            continue;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+
+                //if entry.header().entry_type() == EntryType::Link
+                //    && !deletions.is_deleted(&entry.path()?)
+                //{
+                //    if let Some(link) = entry.link_name()? {
+                //        hardlinks.insert(link.into());
+                //    } else {
+                //        return Err(SquashError::HardlinkNoLink);
+                //    }
+                //}
 
                 if deletions.is_deleted(entry.path()?) {
                     continue;
@@ -120,12 +108,42 @@ where
                 aw.append(&entry.header().clone(), &mut entry)?;
 
                 // once we write a file, we mark it as deleted so we do not write it again
-                deletions.push_file(entry.path()?.into());
+                if i != 0 {
+                    deletions.push_file(entry.path()?.into());
+                }
             }
         }
 
-        {
-            // end of layer, updated deleted_{files,opaques}
+        //reader.seek(SeekFrom::Start(0))?;
+
+        //{
+        //    // pass 2:
+        //    let mut layer = Archive::new(GzDecoder::new(&mut *reader));
+        //    for entry in layer.entries()? {
+        //        let mut entry = entry?;
+        //
+        //        // skip whiteouts
+        //        match whiteout(&entry)? {
+        //            Some(Whiteout::File(_)) | Some(Whiteout::Opaque(_)) => {
+        //                continue;
+        //            }
+        //            _ => {}
+        //        }
+        //
+        //        if deletions.is_deleted(entry.path()?) {
+        //            continue;
+        //        }
+        //
+        //        // annoying we have to clone the header
+        //        aw.append(&entry.header().clone(), &mut entry)?;
+        //
+        //        // once we write a file, we mark it as deleted so we do not write it again
+        //        deletions.push_file(entry.path()?.into());
+        //    }
+        //}
+
+        // end of layer, updated deleted_{files,opaques}
+        if i != 0 {
             deletions.end_of_layer();
         }
     }
@@ -335,19 +353,34 @@ mod tests {
         f(entry)
     }
 
+    #[rustfmt::skip]
     #[test]
     fn test_opaque() {
         make_entry("foo", &b"data"[..], |e| {
             assert_eq!(whiteout(&e).unwrap(), None);
         });
 
-        make_entry(".wh.foo", &b"data"[..], |e| {
-            assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::File("foo".into())));
-        });
+        let files = vec![
+            (".wh.foo", "foo"),
+            ("dir/.wh.foo", "dir/foo"),
+        ];
 
-        make_entry("dir/.wh..wh..opq", &b""[..], |e| {
-            assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Opaque("dir".into())));
-        });
+        let dirs = vec![
+            ("dir/.wh..wh..opq", "dir"),
+            ("dir1/dir2/.wh..wh..opq", "dir1/dir2"),
+        ];
+
+        for (x, y) in files.into_iter() {
+            make_entry(x, &b"data"[..], |e| {
+                assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::File(y.into())));
+            });
+        }
+
+        for (x, y) in dirs.into_iter() {
+            make_entry(x, &b""[..], |e| {
+                assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Opaque(y.into())));
+            });
+        }
     }
 
     #[test]
@@ -367,6 +400,7 @@ mod tests {
             .collect();
         assert!(opaque_deleted(&set, "dir1/file"));
         assert!(opaque_deleted(&set, "dir2/dir3/file"));
+        assert!(!opaque_deleted(&set, "dir1file"));
         assert!(!opaque_deleted(&set, "dir0/file"));
         assert!(!opaque_deleted(&set, "dir2/file"));
     }
@@ -388,47 +422,68 @@ mod tests {
         deserialize(&buf.into_inner())
     }
 
-    fn check_squash(layers: Vec<Vec<E>>, expected: Vec<E>) {
-        assert_eq!(
-            squash_layers_vec(layers),
-            expected.into_iter().collect::<EList>()
-        );
+    macro_rules! check_squash {
+        ($layers:expr, $expected:expr) => ({
+            assert_eq!(
+                squash_layers_vec($layers),
+                $expected.into_iter().collect::<EList>()
+            );
+        })
     }
 
+    #[rustfmt::skip]
     #[test]
     fn test_squash_file_overwrite() {
         // overwrite of a file
-        check_squash(
-            vec![vec![E::file("x", b"hi")], vec![E::file("x", b"bye")]],
-            vec![E::file("x", b"bye")],
+        check_squash!(
+            vec![
+                vec![E::file("x", b"hi")],
+                vec![E::file("x", b"bye")],
+            ],
+            vec![E::file("x", b"bye")]
         );
     }
 
+    #[rustfmt::skip]
     #[test]
     fn test_squash_file_whiteout() {
         // whiteout of a file
-        check_squash(
-            vec![vec![E::file("x", b"hi")], vec![E::file(".wh.x", b"")]],
-            vec![],
+        check_squash!(
+            vec![
+                vec![E::file("x", b"hi")],
+                vec![E::file(".wh.x", b"")],
+            ],
+            vec![]
         );
 
         // whiteout of a non-matching file
-        check_squash(
-            vec![vec![E::file("x", b"hi")], vec![E::file(".wh.xyz", b"")]],
-            vec![E::file("x", b"hi")],
+        check_squash!(
+            vec![
+                vec![E::file("x", b"hi")],
+                vec![E::file(".wh.xyz", b"")],
+            ],
+            vec![E::file("x", b"hi")]
         );
     }
 
+    #[rustfmt::skip]
     #[test]
     fn test_squash_opaque_whiteout() {
-        check_squash(
-            vec![vec![E::dir("x"), E::file("x/f", b"hi")], vec![E::file(".wh..wh.x", b"")]],
-            vec![E::dir("x")],
+        check_squash!(
+            vec![
+                vec![E::dir("x"), E::file("x/f", b"hi"), E::file("xfile", b"hello")],
+                vec![E::file("x/.wh..wh..opq", b"")],
+            ],
+            vec![E::dir("x"), E::file("xfile", b"hello")]
         );
 
-        check_squash(
-            vec![vec![E::dir("x"), E::file("x/f", b"hi")], vec![E::file(".wh..wh.x", b""), E::file("x/g", b"bye")]],
-            vec![E::dir("x"), E::file("x/g", b"bye")],
+        check_squash!(
+            vec![
+                vec![E::dir("x"), E::file("x/f", b"hi")],
+                vec![E::file("x/.wh..wh..opq", b""), E::file("x/g", b"bye")],
+            ],
+            vec![E::dir("x"), E::file("x/g", b"bye")]
         );
     }
+
 }
