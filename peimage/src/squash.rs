@@ -423,12 +423,12 @@ mod tests {
     }
 
     macro_rules! check_squash {
-        ($layers:expr, $expected:expr) => ({
+        ($layers:expr, $expected:expr) => {{
             assert_eq!(
                 squash_layers_vec($layers),
                 $expected.into_iter().collect::<EList>()
             );
-        })
+        }};
     }
 
     #[rustfmt::skip]
@@ -485,5 +485,4 @@ mod tests {
             vec![E::dir("x"), E::file("x/g", b"bye")]
         );
     }
-
 }

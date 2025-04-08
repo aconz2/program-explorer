@@ -23,5 +23,9 @@ path = "src/squashbin.rs"
 name = "squash-podman"
 path = "src/squashpodman.rs"
 
+[[bin]]
+name = "squash-oci"
+path = "src/squashoci.rs"
+
 [lints]
 workspace = true
