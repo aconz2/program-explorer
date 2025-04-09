@@ -593,3 +593,10 @@ noz  2585 MB,  42s, 197 ms
 just building the squashed tar stream (peimage export) for clang:{17,19} takes 42s writing to a tmpfile, the mkfs.erofs for that takes 2.68s (5.4 with lz4 compression)
 
 the pax extension header I am hitting with gcc:13.3.0 NetLock cert path with utf8 chars uses the key `path` and/or `linkpath`
+
+initial results for building with new squasher is looking nice
+mkfifo fifo
+perf stat sh -c '../target/release/squash-oci /mnt/storage/program-explorer/ocidir index.docker.io/silkeh/clang:17 > fifo & mkfs.erofs --tar=f --workers=1 -zlz4 /tmp/clang17.lz4.erofs fifo'
+    3.988766890 seconds time elapsed
+    3.056409000 seconds user
+    2.166840000 seconds sys
