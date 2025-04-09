@@ -208,9 +208,12 @@ func isNonNumericUidGid(user string) bool {
     return !re.MatchString(user)
 }
 
-func mainExport(output io.Writer, args []string) ([]byte, error) {
+func mainExport(output io.Writer, args []string, transform bool) ([]byte, error) {
     if len(args) < 2 {
         return nil, fmt.Errorf("expected <oci dir> <names...>")
+    }
+    if transform == false && len(args) > 2 {
+        return nil, fmt.Errorf("Without transform, can only export single image expected <oci dir> <name>")
     }
     srcDir := args[0]
     l, err := layout.FromPath(srcDir)
@@ -283,11 +286,13 @@ func mainExport(output io.Writer, args []string) ([]byte, error) {
         Gid:      0,
     }
 
-    if err := tarWriter.WriteHeader(indexHeader); err != nil {
-        return nil, fmt.Errorf("writing tar index.json header: %w", err)
-    }
-    if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
-        return nil, fmt.Errorf("writing tar index.json file: %w", err)
+    if transform {
+        if err := tarWriter.WriteHeader(indexHeader); err != nil {
+            return nil, fmt.Errorf("writing tar index.json header: %w", err)
+        }
+        if _, err := io.Copy(tarWriter, bytes.NewReader(peidxBuf)); err != nil {
+            return nil, fmt.Errorf("writing tar index.json file: %w", err)
+        }
     }
 
     for rootfsDigest, img := range rootfsMap {
@@ -295,7 +300,11 @@ func mainExport(output io.Writer, args []string) ([]byte, error) {
         if !ok {
             panic("should be present")
         }
-        err = flatten(tarWriter, img, OffsetUidGid(UidGidOffset), PrependPath(prefix))
+        xforms := []HeaderXform{}
+        if transform {
+            xforms = []HeaderXform{OffsetUidGid(UidGidOffset), PrependPath(prefix)}
+        }
+        err = flatten(tarWriter, img, xforms...)
         if err != nil {
             return nil, fmt.Errorf("flattening rootfs %v %w", rootfsDigest, err)
         }
@@ -402,7 +411,7 @@ func mainImageSqfs(outfile string, exportArgs, mkfsArgs []string) (error) {
     if err = cmd.Start(); err != nil {
         return fmt.Errorf("error starting sqfstar %w", err)
     }
-    idxBuf, err := mainExport(stdin, exportArgs)
+    idxBuf, err := mainExport(stdin, exportArgs, true)
     if err != nil {
         return fmt.Errorf("error exporting %w", err)
     }
@@ -447,7 +456,7 @@ func mainImageErofs(outfile string, exportArgs, mkfsArgs []string) (error) {
     if err = cmd.Start(); err != nil {
         return fmt.Errorf("error starting mkfs.erofs %w", err)
     }
-    idxBuf, err := mainExport(fifo, exportArgs)
+    idxBuf, err := mainExport(fifo, exportArgs, true)
     if err != nil {
         return fmt.Errorf("error exporting %w", err)
     }
@@ -694,6 +703,7 @@ func main() {
         fmt.Fprintf(os.Stderr, "expected <pull|export|list|parse|image|dump>\n");
         fmt.Fprintf(os.Stderr, "  pull <oci-dir> <names...>\n");
         fmt.Fprintf(os.Stderr, "  export <oci-dir> <names...>; writes tar to stdout\n");
+        fmt.Fprintf(os.Stderr, "  export-notf <oci-dir> name; write single non-transformed tar to stdout\n");
         fmt.Fprintf(os.Stderr, "  list <oci-dir>\n");
         fmt.Fprintf(os.Stderr, "  parse <names...>\n");
         fmt.Fprintf(os.Stderr, "  image [--force] <image.sqfs|image.erofs|image.tar> <oci-dir> <names...> [--] [args for mkfs.erofs/sqfstar]\n");
@@ -703,7 +713,9 @@ func main() {
     err := error(nil)
     switch cmd := os.Args[1]; cmd {
     case "export":
-        _, err = mainExport(os.Stdout, os.Args[2:])
+        _, err = mainExport(os.Stdout, os.Args[2:], true)
+    case "export-notf":
+        _, err = mainExport(os.Stdout, os.Args[2:], false)
     case "pull":
         err = mainPull(os.Args[2:])
     case "list":

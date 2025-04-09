@@ -44,7 +44,7 @@ fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn error::E
         .arg("--format=oci-archive")
         .arg(image)
         .stdout(Stdio::piped())
-        .spawn()?; // kinda wish this would stream instead
+        .spawn()?;
 
     let mut archive = Archive::new(child.stdout.unwrap());
     let mut blobs = BTreeMap::new();

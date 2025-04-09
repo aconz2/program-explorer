@@ -3,16 +3,17 @@ use std::borrow::Borrow;
 use std::cmp::Ord;
 use std::collections::BTreeSet;
 use std::io;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
+use tar::{Archive, Builder as ArchiveBuilder, Entry};
 
 #[derive(Debug)]
 pub enum SquashError {
     Io(io::Error),
     OpaqueWhiteoutNoParent,
     HardlinkNoLink,
+    Finish,
 }
 
 impl From<io::Error> for SquashError {
@@ -75,19 +76,20 @@ where
             for entry in layer.entries()? {
                 let mut entry = entry?;
 
-                // only have to store deletions
-                if i != 0 {
-                    match whiteout(&entry)? {
-                        Some(Whiteout::File(path)) => {
+                match whiteout(&entry)? {
+                    Some(Whiteout::File(path)) => {
+                        if i != 0 {
                             deletions.push_file(path);
-                            continue;
                         }
-                        Some(Whiteout::Opaque(path)) => {
-                            deletions.push_opaque(path);
-                            continue;
-                        }
-                        _ => {}
+                        continue;
                     }
+                    Some(Whiteout::Opaque(path)) => {
+                        if i != 0 {
+                            deletions.push_opaque(path);
+                        }
+                        continue;
+                    }
+                    _ => {}
                 }
 
                 //if entry.header().entry_type() == EntryType::Link
@@ -99,12 +101,31 @@ where
                 //        return Err(SquashError::HardlinkNoLink);
                 //    }
                 //}
+                {
+                    let path: PathBuf = entry.path()?.into();
+                    // okay so both are coming back as ustar
+                    if path.as_path().as_os_str().to_str().unwrap().contains("NetLock") {
+                        eprintln!("got the netlock path path=`{:?}`, path_bytes=`{:?}`", path, entry.path_bytes());
+                        if let Some(_) = entry.header().as_ustar() {
+                            eprintln!("ustar");
+                        } else if let Some(_) = entry.header().as_gnu() {
+                            eprintln!("gnu");
+                        }
+                        let h = entry.header().clone();
+                        eprintln!("of clone             path=`{:?}`, path_bytes=`{:?}`", h.path().unwrap(), h.path_bytes());
+                    }
+                }
 
                 if deletions.is_deleted(entry.path()?) {
                     continue;
                 }
 
-                // annoying we have to clone the header
+                // NOTE some layers have GNU header type, no easy api besides
+                // if let Some(_) = entry.header().as_gnu() since is_gnu is private
+                //
+                //
+                // annoying we have to clone the header since we have to borrow the entry to read
+                // from
                 aw.append(&entry.header().clone(), &mut entry)?;
 
                 // once we write a file, we mark it as deleted so we do not write it again
@@ -148,7 +169,7 @@ where
         }
     }
 
-    Ok(())
+    aw.finish().map_err(|_| SquashError::Finish)
 }
 
 #[derive(Default)]
@@ -165,7 +186,7 @@ impl Deletions {
         self.files_q.push(p);
     }
     fn push_opaque(&mut self, p: PathBuf) {
-        self.opaques_q.push(p.into());
+        self.opaques_q.push(p);
     }
     fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> bool {
         self.files.contains(p.as_ref()) || opaque_deleted(&self.opaques, p)
@@ -199,6 +220,7 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
     //    return Ok(None)
     //}
     let path = entry.path()?; // can fail if not unicode
+    // TODO bad bad do prefix check against bytes, not string
     let name = {
         if let Some(name) = path.file_name().and_then(|x| x.to_str()) {
             name

@@ -11,6 +11,8 @@ serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0.132"
 flate2 = {version = "1.1.1", features = ["zlib-ng"] }
 tar = "0.4.44"
+sha2 = "0.10.8"
+base16ct = "0.2.0"
 
 [lib]
 path = "src/lib.rs"
@@ -26,6 +28,10 @@ path = "src/squashpodman.rs"
 [[bin]]
 name = "squash-oci"
 path = "src/squashoci.rs"
+
+[[bin]]
+name = "tardiff"
+path = "src/tardiff.rs"
 
 [lints]
 workspace = true

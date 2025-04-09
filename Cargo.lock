@@ -1253,12 +1253,14 @@ dependencies = [
 name = "peimage"
 version = "0.1.0"
 dependencies = [
+ "base16ct",
  "byteorder",
  "flate2",
  "oci-spec",
  "peinit",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
 ]
 
