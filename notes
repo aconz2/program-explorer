@@ -591,3 +591,5 @@ lz4: 1279 MB,  45s, 214 ms
 noz  2585 MB,  42s, 197 ms
 
 just building the squashed tar stream (peimage export) for clang:{17,19} takes 42s writing to a tmpfile, the mkfs.erofs for that takes 2.68s (5.4 with lz4 compression)
+
+the pax extension header I am hitting with gcc:13.3.0 NetLock cert path with utf8 chars uses the key `path` and/or `linkpath`

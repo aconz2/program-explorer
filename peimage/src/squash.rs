@@ -14,6 +14,7 @@ pub enum SquashError {
     OpaqueWhiteoutNoParent,
     HardlinkNoLink,
     Finish,
+    Utf8Error,
 }
 
 impl From<io::Error> for SquashError {
@@ -55,6 +56,15 @@ enum Whiteout {
 // big first layer and some smaller layers after that.
 // note we don't have to store deletions on the first (last iteration) layer since we wouldn't
 // check them
+//
+// Ran into some weirdness with unicode paths, in index.docker.io/library/gcc:13.3.0 there is a
+// file "etc/ssl/certs/NetLock_Arany_=Class_Gold=_Főtanúsítvány.pem" whose path name is 62 bytes
+// long, but for some reason the tar layer stored this utf8 path name in a pax extension header
+// (key = "path") and in the header itself is an asciify "etc/ssl/certs/NetLock_Arany_=Class_Gold=_Ftanstvny.pem"
+// and I wasn't writing out the pax extensions so the output tar was getting the ascii version
+//
+// GzDecoder will create a BufReader internally if it doesn't get a BufRead, so no need to pass in
+// a BufRead
 
 pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<(), SquashError>
 where
@@ -101,18 +111,29 @@ where
                 //        return Err(SquashError::HardlinkNoLink);
                 //    }
                 //}
-                {
+                if false {
                     let path: PathBuf = entry.path()?.into();
                     // okay so both are coming back as ustar
                     if path.as_path().as_os_str().to_str().unwrap().contains("NetLock") {
-                        eprintln!("got the netlock path path=`{:?}`, path_bytes=`{:?}`", path, entry.path_bytes());
+                        eprintln!("got the netlock path path=`{:?}`  path_bytes=`{:?}` len={}", path, entry.path_bytes(), entry.path_bytes().len());
+                        eprintln!("header says {:?} len={}", entry.header().path_bytes(), entry.header().path_bytes().len());
+                        if let Some(ext) = entry.pax_extensions().unwrap() {
+                            for e in ext.into_iter() {
+                                if let Ok(e) = e {
+                                    eprintln!("pax ext {:?} {:?}", e.key().unwrap(), e.value().unwrap());
+                                }
+                            }
+                        }
                         if let Some(_) = entry.header().as_ustar() {
                             eprintln!("ustar");
                         } else if let Some(_) = entry.header().as_gnu() {
                             eprintln!("gnu");
                         }
                         let h = entry.header().clone();
-                        eprintln!("of clone             path=`{:?}`, path_bytes=`{:?}`", h.path().unwrap(), h.path_bytes());
+                        eprintln!("of clone             path=`{:?}`, path_bytes=`{:?}` len={}", h.path().unwrap(), h.path_bytes(), h.path_bytes().len());
+                        if entry.header().as_bytes() != h.as_bytes() {
+                            eprintln!("wtf entry != h");
+                        }
                     }
                 }
 
@@ -120,10 +141,20 @@ where
                     continue;
                 }
 
-                // NOTE some layers have GNU header type, no easy api besides
-                // if let Some(_) = entry.header().as_gnu() since is_gnu is private
-                //
-                //
+                if let Some(extensions) = entry.pax_extensions()? {
+                    // even though PaxExtensions implements IntoIter, it has the wrong type, first
+                    // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
+                    // also because the key() returns a Result<&str> because it may not be valid
+                    // utf8
+                    let mut acc = vec![];
+                    for extension in extensions.into_iter() {
+                        let extension = extension?;
+                        let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
+                        let value = extension.value_bytes();
+                        acc.push((key, value));
+                    }
+                    aw.append_pax_extensions(acc)?;
+                }
                 // annoying we have to clone the header since we have to borrow the entry to read
                 // from
                 aw.append(&entry.header().clone(), &mut entry)?;

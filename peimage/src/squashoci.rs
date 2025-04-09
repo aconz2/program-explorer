@@ -1,9 +1,8 @@
-use std::env;
-use std::error;
-use std::fmt;
-use std::io;
+use std::{fmt,error,env};
 use std::fs::File;
 use std::path::PathBuf;
+use std::io::{BufWriter};
+use std::os::fd::FromRawFd;
 
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
@@ -62,7 +61,12 @@ fn main() {
     let dir = args.get(1).expect("give me an oci dir");
     let image = args.get(2).expect("give me an image name or digest");
 
-    let mut layers = load_layers_from_oci(dir, image).expect("getting layers failed");
+    let mut readers: Vec<_> = load_layers_from_oci(dir, image)
+        .expect("getting layers failed");
 
-    squash(&mut layers, &mut io::stdout()).unwrap();
+    let mut out = BufWriter::with_capacity(32 * 1024, unsafe { File::from_raw_fd(1) });
+    // this doesn't respect the buffer at all (with or without .lock())
+    //let mut out = BufWriter::new(io::stdout().lock());
+    //let mut out = BufWriter::with_capacity(4096 * 8, File::create("/tmp/mytar").unwrap());
+    squash(&mut readers, &mut out).unwrap();
 }

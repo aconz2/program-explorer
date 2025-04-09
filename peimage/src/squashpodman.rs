@@ -3,10 +3,11 @@ use std::env;
 use std::error;
 use std::ffi::OsStr;
 use std::fmt;
-use std::io;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, BufWriter};
 use std::process::{Command, Stdio};
 use tar::Archive;
+use std::fs::File;
+use std::os::fd::FromRawFd;
 
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
@@ -103,5 +104,6 @@ fn main() {
         .map(Cursor::new)
         .collect();
 
-    squash(&mut layers, &mut io::stdout()).unwrap();
+    let mut out = BufWriter::with_capacity(32 * 1024, unsafe { File::from_raw_fd(1) });
+    squash(&mut layers, &mut out).unwrap();
 }
