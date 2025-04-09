@@ -1,17 +1,18 @@
 use std::fs::File;
-use std::{io,env};
-use std::io::{BufWriter,BufReader};
+use std::env;
+use std::io::BufWriter;
+use std::os::fd::FromRawFd;
 
 use peimage::squash::squash;
 
 fn main() {
     let mut layers: Vec<_> = env::args()
         .skip(1)
-        .map(|x| BufReader::new(File::open(x).unwrap()))
+        .map(|x| File::open(x).unwrap())
         //.map(|x| Archive::new(GzDecoder::new(x)))
         .collect();
 
-    let mut out = BufWriter::new(io::stdout().lock());
+    let mut out = BufWriter::with_capacity(32 * 1024, unsafe { File::from_raw_fd(1) });
     squash(&mut layers, &mut out).unwrap();
 }
 

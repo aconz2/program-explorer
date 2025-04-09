@@ -59,23 +59,20 @@ fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn error::E
             // while we have an immutable borrow (annoying)
             let mut buf = vec![];
             entry.read_to_end(&mut buf)?;
-            match entry.path()?.strip_prefix("blobs/sha256/") {
-                Ok(blob) => {
-                    blobs.insert(
-                        blob.to_str()
-                            .ok_or(PodmanLoadError::BadBlobPath)?
-                            .to_string(),
-                        buf,
-                    );
-                }
-                _ => {}
+            if let Ok(blob) = entry.path()?.strip_prefix("blobs/sha256/") {
+                blobs.insert(
+                    blob.to_str()
+                        .ok_or(PodmanLoadError::BadBlobPath)?
+                        .to_string(),
+                    buf,
+                );
             }
         }
     }
     let index = index.ok_or(PodmanLoadError::NoIndex)?;
     let manifest = index
         .manifests()
-        .get(0)
+        .first()
         .ok_or(PodmanLoadError::NoManifest)?;
     // Digest should really implement Borrow<String>
     let manifest_blob = blobs

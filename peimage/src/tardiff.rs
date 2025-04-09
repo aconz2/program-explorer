@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::fs::File;
 
 use sha2::{Sha256,Digest};
-use base16ct;
 use tar::{Archive, EntryType};
 
 #[derive(Debug)]
@@ -49,9 +48,6 @@ fn gather_entries<R: Read>(ar: &mut Archive<R>) -> Result<BTreeSet<Entry>, Box<d
         let mut entry = entry?;
         let path: PathBuf = entry.path()?.into();
 
-        if path.as_path().as_os_str().to_str().unwrap().contains("NetLock") {
-            eprintln!("TARDIFF got the netlock path path=`{:?}`, path_bytes=`{:?}`", path, entry.path_bytes());
-        }
         match entry.header().entry_type() {
             EntryType::Regular => {
                 let digest = sha_reader(&mut entry)?;

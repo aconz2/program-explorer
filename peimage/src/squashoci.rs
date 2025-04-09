@@ -52,7 +52,7 @@ fn load_layers_from_oci(dir: &str, image: &str) -> Result<Vec<File>, Box<dyn err
 
     image_manifest.layers()
         .iter()
-        .map(|x| File::open(blobs.join(digest_path(x.digest()))).map_err(|x| Into::<Box<dyn error::Error>>::into(x)))
+        .map(|x| File::open(blobs.join(digest_path(x.digest()))).map_err(Into::<Box<dyn error::Error>>::into))
         .collect()
 }
 

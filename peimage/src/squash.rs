@@ -111,31 +111,6 @@ where
                 //        return Err(SquashError::HardlinkNoLink);
                 //    }
                 //}
-                if false {
-                    let path: PathBuf = entry.path()?.into();
-                    // okay so both are coming back as ustar
-                    if path.as_path().as_os_str().to_str().unwrap().contains("NetLock") {
-                        eprintln!("got the netlock path path=`{:?}`  path_bytes=`{:?}` len={}", path, entry.path_bytes(), entry.path_bytes().len());
-                        eprintln!("header says {:?} len={}", entry.header().path_bytes(), entry.header().path_bytes().len());
-                        if let Some(ext) = entry.pax_extensions().unwrap() {
-                            for e in ext.into_iter() {
-                                if let Ok(e) = e {
-                                    eprintln!("pax ext {:?} {:?}", e.key().unwrap(), e.value().unwrap());
-                                }
-                            }
-                        }
-                        if let Some(_) = entry.header().as_ustar() {
-                            eprintln!("ustar");
-                        } else if let Some(_) = entry.header().as_gnu() {
-                            eprintln!("gnu");
-                        }
-                        let h = entry.header().clone();
-                        eprintln!("of clone             path=`{:?}`, path_bytes=`{:?}` len={}", h.path().unwrap(), h.path_bytes(), h.path_bytes().len());
-                        if entry.header().as_bytes() != h.as_bytes() {
-                            eprintln!("wtf entry != h");
-                        }
-                    }
-                }
 
                 if deletions.is_deleted(entry.path()?) {
                     continue;
