@@ -27,11 +27,10 @@ enum Entry {
     Slink {path: PathBuf, link: PathBuf},
 }
 
-#[derive(Debug,Default)]
+#[derive(Debug)]
 struct Diffs {
     in_left_but_not_right: Vec<Entry>,
     in_right_but_not_left: Vec<Entry>,
-    //differing: Vec<(Entry, Entry)>,
 }
 
 fn sha_reader<R: Read>(reader: &mut R) -> io::Result<String> {
@@ -74,10 +73,10 @@ fn gather_entries<R: Read>(ar: &mut Archive<R>) -> Result<BTreeSet<Entry>, Box<d
 fn tardiff<R: Read>(left: R, right: R) -> Result<Diffs, Box<dyn error::Error>> {
     let left = gather_entries(&mut Archive::new(left))?;
     let right = gather_entries(&mut Archive::new(right))?;
-    let mut ret = Diffs::default();
-    ret.in_left_but_not_right = left.difference(&right).cloned().collect();
-    ret.in_right_but_not_left = right.difference(&left).cloned().collect();
-    Ok(ret)
+    Ok(Diffs{
+        in_left_but_not_right: left.difference(&right).cloned().collect(),
+        in_right_but_not_left: right.difference(&left).cloned().collect(),
+    })
 }
 
 fn main() {

@@ -6,7 +6,7 @@ use std::io;
 use std::io::{Read, Seek, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use tar::{Archive, Builder as ArchiveBuilder, Entry};
+use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -25,8 +25,19 @@ impl From<io::Error> for SquashError {
 
 #[derive(PartialEq, Debug)]
 enum Whiteout {
-    File(PathBuf),
+    Single(PathBuf),
     Opaque(PathBuf),
+}
+
+enum WhiteoutKind {
+    Single,
+    Opaque,
+}
+
+#[derive(Debug,Default)]
+pub struct Stats {
+    deletions: usize,
+    opaques: usize,
 }
 
 // important notes about the OCI spec
@@ -66,7 +77,7 @@ enum Whiteout {
 // GzDecoder will create a BufReader internally if it doesn't get a BufRead, so no need to pass in
 // a BufRead
 
-pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<(), SquashError>
+pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<Stats, SquashError>
 where
     W: Write,
     R: Read + Seek,
@@ -75,99 +86,101 @@ where
     //let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
     let mut aw = ArchiveBuilder::new(out);
+    let mut stats = Stats::default();
 
     // we do enumerate, then rev, so i==0 is layer_readers[0] and is our last layer to be processed
     // where we can skip storing deletions
     for (i, reader) in layer_readers.iter_mut().enumerate().rev() {
-        {
-            // pass 1: gather all whiteouts and hard links
-            // &mut * creates a fresh borrow
-            let mut layer = Archive::new(GzDecoder::new(&mut *reader));
-            for entry in layer.entries()? {
-                let mut entry = entry?;
+        // TODO handle more archive types
+        let mut layer = Archive::new(GzDecoder::new(&mut *reader));
+        for entry in layer.entries()? {
+            let mut entry = entry?;
 
-                match whiteout(&entry)? {
-                    Some(Whiteout::File(path)) => {
-                        if i != 0 {
-                            deletions.push_file(path);
-                        }
-                        continue;
+            match whiteout(&entry)? {
+                Some(Whiteout::Single(path)) => {
+                    if i != 0 {
+                        deletions.push_file(path);
                     }
-                    Some(Whiteout::Opaque(path)) => {
-                        if i != 0 {
-                            deletions.push_opaque(path);
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                //if entry.header().entry_type() == EntryType::Link
-                //    && !deletions.is_deleted(&entry.path()?)
-                //{
-                //    if let Some(link) = entry.link_name()? {
-                //        hardlinks.insert(link.into());
-                //    } else {
-                //        return Err(SquashError::HardlinkNoLink);
-                //    }
-                //}
-
-                if deletions.is_deleted(entry.path()?) {
                     continue;
                 }
-
-                if let Some(extensions) = entry.pax_extensions()? {
-                    // even though PaxExtensions implements IntoIter, it has the wrong type, first
-                    // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
-                    // also because the key() returns a Result<&str> because it may not be valid
-                    // utf8
-                    let mut acc = vec![];
-                    for extension in extensions.into_iter() {
-                        let extension = extension?;
-                        let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
-                        let value = extension.value_bytes();
-                        acc.push((key, value));
+                Some(Whiteout::Opaque(path)) => {
+                    if i != 0 {
+                        deletions.push_opaque(path);
                     }
-                    aw.append_pax_extensions(acc)?;
+                    continue;
                 }
-                // annoying we have to clone the header since we have to borrow the entry to read
-                // from
-                aw.append(&entry.header().clone(), &mut entry)?;
+                _ => {}
+            }
 
-                // once we write a file, we mark it as deleted so we do not write it again
-                if i != 0 {
-                    deletions.push_file(entry.path()?.into());
+            //if entry.header().entry_type() == EntryType::Link
+            //    && !deletions.is_deleted(&entry.path()?)
+            //{
+            //    if let Some(link) = entry.link_name()? {
+            //        hardlinks.insert(link.into());
+            //    } else {
+            //        return Err(SquashError::HardlinkNoLink);
+            //    }
+            //}
+
+            //if let Some(_) = entry.header().as_ustar() {
+            //    eprintln!("entry is ustar");
+            //} else if let Some(_) = entry.header().as_gnu() {
+            //    eprintln!("entry is gnu");
+            //}
+
+            match deletions.is_deleted(entry.path()?) {
+                Some(WhiteoutKind::Single) => {
+                    stats.deletions += 1;
+                    continue;
+                }
+                Some(WhiteoutKind::Opaque) => {
+                    stats.opaques += 1;
+                    continue;
+                }
+                _ => {}
+            }
+
+            if let Some(extensions) = entry.pax_extensions()? {
+                // even though PaxExtensions implements IntoIter, it has the wrong type, first
+                // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
+                // also because the key() returns a Result<&str> because it may not be valid
+                // utf8
+                let mut acc = vec![];
+                for extension in extensions.into_iter() {
+                    let extension = extension?;
+                    let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
+                    let value = extension.value_bytes();
+                    eprintln!("writing  extension {:?} {:?}", key, value);
+                    acc.push((key, value));
+                }
+                aw.append_pax_extensions(acc)?;
+            }
+            //eprintln!("entry has path{:?} len={}", entry.path().unwrap(), entry.path().unwrap().as_os_str().as_encoded_bytes().len());
+            //
+            // annoying we have to clone the header since we have to borrow the entry to read
+            // from. same with owning the path
+            // would it be right to use .append_data(entry.header(), path, entry)?
+            // would it double write an extension? b/c we already write the extension above
+            //aw.append(&entry.header().clone(), &mut entry)?;
+            let mut header = entry.header().clone();
+            match entry.header().entry_type() {
+                EntryType::Link | EntryType::Symlink => {
+                    let path = entry.path()?;
+                    let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                    aw.append_link(&mut header, path, link)?;
+                }
+                _ => {
+                    let path = entry.path()?.into_owned();
+                    aw.append_data(&mut header, path, &mut entry)?;
                 }
             }
+
+            // once we write a file, we mark it as deleted so we do not write it again
+            // on the last layer there is no point storing the deletion
+            if i != 0 {
+                deletions.push_file(entry.path()?.into());
+            }
         }
-
-        //reader.seek(SeekFrom::Start(0))?;
-
-        //{
-        //    // pass 2:
-        //    let mut layer = Archive::new(GzDecoder::new(&mut *reader));
-        //    for entry in layer.entries()? {
-        //        let mut entry = entry?;
-        //
-        //        // skip whiteouts
-        //        match whiteout(&entry)? {
-        //            Some(Whiteout::File(_)) | Some(Whiteout::Opaque(_)) => {
-        //                continue;
-        //            }
-        //            _ => {}
-        //        }
-        //
-        //        if deletions.is_deleted(entry.path()?) {
-        //            continue;
-        //        }
-        //
-        //        // annoying we have to clone the header
-        //        aw.append(&entry.header().clone(), &mut entry)?;
-        //
-        //        // once we write a file, we mark it as deleted so we do not write it again
-        //        deletions.push_file(entry.path()?.into());
-        //    }
-        //}
 
         // end of layer, updated deleted_{files,opaques}
         if i != 0 {
@@ -175,30 +188,34 @@ where
         }
     }
 
-    aw.finish().map_err(|_| SquashError::Finish)
+    aw.finish().map_err(|_| SquashError::Finish)?;
+
+    Ok(stats)
 }
 
 #[derive(Default)]
 struct Deletions {
-    files: BTreeSet<PathBuf>,
+    singles: BTreeSet<PathBuf>,
     opaques: BTreeSet<PathBuf>,
 
-    files_q: Vec<PathBuf>,
+    singles_q: Vec<PathBuf>,
     opaques_q: Vec<PathBuf>,
 }
 
 impl Deletions {
     fn push_file(&mut self, p: PathBuf) {
-        self.files_q.push(p);
+        self.singles_q.push(p);
     }
     fn push_opaque(&mut self, p: PathBuf) {
         self.opaques_q.push(p);
     }
-    fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> bool {
-        self.files.contains(p.as_ref()) || opaque_deleted(&self.opaques, p)
+    fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<WhiteoutKind> {
+        if self.singles.contains(p.as_ref()) { Some(WhiteoutKind::Single) }
+        else if opaque_deleted(&self.opaques, p) { Some(WhiteoutKind::Opaque) }
+        else { None }
     }
     fn end_of_layer(&mut self) {
-        self.files.extend(self.files_q.drain(..));
+        self.singles.extend(self.singles_q.drain(..));
         self.opaques.extend(self.opaques_q.drain(..));
     }
 }
@@ -245,7 +262,7 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
     }
     if let Some(trimmed) = name.strip_prefix(".wh.") {
         let hidden = path.with_file_name(trimmed);
-        return Ok(Some(Whiteout::File(hidden)));
+        return Ok(Some(Whiteout::Single(hidden)));
     }
 
     Ok(None)
@@ -257,7 +274,10 @@ mod tests {
 
     use flate2::write::GzEncoder;
     use std::io::{Cursor, Seek, SeekFrom};
-    use tar::{Builder, Header};
+    use tar::{Builder, Header, EntryType};
+    use std::error;
+
+    use crate::podman::build_with_podman;
 
     // E is a standalone redux Entry
     #[derive(Debug, PartialOrd, Ord, PartialEq, Eq)]
@@ -265,20 +285,27 @@ mod tests {
         File { path: PathBuf, data: Vec<u8> },
         Dir { path: PathBuf },
         Link { path: PathBuf, link: PathBuf },
+        Symlink { path: PathBuf, link: PathBuf },
     }
 
     impl E {
-        fn file(path: &str, data: &[u8]) -> Self {
+        fn file<P: Into<PathBuf>>(path: P, data: &[u8]) -> Self {
             Self::File {
                 path: path.into(),
                 data: Vec::from(data),
             }
         }
-        fn dir(path: &str) -> Self {
+        fn dir<P: Into<PathBuf>>(path: P) -> Self {
             Self::Dir { path: path.into() }
         }
-        fn link(path: &str, link: &str) -> Self {
+        fn link<P1: Into<PathBuf>, P2: Into<PathBuf>>(path: P1, link: P2) -> Self {
             Self::Link {
+                path: path.into(),
+                link: link.into(),
+            }
+        }
+        fn symlink<P1: Into<PathBuf>, P2: Into<PathBuf>>(path: P1, link: P2) -> Self {
+            Self::Symlink {
                 path: path.into(),
                 link: link.into(),
             }
@@ -293,26 +320,24 @@ mod tests {
             let mut h = Header::new_ustar();
             match entry {
                 E::File { path, data } => {
-                    h.set_path(path.clone()).unwrap();
                     h.set_entry_type(EntryType::Regular);
                     h.set_size(data.len() as u64);
-                    h.set_cksum();
-                    writer.append(&h, Cursor::new(&data)).unwrap();
+                    writer.append_data(&mut h, path, Cursor::new(&data)).unwrap();
                 }
                 E::Dir { path } => {
-                    h.set_path(path.clone()).unwrap();
                     h.set_entry_type(EntryType::Directory);
                     h.set_size(0);
-                    h.set_cksum();
-                    writer.append(&h, &b""[..]).unwrap();
+                    writer.append_data(&mut h, path, &b""[..]).unwrap();
                 }
                 E::Link { path, link } => {
-                    h.set_path(path.clone()).unwrap();
                     h.set_entry_type(EntryType::Link);
-                    h.set_link_name(link).unwrap();
                     h.set_size(0);
-                    h.set_cksum();
-                    writer.append(&h, &b""[..]).unwrap();
+                    writer.append_link(&mut h, path, link).unwrap();
+                }
+                E::Symlink { path, link } => {
+                    h.set_entry_type(EntryType::Symlink);
+                    h.set_size(0);
+                    writer.append_link(&mut h, path, link).unwrap();
                 }
             }
         }
@@ -348,6 +373,10 @@ mod tests {
                     EntryType::Link => {
                         let link = x.link_name().unwrap().unwrap().into();
                         E::Link { path, link }
+                    }
+                    EntryType::Symlink => {
+                        let link = x.link_name().unwrap().unwrap().into();
+                        E::Symlink { path, link }
                     }
                     x => {
                         panic!("unhandled entry type {x:?}");
@@ -400,7 +429,7 @@ mod tests {
 
         for (x, y) in files.into_iter() {
             make_entry(x, &b"data"[..], |e| {
-                assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::File(y.into())));
+                assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Single(y.into())));
             });
         }
 
@@ -435,25 +464,35 @@ mod tests {
 
     #[test]
     fn test_serde() {
-        let entries = vec![E::file("x", b"hi"), E::link("y", "x")];
+        let mut long_name = String::new();
+        for _ in 0..101 {
+            long_name.push('a');
+        }
+        let entries = vec![
+            E::file("x", b"hi"),
+            E::link("y", "x"),
+            E::file(&long_name, b"foo"),
+            E::link("z", &long_name),
+            E::symlink("s", &long_name),
+        ];
         let buf = serialize(&entries);
         assert_eq!(entries.into_iter().collect::<EList>(), deserialize(&buf));
     }
 
-    fn squash_layers_vec(layers: Vec<Vec<E>>) -> EList {
+    fn squash_layers_vec(layers: Vec<Vec<E>>) -> Result<EList, SquashError> {
         let mut readers: Vec<Cursor<Vec<u8>>> = layers
             .into_iter()
             .map(|x| Cursor::new(serialize_gz(&x)))
             .collect();
         let mut buf = Cursor::new(vec![]);
-        squash(&mut readers, &mut buf).unwrap();
-        deserialize(&buf.into_inner())
+        let _ = squash(&mut readers, &mut buf)?;
+        Ok(deserialize(&buf.into_inner()))
     }
 
     macro_rules! check_squash {
         ($layers:expr, $expected:expr) => {{
             assert_eq!(
-                squash_layers_vec($layers),
+                squash_layers_vec($layers).unwrap(),
                 $expected.into_iter().collect::<EList>()
             );
         }};
@@ -511,6 +550,91 @@ mod tests {
                 vec![E::file("x/.wh..wh..opq", b""), E::file("x/g", b"bye")],
             ],
             vec![E::dir("x"), E::file("x/g", b"bye")]
+        );
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_squash_unicode() {
+        check_squash!(
+            vec![
+                vec![E::file("hellö", b"foo")],
+            ],
+            vec![E::file("hellö", b"foo")]
+        );
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_squash_byte_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let non_utf8 = OsStr::from_bytes(b"abc\xfffoo");
+        check_squash!(
+            vec![
+                vec![E::file(non_utf8, b"foo"), E::link("link", non_utf8)],
+            ],
+            vec![E::file(non_utf8, b"foo"), E::link("link", non_utf8)]
+        );
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_squash_long_paths() {
+        // 100 is the max length without extensions
+        let mut long_name = String::new();
+        for _ in 0..101 {
+            long_name.push('a');
+        }
+        check_squash!(
+            vec![
+                vec![E::file(&long_name, b"foo"), E::link("link", &long_name), E::symlink("slink", &long_name)],
+            ],
+            vec![E::file(&long_name, b"foo"), E::link("link", &long_name), E::symlink("slink", &long_name)]
+        );
+    }
+
+    // NOTE this always skips the base layer and you should probably rm -rf /bin
+    // and there are the annoying proc,run,sys dirs that are always there
+    fn squash_containerfile(containerfile: &str) -> Result<EList, Box<dyn error::Error>> {
+        let mut layers: Vec<_> = build_with_podman(containerfile)
+            .unwrap()
+            .into_iter()
+            .skip(1) // skip the base layer
+            .map(Cursor::new)
+            .collect();
+
+        let mut buf = Cursor::new(vec![]);
+        squash(&mut layers, &mut buf).unwrap();
+        Ok(deserialize(&buf.into_inner()))
+    }
+
+    macro_rules! check_podman {
+        ($containerfile:expr, $expected:expr) => {{
+            assert_eq!(
+                squash_containerfile($containerfile).unwrap(),
+                $expected.into_iter().collect::<EList>()
+            );
+        }};
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_podman_cross_layer_link() {
+        // cross layer link
+        check_podman!(r#"
+FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
+RUN echo hi > x
+RUN ln x y
+RUN rm -rf /bin
+            "#,
+            vec![
+                E::file("x", b"hi\n"), E::link("y", "x"),
+                // these are annoyingly always present in podman's layers
+                // also note the trailing slash
+                E::dir("proc/"), E::dir("run/"), E::dir("sys/"),
+            ]
         );
     }
 }

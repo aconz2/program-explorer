@@ -68,5 +68,6 @@ fn main() {
     // this doesn't respect the buffer at all (with or without .lock())
     //let mut out = BufWriter::new(io::stdout().lock());
     //let mut out = BufWriter::with_capacity(4096 * 8, File::create("/tmp/mytar").unwrap());
-    squash(&mut readers, &mut out).unwrap();
+    let stats = squash(&mut readers, &mut out).unwrap();
+    eprintln!("{stats:?}");
 }
