@@ -1,10 +1,10 @@
-use std::{io,fmt,error,env};
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
-use std::fs::File;
+use std::{env, error, fmt, io};
 
-use sha2::{Sha256,Digest};
+use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType};
 
 #[derive(Debug)]
@@ -21,10 +21,10 @@ impl error::Error for TardiffError {}
 
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
 enum Entry {
-    File {path: PathBuf, digest: String},
-    Dir {path: PathBuf},
-    Link {path: PathBuf, link: PathBuf},
-    Slink {path: PathBuf, link: PathBuf},
+    File { path: PathBuf, digest: String },
+    Dir { path: PathBuf },
+    Link { path: PathBuf, link: PathBuf },
+    Slink { path: PathBuf, link: PathBuf },
 }
 
 #[derive(Debug)]
@@ -50,18 +50,18 @@ fn gather_entries<R: Read>(ar: &mut Archive<R>) -> Result<BTreeSet<Entry>, Box<d
         match entry.header().entry_type() {
             EntryType::Regular => {
                 let digest = sha_reader(&mut entry)?;
-                ret.insert(Entry::File{path, digest});
+                ret.insert(Entry::File { path, digest });
             }
             EntryType::Directory => {
-                ret.insert(Entry::Dir{path});
+                ret.insert(Entry::Dir { path });
             }
             EntryType::Link => {
                 let link: PathBuf = entry.link_name()?.ok_or(TardiffError::NoLink)?.into();
-                ret.insert(Entry::Link{path, link});
+                ret.insert(Entry::Link { path, link });
             }
             EntryType::Symlink => {
                 let link: PathBuf = entry.link_name()?.ok_or(TardiffError::NoLink)?.into();
-                ret.insert(Entry::Slink{path, link});
+                ret.insert(Entry::Slink { path, link });
             }
             e => panic!("unhandled type {:?}", e),
         }
@@ -73,7 +73,7 @@ fn gather_entries<R: Read>(ar: &mut Archive<R>) -> Result<BTreeSet<Entry>, Box<d
 fn tardiff<R: Read>(left: R, right: R) -> Result<Diffs, Box<dyn error::Error>> {
     let left = gather_entries(&mut Archive::new(left))?;
     let right = gather_entries(&mut Archive::new(right))?;
-    Ok(Diffs{
+    Ok(Diffs {
         in_left_but_not_right: left.difference(&right).cloned().collect(),
         in_right_but_not_left: right.difference(&left).cloned().collect(),
     })
@@ -87,7 +87,8 @@ fn main() {
     let diffs = tardiff(
         File::open(left).expect("couldn't open left"),
         File::open(right).expect("couldn't open left"),
-    ).unwrap();
+    )
+    .unwrap();
 
     println!("-------------------- in left but not right ----------------------");
     for entry in diffs.in_left_but_not_right.iter() {

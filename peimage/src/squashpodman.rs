@@ -1,10 +1,10 @@
 use std::env;
 use std::fs::File;
+use std::io::{BufWriter, Cursor};
 use std::os::fd::FromRawFd;
-use std::io::{Cursor,BufWriter};
 
-use peimage::squash::squash;
 use peimage::podman::load_layers_from_podman;
+use peimage::squash::squash;
 
 // trying out this method of dealing with multiple error types
 // https://doc.rust-lang.org/rust-by-example/error/multiple_error_types/boxing_errors.html

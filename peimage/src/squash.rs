@@ -34,7 +34,7 @@ enum WhiteoutKind {
     Opaque,
 }
 
-#[derive(Debug,Default)]
+#[derive(Debug, Default)]
 pub struct Stats {
     deletions: usize,
     opaques: usize,
@@ -210,9 +210,13 @@ impl Deletions {
         self.opaques_q.push(p);
     }
     fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<WhiteoutKind> {
-        if self.singles.contains(p.as_ref()) { Some(WhiteoutKind::Single) }
-        else if opaque_deleted(&self.opaques, p) { Some(WhiteoutKind::Opaque) }
-        else { None }
+        if self.singles.contains(p.as_ref()) {
+            Some(WhiteoutKind::Single)
+        } else if opaque_deleted(&self.opaques, p) {
+            Some(WhiteoutKind::Opaque)
+        } else {
+            None
+        }
     }
     fn end_of_layer(&mut self) {
         self.singles.extend(self.singles_q.drain(..));
@@ -243,7 +247,7 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
     //    return Ok(None)
     //}
     let path = entry.path()?; // can fail if not unicode
-    // TODO bad bad do prefix check against bytes, not string
+                              // TODO bad bad do prefix check against bytes, not string
     let name = {
         if let Some(name) = path.file_name().and_then(|x| x.to_str()) {
             name
@@ -273,9 +277,9 @@ mod tests {
     use super::*;
 
     use flate2::write::GzEncoder;
-    use std::io::{Cursor, Seek, SeekFrom};
-    use tar::{Builder, Header, EntryType};
     use std::error;
+    use std::io::{Cursor, Seek, SeekFrom};
+    use tar::{Builder, EntryType, Header};
 
     use crate::podman::build_with_podman;
 
@@ -286,6 +290,7 @@ mod tests {
         Dir { path: PathBuf },
         Link { path: PathBuf, link: PathBuf },
         Symlink { path: PathBuf, link: PathBuf },
+        Fifo { path: PathBuf },
     }
 
     impl E {
@@ -310,6 +315,9 @@ mod tests {
                 link: link.into(),
             }
         }
+        fn fifo<P: Into<PathBuf>>(path: P) -> Self {
+            Self::Fifo { path: path.into() }
+        }
     }
 
     type EList = BTreeSet<E>;
@@ -322,7 +330,9 @@ mod tests {
                 E::File { path, data } => {
                     h.set_entry_type(EntryType::Regular);
                     h.set_size(data.len() as u64);
-                    writer.append_data(&mut h, path, Cursor::new(&data)).unwrap();
+                    writer
+                        .append_data(&mut h, path, Cursor::new(&data))
+                        .unwrap();
                 }
                 E::Dir { path } => {
                     h.set_entry_type(EntryType::Directory);
@@ -338,6 +348,10 @@ mod tests {
                     h.set_entry_type(EntryType::Symlink);
                     h.set_size(0);
                     writer.append_link(&mut h, path, link).unwrap();
+                }
+                E::Fifo { path } => {
+                    h.set_entry_type(EntryType::Fifo);
+                    writer.append_data(&mut h, path, &b""[..]).unwrap();
                 }
             }
         }
@@ -378,6 +392,7 @@ mod tests {
                         let link = x.link_name().unwrap().unwrap().into();
                         E::Symlink { path, link }
                     }
+                    EntryType::Fifo => E::Fifo { path },
                     x => {
                         panic!("unhandled entry type {x:?}");
                     }
@@ -464,10 +479,7 @@ mod tests {
 
     #[test]
     fn test_serde() {
-        let mut long_name = String::new();
-        for _ in 0..101 {
-            long_name.push('a');
-        }
+        let long_name = "a".repeat(101);
         let entries = vec![
             E::file("x", b"hi"),
             E::link("y", "x"),
@@ -583,10 +595,7 @@ mod tests {
     #[test]
     fn test_squash_long_paths() {
         // 100 is the max length without extensions
-        let mut long_name = String::new();
-        for _ in 0..101 {
-            long_name.push('a');
-        }
+        let long_name = "a".repeat(101);
         check_squash!(
             vec![
                 vec![E::file(&long_name, b"foo"), E::link("link", &long_name), E::symlink("slink", &long_name)],
@@ -621,16 +630,14 @@ mod tests {
 
     #[rustfmt::skip]
     #[test]
-    fn test_podman_cross_layer_link() {
-        // cross layer link
+    fn test_podman_1() {
         check_podman!(r#"
 FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
-RUN echo hi > x
-RUN ln x y
+RUN echo hi > x && ln x y && mkfifo fifo
 RUN rm -rf /bin
             "#,
             vec![
-                E::file("x", b"hi\n"), E::link("y", "x"),
+                E::file("x", b"hi\n"), E::link("y", "x"), E::fifo("fifo"),
                 // these are annoyingly always present in podman's layers
                 // also note the trailing slash
                 E::dir("proc/"), E::dir("run/"), E::dir("sys/"),

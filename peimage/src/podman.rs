@@ -1,10 +1,10 @@
-use std::error;
 use std::collections::BTreeMap;
+use std::error;
 use std::ffi::OsStr;
 use std::fmt;
+use std::io::{Cursor, Read, Write};
 use std::process::{Command, Stdio};
 use tar::Archive;
-use std::io::{Cursor, Read, Write};
 use tempfile::NamedTempFile;
 
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
@@ -98,7 +98,13 @@ pub fn build_with_podman(containerfile: &str) -> Result<Vec<Vec<u8>>, Box<dyn er
         .arg("--no-hosts")
         .arg("--no-hostname")
         .arg("--network=none")
-        .arg(format!("--iidfile={}", id_file.path().to_str().ok_or(PodmanLoadError::NonUtf8Path)?))
+        .arg(format!(
+            "--iidfile={}",
+            id_file
+                .path()
+                .to_str()
+                .ok_or(PodmanLoadError::NonUtf8Path)?
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -115,10 +121,7 @@ pub fn build_with_podman(containerfile: &str) -> Result<Vec<Vec<u8>>, Box<dyn er
 
     let layers = load_layers_from_podman(&id)?;
 
-    let _ = Command::new("podman")
-        .arg("rmi")
-        .arg(id)
-        .status()?;
+    let _ = Command::new("podman").arg("rmi").arg(id).status()?;
 
     Ok(layers)
 }
