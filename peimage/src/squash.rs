@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
 use std::cmp::Ord;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet,BTreeMap};
 use std::ffi::OsStr;
 use std::io;
 use std::io::{Read, Seek, Write};
@@ -32,14 +32,11 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
-#[derive(Default)]
-struct Deletions {
-    singles: BTreeSet<PathBuf>,
-    opaques: BTreeSet<PathBuf>,
-    seen: BTreeSet<PathBuf>,
-
-    singles_q: Vec<PathBuf>,
-    opaques_q: Vec<PathBuf>,
+#[derive(Debug, PartialEq)]
+enum DeletionState {
+    Whiteout,
+    Opaque,
+    Shadowed,
 }
 
 #[derive(PartialEq, Debug)]
@@ -50,12 +47,34 @@ enum DeletionReason {
     Shadowed,
 }
 
+//                 Match Type
+//               |   Exact  |   Child   |
+// DeletionState |----------------------|
+//      Whiteout |  Single  | SingleDir |
+//        Opaque |    -     |  Opaque   |
+//      Shadowed | Shadowed |     -     |
+
+#[derive(Default)]
+struct Deletions {
+    //singles: BTreeSet<PathBuf>,
+    //opaques: BTreeSet<PathBuf>,
+    //seen: BTreeSet<PathBuf>,
+    map: BTreeMap<PathBuf, DeletionState>,
+
+    whiteout_q: Vec<PathBuf>,
+    opaque_q: Vec<PathBuf>,
+}
+
 #[derive(Debug, Default)]
 pub struct Stats {
     deletions: usize,
     deletion_dirs: usize,
     opaques: usize,
     shadowed: usize,
+    deletions_map_size: usize,
+    //singles_size: usize,
+    //opaques_size: usize,
+    //seen_size: usize,
 }
 
 // important notes about the OCI spec
@@ -117,7 +136,7 @@ where
             match whiteout(&entry)? {
                 Some(Whiteout::Single(path)) => {
                     if i != 0 {
-                        deletions.push_single(path);
+                        deletions.push_whiteout(path);
                     }
                     continue;
                 }
@@ -214,39 +233,133 @@ where
 
     aw.finish().map_err(|_| SquashError::Finish)?;
 
+    stats.deletions_map_size = deletions.map.len();
+    //stats.seen_size = deletions.seen.len();
+    //stats.whiteout_size = deletions..len();
+    //stats.opaque_size = deletions.opaques.len();
+
     Ok(stats)
 }
 
 impl Deletions {
-    fn push_single(&mut self, p: PathBuf) {
-        self.singles_q.push(p);
+    fn push_whiteout(&mut self, p: PathBuf) {
+        self.whiteout_q.push(p);
     }
     fn push_opaque(&mut self, p: PathBuf) {
-        self.opaques_q.push(p);
+        self.opaque_q.push(p);
     }
     fn insert_seen(&mut self, p: PathBuf) {
-        self.seen.insert(p);
+        //self.seen.insert(p);
+        self.insert(p, DeletionState::Shadowed);
     }
     fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<DeletionReason> {
+        //let p = p.as_ref();
+        //if self.seen.contains(p) {
+        //    return Some(DeletionReason::Shadowed);
+        //} else if let Some(x) = lower_bound_inclusive(&self.singles, p) {
+        //    if p == x {
+        //        return Some(DeletionReason::Single);
+        //    } else if p.starts_with(x) {
+        //        return Some(DeletionReason::SingleDir);
+        //    }
+        //} else if let Some(x) = lower_bound_exclusive(&self.opaques, p) {
+        //    if p.starts_with(x) {
+        //        return Some(DeletionReason::Opaque);
+        //    }
+        //}
+        //None
         let p = p.as_ref();
-        if self.seen.contains(p) {
-            return Some(DeletionReason::Shadowed);
-        } else if let Some(x) = lower_bound_inclusive(&self.singles, p) {
-            if p == x {
+        //eprintln!("is_deleted {:?}", p);
+        let mut iter = self.map.range::<Path, _>((Bound::Unbounded, Bound::Included(p)));
+        let (key, state) = iter.next_back()?;
+        //eprintln!("is_deleted {:?} bound included {:?} {:?}", p, key, state);
+        //if key == p { // exact match on the key we are searching for
+        //    match state {
+        //        DeletionState::Shadowed => {
+        //            return Some(DeletionReason::Shadowed);
+        //        }
+        //        DeletionState::Whiteout => {
+        //            return Some(DeletionReason::Single);
+        //        }
+        //        _ => {} // Opaque exact match doesn't do anything
+        //    }
+        //} else if *state == DeletionState::Whiteout && p.starts_with(key) {
+        //    return Some(DeletionReason::SingleDir);
+        //} else if *state == DeletionState::Opaque && p.starts_with(key) {
+        //    return Some(DeletionReason::Opaque);
+        //}
+        match state {
+            DeletionState::Shadowed if key == p => {
+                return Some(DeletionReason::Shadowed);
+            }
+            DeletionState::Whiteout if key == p => {
                 return Some(DeletionReason::Single);
-            } else if p.starts_with(x) {
+            }
+            DeletionState::Whiteout if p.starts_with(key) => {
                 return Some(DeletionReason::SingleDir);
             }
-        } else if let Some(x) = lower_bound_exclusive(&self.opaques, p) {
-            if p.starts_with(x) {
+            DeletionState::Opaque if key !=p && p.starts_with(key) => {
                 return Some(DeletionReason::Opaque);
             }
+            _ => {}
+        }
+
+        // not an exact match
+        let (key, state) = iter.next_back()?;
+        if *state == DeletionState::Opaque && p.starts_with(key) {
+            return Some(DeletionReason::Opaque);
         }
         None
     }
+    fn insert(&mut self, path: PathBuf, reason: DeletionState) {
+        use DeletionState::*;
+        if let Some(state) = self.map.get_mut(&path) {
+            *state = reason;
+            //     old  ,  new
+            //match (&state, reason) {
+            //    (Whiteout, Whiteout) |
+            //    (Opaque, Opaque) |
+            //    (Shadowed, Shadowed)  => {
+            //        // kinda weird duplicate but okay
+            //    }
+            //    (Whiteout, Opaque) => { }
+            //    (Whiteout, Shadowed) => { }
+            //    (Opaque, Whiteout) => {}
+            //    (Opaque, Shadowed) => {}
+            //    // if something is already in the map b/c it is shadowed (already seen), and then a
+            //    // lower layer whiteouts/opaques it, update to reflect that
+            //    (Shadowed, Whiteout) => {
+            //        *state = Whiteout;
+            //    }
+            //    (Shadowed, Opaque) => {
+            //        *state = Opaque;
+            //    }
+            //}
+        } else {
+            self.map.insert(path, reason);
+        }
+    }
     fn end_of_layer(&mut self) {
-        self.singles.extend(self.singles_q.drain(..));
-        self.opaques.extend(self.opaques_q.drain(..));
+        //self.map.extend(
+        //    self.whiteout_q.drain(..)
+        //    .map(|x| (x, DeletionState::Whiteout))
+        //);
+        //self.map.extend(
+        //    self.opaque_q.drain(..)
+        //    .map(|x| (x, DeletionState::Opaque))
+        //);
+        // have to take to not have a double borrow
+        for x in std::mem::take(&mut self.whiteout_q).into_iter() {
+            self.insert(x, DeletionState::Whiteout);
+        }
+        for x in std::mem::take(&mut self.opaque_q).into_iter() {
+            self.insert(x, DeletionState::Opaque);
+        }
+        //for x in self.opaque_q.drain(..) {
+        //    self.insert(DeletionState::Opaque, x);
+        //}
+        //self.singles.extend(self.singles_q.drain(..));
+        //self.opaques.extend(self.opaques_q.drain(..));
     }
 }
 
@@ -578,8 +691,8 @@ mod tests {
         for trailing_slash in vec![false].into_iter() {
             let mut d = Deletions::default();
             assert_eq!(d.is_deleted("foo"), None);
-            // TODO I tried making push_single take P: Into<PathBuf> but wasn't working great
-            d.push_single((if trailing_slash {"x/"} else {"x"}).into());
+            // TODO I tried making push_whiteout take P: Into<PathBuf> but wasn't working great
+            d.push_whiteout((if trailing_slash {"x/"} else {"x"}).into());
             d.end_of_layer();
             assert_eq!(d.is_deleted("x"), Some(DeletionReason::Single));
             assert_eq!(d.is_deleted("x/"), Some(DeletionReason::Single));
@@ -748,6 +861,19 @@ mod tests {
                 vec![E::file("x/.wh..wh..opq", b""), E::file("x/g", b"bye")],
             ],
             vec![E::dir("x"), E::file("x/g", b"bye")]
+        );
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_squash_chained_deletions() {
+        check_squash!(
+            vec![
+                vec![E::dir("x"), E::file("x/a", b"hi")],
+                vec![E::file(".wh.x", b"")],
+                vec![E::file("x", b"bye")],
+            ],
+            vec![E::file("x", b"bye")]
         );
     }
 
