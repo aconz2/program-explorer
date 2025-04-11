@@ -90,7 +90,12 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn erro
         .collect()
 }
 
-pub fn build_with_podman(containerfile: &str) -> Result<Vec<Vec<u8>>, Box<dyn error::Error>> {
+pub struct Rootfs {
+    pub layers: Vec<Vec<u8>>,
+    pub combined: Vec<u8>,
+}
+
+pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Box<dyn error::Error>> {
     let mut id_file = NamedTempFile::new()?;
     let mut child = Command::new("podman")
         .arg("build")
@@ -116,12 +121,37 @@ pub fn build_with_podman(containerfile: &str) -> Result<Vec<Vec<u8>>, Box<dyn er
 
     let _ = child.wait()?;
 
-    let mut id = String::new();
-    id_file.read_to_string(&mut id)?;
+    let iid = {
+        let mut buf = String::new();
+        id_file.read_to_string(&mut buf)?;
+        buf
+    };
 
-    let layers = load_layers_from_podman(&id)?;
+    let layers = load_layers_from_podman(&iid)?;
 
-    let _ = Command::new("podman").arg("rmi").arg(id).status()?;
+    let cid = {
+        let output = Command::new("podman").arg("create").arg(&iid).output()?;
+        String::from_utf8(output.stdout)?.trim().to_string()
+    };
 
-    Ok(layers)
+    let combined = {
+        let output = Command::new("podman").arg("export").arg(&cid).output()?;
+        output.stdout
+    };
+
+    let _ = Command::new("podman")
+        .arg("rm")
+        .arg(cid)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+
+    let _ = Command::new("podman")
+        .arg("rmi")
+        .arg(&iid)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+
+    Ok(Rootfs { layers, combined })
 }

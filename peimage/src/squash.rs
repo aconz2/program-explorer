@@ -7,6 +7,8 @@ use std::io::{Read, Seek, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -29,14 +31,26 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
-enum WhiteoutKind {
+#[derive(Default)]
+struct Deletions {
+    singles: BTreeSet<PathBuf>,
+    opaques: BTreeSet<PathBuf>,
+
+    singles_q: Vec<PathBuf>,
+    opaques_q: Vec<PathBuf>,
+}
+
+#[derive(PartialEq, Debug)]
+enum DeletionReason {
     Single,
+    SingleDir,
     Opaque,
 }
 
 #[derive(Debug, Default)]
 pub struct Stats {
     deletions: usize,
+    deletion_dirs: usize,
     opaques: usize,
 }
 
@@ -96,10 +110,11 @@ where
         for entry in layer.entries()? {
             let mut entry = entry?;
 
+            eprintln!("path is {:?}", entry.path()?);
             match whiteout(&entry)? {
                 Some(Whiteout::Single(path)) => {
                     if i != 0 {
-                        deletions.push_file(path);
+                        deletions.push_single(path);
                     }
                     continue;
                 }
@@ -128,18 +143,29 @@ where
             //    eprintln!("entry is gnu");
             //}
 
-            match deletions.is_deleted(entry.path()?) {
-                Some(WhiteoutKind::Single) => {
+            match deletions.is_deleted(&entry.path()?) {
+                Some(DeletionReason::Single) => {
+                    eprintln!("path is {:?} deleted by single", entry.path()?);
                     stats.deletions += 1;
                     continue;
                 }
-                Some(WhiteoutKind::Opaque) => {
+                Some(DeletionReason::SingleDir) => {
+                    eprintln!("path is {:?} deleted by dir", entry.path()?);
+                    stats.deletion_dirs += 1;
+                    continue;
+                }
+                Some(DeletionReason::Opaque) => {
+                    eprintln!("path is {:?} deleted by opaque", entry.path()?);
                     stats.opaques += 1;
                     continue;
                 }
                 _ => {}
             }
 
+            // TODO should / do we need to exclude "path" and "link" extensions since
+            // the append_{link,data} calls will emit those for us
+            // and just doing the pax extension alone didn't seem to be enough to make long paths
+            // work
             if let Some(extensions) = entry.pax_extensions()? {
                 // even though PaxExtensions implements IntoIter, it has the wrong type, first
                 // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
@@ -159,9 +185,6 @@ where
             //
             // annoying we have to clone the header since we have to borrow the entry to read
             // from. same with owning the path
-            // would it be right to use .append_data(entry.header(), path, entry)?
-            // would it double write an extension? b/c we already write the extension above
-            //aw.append(&entry.header().clone(), &mut entry)?;
             let mut header = entry.header().clone();
             match entry.header().entry_type() {
                 EntryType::Link | EntryType::Symlink => {
@@ -178,12 +201,14 @@ where
             // once we write a file, we mark it as deleted so we do not write it again
             // on the last layer there is no point storing the deletion
             if i != 0 {
-                deletions.push_file(entry.path()?.into());
+                eprintln!("pushing single deletion {:?}", entry.path()?);
+                deletions.push_single(entry.path()?.into());
             }
         }
 
         // end of layer, updated deleted_{files,opaques}
         if i != 0 {
+                eprintln!("commiting changes");
             deletions.end_of_layer();
         }
     }
@@ -193,30 +218,27 @@ where
     Ok(stats)
 }
 
-#[derive(Default)]
-struct Deletions {
-    singles: BTreeSet<PathBuf>,
-    opaques: BTreeSet<PathBuf>,
-
-    singles_q: Vec<PathBuf>,
-    opaques_q: Vec<PathBuf>,
-}
-
 impl Deletions {
-    fn push_file(&mut self, p: PathBuf) {
+    fn push_single(&mut self, p: PathBuf) {
         self.singles_q.push(p);
     }
     fn push_opaque(&mut self, p: PathBuf) {
         self.opaques_q.push(p);
     }
-    fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<WhiteoutKind> {
-        if self.singles.contains(p.as_ref()) {
-            Some(WhiteoutKind::Single)
-        } else if opaque_deleted(&self.opaques, p) {
-            Some(WhiteoutKind::Opaque)
-        } else {
-            None
+    fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<DeletionReason> {
+        let p = p.as_ref();
+        if let Some(x) = lower_bound_inclusive(&self.singles, p) {
+            if p == x {
+                return Some(DeletionReason::Single);
+            } else if p.starts_with(x) {
+                return Some(DeletionReason::SingleDir);
+            }
+        } else if let Some(x) = lower_bound_exclusive(&self.opaques, p) {
+            if p.starts_with(x) {
+                return Some(DeletionReason::Opaque);
+            }
         }
+        None
     }
     fn end_of_layer(&mut self) {
         self.singles.extend(self.singles_q.drain(..));
@@ -224,15 +246,7 @@ impl Deletions {
     }
 }
 
-fn opaque_deleted<P: AsRef<Path>>(opaques: &BTreeSet<PathBuf>, path: P) -> bool {
-    if let Some(prefix) = lower_bound(opaques, path.as_ref()) {
-        path.as_ref().starts_with(prefix)
-    } else {
-        false
-    }
-}
-
-fn lower_bound<'a, K, T>(set: &'a BTreeSet<T>, key: &K) -> Option<&'a T>
+fn lower_bound_exclusive<'a, K, T>(set: &'a BTreeSet<T>, key: &K) -> Option<&'a T>
 where
     T: Borrow<K> + Ord,
     K: Ord + ?Sized,
@@ -241,22 +255,32 @@ where
     iter.next_back()
 }
 
+fn lower_bound_inclusive<'a, K, T>(set: &'a BTreeSet<T>, key: &K) -> Option<&'a T>
+where
+    T: Borrow<K> + Ord,
+    K: Ord + ?Sized,
+{
+    let mut iter = set.range((Bound::Unbounded, Bound::Included(key)));
+    iter.next_back()
+}
+
 fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> {
     // this should be true but idk if universal
     //if entry.header.entry_type() != EntryType::Regular {
     //    return Ok(None)
     //}
-    let path = entry.path()?; // can fail if not unicode
+    let path = entry.path()?; // can fail if not unicode on Windows (so should never fail)
                               // TODO bad bad do prefix check against bytes, not string
     let name = {
-        if let Some(name) = path.file_name().and_then(|x| x.to_str()) {
-            name
+        if let Some(name) = path.file_name() {
+            name.as_encoded_bytes()
         } else {
             return Ok(None);
         }
     };
     // is starts_with correct or should it be exact comparison for opaques
-    if name.starts_with(".wh..wh..opq") {
+    // like dir/.wh..wh..opqSUFFIX is some edge case
+    if name.starts_with(b".wh..wh..opq") {
         if let Some(parent) = path.parent() {
             return Ok(Some(Whiteout::Opaque(parent.into())));
         } else {
@@ -264,8 +288,8 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
             return Err(SquashError::OpaqueWhiteoutNoParent);
         }
     }
-    if let Some(trimmed) = name.strip_prefix(".wh.") {
-        let hidden = path.with_file_name(trimmed);
+    if let Some(trimmed) = name.strip_prefix(b".wh.") {
+        let hidden = path.with_file_name(OsStr::from_bytes(trimmed));
         return Ok(Some(Whiteout::Single(hidden)));
     }
 
@@ -280,11 +304,12 @@ mod tests {
     use std::error;
     use std::io::{Cursor, Seek, SeekFrom};
     use tar::{Builder, EntryType, Header};
+    use std::process::{Command,Stdio};
 
     use crate::podman::build_with_podman;
 
     // E is a standalone redux Entry
-    #[derive(Debug, PartialOrd, Ord, PartialEq, Eq)]
+    #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
     enum E {
         File { path: PathBuf, data: Vec<u8> },
         Dir { path: PathBuf },
@@ -407,14 +432,12 @@ mod tests {
         F: Fn(Entry<'_, Cursor<Vec<u8>>>) -> B,
     {
         let mut h = Header::new_ustar();
-        h.set_path(path).unwrap();
         h.set_entry_type(EntryType::Regular);
-        h.set_size(data.len() as u64);
-        h.set_cksum();
+        h.set_size(0);
 
         let buf = {
             let mut b = Builder::new(Cursor::new(vec![]));
-            b.append(&h, data).unwrap();
+            b.append_data(&mut h, path, &b""[..]).unwrap();
             let mut buf = b.into_inner().unwrap();
             buf.seek(SeekFrom::Start(0)).unwrap();
             buf
@@ -427,19 +450,21 @@ mod tests {
 
     #[rustfmt::skip]
     #[test]
-    fn test_opaque() {
+    fn test_whiteout_recognition() {
         make_entry("foo", &b"data"[..], |e| {
             assert_eq!(whiteout(&e).unwrap(), None);
         });
 
         let files = vec![
-            (".wh.foo", "foo"),
-            ("dir/.wh.foo", "dir/foo"),
+            (OsStr::from_bytes(b".wh.foo"),     OsStr::from_bytes(b"foo")),
+            (OsStr::from_bytes(b"dir/.wh.foo"), OsStr::from_bytes(b"dir/foo")),
+            (OsStr::from_bytes(b".wh.abc\xff"), OsStr::from_bytes(b"abc\xff")),
         ];
 
         let dirs = vec![
-            ("dir/.wh..wh..opq", "dir"),
-            ("dir1/dir2/.wh..wh..opq", "dir1/dir2"),
+            (OsStr::from_bytes(b"dir/.wh..wh..opq"),       OsStr::from_bytes(b"dir")),
+            (OsStr::from_bytes(b"dir1/dir2/.wh..wh..opq"), OsStr::from_bytes(b"dir1/dir2")),
+            (OsStr::from_bytes(b"dir1\xff/.wh..wh..opq"),  OsStr::from_bytes(b"dir1\xff")),
         ];
 
         for (x, y) in files.into_iter() {
@@ -455,26 +480,41 @@ mod tests {
         }
     }
 
+    #[rustfmt::skip]
     #[test]
-    fn test_lower_bound() {
-        // ascii / is l
-        let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
-        assert_eq!(lower_bound(&set, "dir1/file"), Some("dir1/").as_ref());
-        assert_eq!(lower_bound(&set, "dir0/file"), None);
-        assert_eq!(lower_bound(&set, "dir2/file"), Some("dir2/dir3/").as_ref());
+    fn test_deletions() {
+        let mut d = Deletions::default();
+        assert_eq!(d.is_deleted("foo"), None);
+        // TODO I tried making push_single take P: Into<PathBuf> but wasn't working great
+        d.push_single("x".into());
+        d.end_of_layer();
+        assert_eq!(d.is_deleted("x"), Some(DeletionReason::Single));
+        assert_eq!(d.is_deleted("x/"), Some(DeletionReason::Single));
+        assert_eq!(d.is_deleted("x/file"), Some(DeletionReason::SingleDir));
+        assert_eq!(d.is_deleted("xfile"), None);
+
+        d.push_opaque("a/b".into());
+        d.end_of_layer();
+        assert_eq!(d.is_deleted("a/b"), None);
+        assert_eq!(d.is_deleted("a/b/"), None);
+        assert_eq!(d.is_deleted("a/b/foo"), Some(DeletionReason::Opaque));
+        assert_eq!(d.is_deleted("a/b/foo/"), Some(DeletionReason::Opaque));
     }
 
     #[test]
-    fn test_opaque_deleted() {
-        let set: BTreeSet<PathBuf> = vec!["dir1/", "dir1!", "dir2/dir3/"]
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        assert!(opaque_deleted(&set, "dir1/file"));
-        assert!(opaque_deleted(&set, "dir2/dir3/file"));
-        assert!(!opaque_deleted(&set, "dir1file"));
-        assert!(!opaque_deleted(&set, "dir0/file"));
-        assert!(!opaque_deleted(&set, "dir2/file"));
+    fn test_lower_bound_exclusive() {
+        let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
+        assert_eq!(lower_bound_exclusive(&set, "dir1/"), Some("dir1!").as_ref());
+        assert_eq!(lower_bound_exclusive(&set, "dir1/file"), Some("dir1/").as_ref());
+        assert_eq!(lower_bound_exclusive(&set, "dir0/file"), None);
+        assert_eq!(lower_bound_exclusive(&set, "dir2/file"), Some("dir2/dir3/").as_ref());
+    }
+
+    #[test]
+    fn test_lower_bound_inclusive() {
+        let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
+        assert_eq!(lower_bound_inclusive(&set, "dir1/file"), Some("dir1/").as_ref());
+        assert_eq!(lower_bound_inclusive(&set, "dir1/"), Some("dir1/").as_ref());
     }
 
     #[test]
@@ -525,14 +565,41 @@ mod tests {
 
     #[rustfmt::skip]
     #[test]
+    fn test_squash_file_shared_prefix() {
+        // this checks a tricky condition where the final layer stores x as a "deletion" so it
+        // won't get emitted twice, but we don't want that to behave the same as .wh.x since that
+        // would delete x/y in a lower dir
+        check_squash!(
+            vec![
+                vec![E::file("xy", b"bye")],
+                vec![E::file("x/y", b"bye")],
+                vec![E::file("x", b"hi")],
+            ],
+            vec![E::file("x", b"hi"), E::file("xy", b"bye"), E::file("x/y", b"bye")]
+        );
+    }
+
+    #[rustfmt::skip]
+    #[test]
     fn test_squash_file_whiteout() {
         // whiteout of a file
         check_squash!(
             vec![
                 vec![E::file("x", b"hi")],
-                vec![E::file(".wh.x", b"")],
+                vec![E::file(".wh.x", b""), E::file("y", b"hi")],
+                vec![E::file(".wh.y", b"")],
             ],
             vec![]
+        );
+
+        // whiteout a dir, the dir itself and all files below should be wiped
+        // but a file that shares a prefix should not
+        check_squash!(
+            vec![
+                vec![E::dir("x"), E::dir("x/y"), E::file("x/foo", b""), E::file("x/y/bar", b""), E::file("x!ile", b"")],
+                vec![E::file(".wh.x", b"")],
+            ],
+            vec![E::file("x!ile", b"")]
         );
 
         // whiteout of a non-matching file
@@ -579,15 +646,16 @@ mod tests {
     #[rustfmt::skip]
     #[test]
     fn test_squash_byte_paths() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let non_utf8 = OsStr::from_bytes(b"abc\xfffoo");
+        let non_utf8_a = OsStr::from_bytes(b"abc\xff");
+        let non_utf8_b = OsStr::from_bytes(b"def\xff");
+        let non_utf8_b_whiteout = OsStr::from_bytes(b".wh.def\xff");
+        // TODO add opaque whiteout
         check_squash!(
             vec![
-                vec![E::file(non_utf8, b"foo"), E::link("link", non_utf8)],
+                vec![E::file(non_utf8_a, b"foo"), E::link("link", non_utf8_a), E::file(non_utf8_b, b"bar")],
+                vec![E::file(non_utf8_b_whiteout, b"")],
             ],
-            vec![E::file(non_utf8, b"foo"), E::link("link", non_utf8)]
+            vec![E::file(non_utf8_a, b"foo"), E::link("link", non_utf8_a)]
         );
     }
 
@@ -604,27 +672,30 @@ mod tests {
         );
     }
 
-    // NOTE this always skips the base layer and you should probably rm -rf /bin
-    // and there are the annoying proc,run,sys dirs that are always there
-    fn squash_containerfile(containerfile: &str) -> Result<EList, Box<dyn error::Error>> {
-        let mut layers: Vec<_> = build_with_podman(containerfile)
-            .unwrap()
-            .into_iter()
-            .skip(1) // skip the base layer
-            .map(Cursor::new)
-            .collect();
+    /// returns the difference (podman - squash) of podman exporting a flat image vs us squashing
+    /// the layers produced when running the containerfile
+    fn podman_squash_diff(containerfile: &str) -> Result<(EList, EList), Box<dyn error::Error>> {
+        let rootfs = build_with_podman(containerfile)?;
+        let mut layers: Vec<_> = rootfs.layers.into_iter().map(Cursor::new).collect();
 
         let mut buf = Cursor::new(vec![]);
         squash(&mut layers, &mut buf).unwrap();
-        Ok(deserialize(&buf.into_inner()))
+        let our_combined = deserialize(&buf.into_inner());
+        let podman_combined = deserialize(&rootfs.combined);
+        Ok((our_combined, podman_combined))
     }
 
     macro_rules! check_podman {
-        ($containerfile:expr, $expected:expr) => {{
-            assert_eq!(
-                squash_containerfile($containerfile).unwrap(),
-                $expected.into_iter().collect::<EList>()
-            );
+        ($containerfile:expr) => {{
+            if let Err(_) = Command::new("podman").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+                eprintln!("podman missing");
+            } else {
+                let (ours, podman) = podman_squash_diff($containerfile).unwrap();
+                let ours_minus_podman: EList = ours.difference(&podman).cloned().collect();
+                assert_eq!(ours_minus_podman, EList::new(), "ours_minus_podman");
+                let podman_minus_ours: EList = ours.difference(&podman).cloned().collect();
+                assert_eq!(podman_minus_ours, EList::new(), "podman_minus_ours");
+            }
         }};
     }
 
@@ -634,14 +705,27 @@ mod tests {
         check_podman!(r#"
 FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
 RUN echo hi > x && ln x y && mkfifo fifo
-RUN rm -rf /bin
-            "#,
-            vec![
-                E::file("x", b"hi\n"), E::link("y", "x"), E::fifo("fifo"),
-                // these are annoyingly always present in podman's layers
-                // also note the trailing slash
-                E::dir("proc/"), E::dir("run/"), E::dir("sys/"),
-            ]
-        );
+        "#);
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_podman_2() {
+        check_podman!(r#"
+FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
+RUN echo hi > x
+RUN ln x y
+RUN mkfifo fifo
+        "#);
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_podman_3() {
+        check_podman!(r#"
+FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
+RUN mkdir -p x/y && touch xfile x/file x/y/file
+RUN rm -rf x
+        "#);
     }
 }
