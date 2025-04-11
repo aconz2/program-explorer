@@ -1,4 +1,3 @@
-use flate2::read::GzDecoder;
 use std::borrow::Borrow;
 use std::cmp::Ord;
 use std::collections::BTreeSet;
@@ -6,9 +5,11 @@ use std::io;
 use std::io::{Read, Seek, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+
+use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
+use flate2::read::GzDecoder;
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -35,6 +36,7 @@ enum Whiteout {
 struct Deletions {
     singles: BTreeSet<PathBuf>,
     opaques: BTreeSet<PathBuf>,
+    seen: BTreeSet<PathBuf>,
 
     singles_q: Vec<PathBuf>,
     opaques_q: Vec<PathBuf>,
@@ -45,6 +47,7 @@ enum DeletionReason {
     Single,
     SingleDir,
     Opaque,
+    Shadowed,
 }
 
 #[derive(Debug, Default)]
@@ -52,6 +55,7 @@ pub struct Stats {
     deletions: usize,
     deletion_dirs: usize,
     opaques: usize,
+    shadowed: usize,
 }
 
 // important notes about the OCI spec
@@ -110,7 +114,6 @@ where
         for entry in layer.entries()? {
             let mut entry = entry?;
 
-            eprintln!("path is {:?}", entry.path()?);
             match whiteout(&entry)? {
                 Some(Whiteout::Single(path)) => {
                     if i != 0 {
@@ -145,18 +148,19 @@ where
 
             match deletions.is_deleted(&entry.path()?) {
                 Some(DeletionReason::Single) => {
-                    eprintln!("path is {:?} deleted by single", entry.path()?);
                     stats.deletions += 1;
                     continue;
                 }
                 Some(DeletionReason::SingleDir) => {
-                    eprintln!("path is {:?} deleted by dir", entry.path()?);
                     stats.deletion_dirs += 1;
                     continue;
                 }
                 Some(DeletionReason::Opaque) => {
-                    eprintln!("path is {:?} deleted by opaque", entry.path()?);
                     stats.opaques += 1;
+                    continue;
+                }
+                Some(DeletionReason::Shadowed) => {
+                    stats.shadowed += 1;
                     continue;
                 }
                 _ => {}
@@ -176,13 +180,11 @@ where
                     let extension = extension?;
                     let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
                     let value = extension.value_bytes();
-                    eprintln!("writing  extension {:?} {:?}", key, value);
                     acc.push((key, value));
                 }
                 aw.append_pax_extensions(acc)?;
             }
-            //eprintln!("entry has path{:?} len={}", entry.path().unwrap(), entry.path().unwrap().as_os_str().as_encoded_bytes().len());
-            //
+
             // annoying we have to clone the header since we have to borrow the entry to read
             // from. same with owning the path
             let mut header = entry.header().clone();
@@ -201,14 +203,14 @@ where
             // once we write a file, we mark it as deleted so we do not write it again
             // on the last layer there is no point storing the deletion
             if i != 0 {
-                eprintln!("pushing single deletion {:?}", entry.path()?);
-                deletions.push_single(entry.path()?.into());
+                //deletions.push_single(entry.path()?.into());
+                deletions.insert_seen(entry.path()?.into());
             }
         }
 
         // end of layer, updated deleted_{files,opaques}
         if i != 0 {
-                eprintln!("commiting changes");
+            eprintln!("commiting changes");
             deletions.end_of_layer();
         }
     }
@@ -225,9 +227,14 @@ impl Deletions {
     fn push_opaque(&mut self, p: PathBuf) {
         self.opaques_q.push(p);
     }
+    fn insert_seen(&mut self, p: PathBuf) {
+        self.seen.insert(p);
+    }
     fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<DeletionReason> {
         let p = p.as_ref();
-        if let Some(x) = lower_bound_inclusive(&self.singles, p) {
+        if self.seen.contains(p) {
+            return Some(DeletionReason::Shadowed);
+        } else if let Some(x) = lower_bound_inclusive(&self.singles, p) {
             if p == x {
                 return Some(DeletionReason::Single);
             } else if p.starts_with(x) {
@@ -426,7 +433,7 @@ mod tests {
             .collect()
     }
 
-    fn make_entry<P, F, B>(path: P, data: &[u8], f: F) -> B
+    fn make_entry<P, F, B>(path: P, f: F) -> B
     where
         P: AsRef<Path>,
         F: Fn(Entry<'_, Cursor<Vec<u8>>>) -> B,
@@ -451,7 +458,7 @@ mod tests {
     #[rustfmt::skip]
     #[test]
     fn test_whiteout_recognition() {
-        make_entry("foo", &b"data"[..], |e| {
+        make_entry("foo", |e| {
             assert_eq!(whiteout(&e).unwrap(), None);
         });
 
@@ -468,13 +475,13 @@ mod tests {
         ];
 
         for (x, y) in files.into_iter() {
-            make_entry(x, &b"data"[..], |e| {
+            make_entry(x, |e| {
                 assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Single(y.into())));
             });
         }
 
         for (x, y) in dirs.into_iter() {
-            make_entry(x, &b""[..], |e| {
+            make_entry(x, |e| {
                 assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Opaque(y.into())));
             });
         }
@@ -483,22 +490,33 @@ mod tests {
     #[rustfmt::skip]
     #[test]
     fn test_deletions() {
-        let mut d = Deletions::default();
-        assert_eq!(d.is_deleted("foo"), None);
-        // TODO I tried making push_single take P: Into<PathBuf> but wasn't working great
-        d.push_single("x".into());
-        d.end_of_layer();
-        assert_eq!(d.is_deleted("x"), Some(DeletionReason::Single));
-        assert_eq!(d.is_deleted("x/"), Some(DeletionReason::Single));
-        assert_eq!(d.is_deleted("x/file"), Some(DeletionReason::SingleDir));
-        assert_eq!(d.is_deleted("xfile"), None);
+        // deletions should be the same whether the tar stream has trailing slashes on the dirs
+        // this is because we use Path == and Path.starts_with which is smarter than String == and
+        // String.starts_with
+        for trailing_slash in vec![false].into_iter() {
+            let mut d = Deletions::default();
+            assert_eq!(d.is_deleted("foo"), None);
+            // TODO I tried making push_single take P: Into<PathBuf> but wasn't working great
+            d.push_single((if trailing_slash {"x/"} else {"x"}).into());
+            d.end_of_layer();
+            assert_eq!(d.is_deleted("x"), Some(DeletionReason::Single));
+            assert_eq!(d.is_deleted("x/"), Some(DeletionReason::Single));
+            assert_eq!(d.is_deleted("x/file"), Some(DeletionReason::SingleDir));
+            assert_eq!(d.is_deleted("xfile"), None);
 
-        d.push_opaque("a/b".into());
-        d.end_of_layer();
-        assert_eq!(d.is_deleted("a/b"), None);
-        assert_eq!(d.is_deleted("a/b/"), None);
-        assert_eq!(d.is_deleted("a/b/foo"), Some(DeletionReason::Opaque));
-        assert_eq!(d.is_deleted("a/b/foo/"), Some(DeletionReason::Opaque));
+            d.push_opaque((if trailing_slash {"a/b/"} else {"a/b"}).into());
+            d.end_of_layer();
+            assert_eq!(d.is_deleted("a/b"), None);
+            assert_eq!(d.is_deleted("a/b/"), None);
+            assert_eq!(d.is_deleted("a/b/foo"), Some(DeletionReason::Opaque));
+            assert_eq!(d.is_deleted("a/b/foo/"), Some(DeletionReason::Opaque));
+
+            d.insert_seen((if trailing_slash {"q/"} else {"q"}).into());
+            assert_eq!(d.is_deleted("q"), Some(DeletionReason::Shadowed), "trailing_slash={}", trailing_slash);
+            assert_eq!(d.is_deleted("q/"), Some(DeletionReason::Shadowed));
+            assert_eq!(d.is_deleted("q/file"), None);
+            assert_eq!(d.is_deleted("qfile"), None);
+        }
     }
 
     #[test]
@@ -686,18 +704,29 @@ mod tests {
     }
 
     macro_rules! check_podman {
-        ($containerfile:expr) => {{
+        ($containerfile:expr, $expected_ours_minus_podman:expr, $expected_podman_minus_ours:expr) => {{
             if let Err(_) = Command::new("podman").stdout(Stdio::null()).stderr(Stdio::null()).status() {
                 eprintln!("podman missing");
             } else {
                 let (ours, podman) = podman_squash_diff($containerfile).unwrap();
-                let ours_minus_podman: EList = ours.difference(&podman).cloned().collect();
-                assert_eq!(ours_minus_podman, EList::new(), "ours_minus_podman");
-                let podman_minus_ours: EList = ours.difference(&podman).cloned().collect();
-                assert_eq!(podman_minus_ours, EList::new(), "podman_minus_ours");
+
+                assert_eq!(
+                    ours.difference(&podman).cloned().collect::<EList>(),
+                    $expected_ours_minus_podman.into_iter().collect::<EList>(),
+                    "ours minus podman"
+                    );
+
+                assert_eq!(
+                    podman.difference(&ours).cloned().collect::<EList>(),
+                    $expected_podman_minus_ours.into_iter().collect::<EList>(),
+                    "podman minus ours"
+                    );
             }
         }};
     }
+
+    // currently we output a dir for . since that is from the busybox layer, but podman doesn't for
+    // some reason. That does seem important if you need to set the permissions on / or whatever
 
     #[rustfmt::skip]
     #[test]
@@ -705,7 +734,10 @@ mod tests {
         check_podman!(r#"
 FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
 RUN echo hi > x && ln x y && mkfifo fifo
-        "#);
+        "#,
+        vec![E::dir("./")], // ours minus podman
+        vec![]  // podman minus ours
+        );
     }
 
     #[rustfmt::skip]
@@ -716,7 +748,10 @@ FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47
 RUN echo hi > x
 RUN ln x y
 RUN mkfifo fifo
-        "#);
+        "#,
+        vec![E::dir("./")], // ours minus podman
+        vec![]  // podman minus ours
+        );
     }
 
     #[rustfmt::skip]
@@ -726,6 +761,9 @@ RUN mkfifo fifo
 FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
 RUN mkdir -p x/y && touch xfile x/file x/y/file
 RUN rm -rf x
-        "#);
+        "#,
+        vec![E::dir("./")], // ours minus podman
+        vec![]  // podman minus ours
+        );
     }
 }
