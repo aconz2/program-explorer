@@ -1,15 +1,15 @@
 use std::borrow::Borrow;
 use std::cmp::Ord;
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::io;
 use std::io::{Read, Seek, Write};
 use std::ops::Bound;
-use std::path::{Path, PathBuf};
-use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
-use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use flate2::read::GzDecoder;
+use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -174,7 +174,7 @@ where
                 // even though PaxExtensions implements IntoIter, it has the wrong type, first
                 // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
                 // also because the key() returns a Result<&str> because it may not be valid
-                // utf8
+                // utf8. maybe there is a fancy way of adapting the iterator but doesn't matter
                 let mut acc = vec![];
                 for extension in extensions.into_iter() {
                     let extension = extension?;
@@ -203,14 +203,11 @@ where
             // once we write a file, we mark it as deleted so we do not write it again
             // on the last layer there is no point storing the deletion
             if i != 0 {
-                //deletions.push_single(entry.path()?.into());
                 deletions.insert_seen(entry.path()?.into());
             }
         }
 
-        // end of layer, updated deleted_{files,opaques}
         if i != 0 {
-            eprintln!("commiting changes");
             deletions.end_of_layer();
         }
     }
@@ -307,83 +304,133 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
 mod tests {
     use super::*;
 
-    use flate2::write::GzEncoder;
     use std::error;
     use std::io::{Cursor, Seek, SeekFrom};
-    use tar::{Builder, EntryType, Header};
-    use std::process::{Command,Stdio};
+    use std::process::{Command, Stdio};
+
+    use flate2::write::GzEncoder;
+    use tar::{Builder, Header};
 
     use crate::podman::build_with_podman;
 
+    // sorted list of (key,value) bytes
+    type Ext = Vec<(String, Vec<u8>)>;
+
+    #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    enum EntryTyp {
+        #[default]
+        File,
+        Dir,
+        Link,
+        Symlink,
+        Fifo,
+    }
+
     // E is a standalone redux Entry
-    #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
-    enum E {
-        File { path: PathBuf, data: Vec<u8> },
-        Dir { path: PathBuf },
-        Link { path: PathBuf, link: PathBuf },
-        Symlink { path: PathBuf, link: PathBuf },
-        Fifo { path: PathBuf },
+    #[derive(Default, Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
+    struct E {
+        typ: EntryTyp,
+        path: PathBuf,
+        data: Option<Vec<u8>>,
+        ext: Ext,
+        link: Option<PathBuf>,
+        mtime: u64,
+        uid: u64,
+        gid: u64,
+        mode: u32,
+        // mode,uid,gid ...
     }
 
     impl E {
         fn file<P: Into<PathBuf>>(path: P, data: &[u8]) -> Self {
-            Self::File {
+            Self {
+                typ: EntryTyp::File,
                 path: path.into(),
-                data: Vec::from(data),
+                data: Some(Vec::from(data)),
+                mode: 0o744,
+                ..Default::default()
             }
         }
         fn dir<P: Into<PathBuf>>(path: P) -> Self {
-            Self::Dir { path: path.into() }
+            Self {
+                typ: EntryTyp::Dir,
+                path: path.into(),
+                ..Default::default()
+            }
         }
         fn link<P1: Into<PathBuf>, P2: Into<PathBuf>>(path: P1, link: P2) -> Self {
-            Self::Link {
+            Self {
+                typ: EntryTyp::Link,
                 path: path.into(),
-                link: link.into(),
+                link: Some(link.into()),
+                ..Default::default()
             }
         }
         fn symlink<P1: Into<PathBuf>, P2: Into<PathBuf>>(path: P1, link: P2) -> Self {
-            Self::Symlink {
+            Self {
+                typ: EntryTyp::Symlink,
                 path: path.into(),
-                link: link.into(),
+                link: Some(link.into()),
+                ..Default::default()
             }
         }
         fn fifo<P: Into<PathBuf>>(path: P) -> Self {
-            Self::Fifo { path: path.into() }
+            Self {
+                typ: EntryTyp::Fifo,
+                path: path.into(),
+                ..Default::default()
+            }
         }
     }
 
     type EList = BTreeSet<E>;
 
+    fn as_pax<'a>(ext: &'a Ext) -> impl IntoIterator<Item = (&'a str, &'a [u8])> {
+        ext.iter().map(|(x, y)| (x.as_ref(), y.as_ref()))
+    }
+
     fn serialize_to_writer<W: Write>(entries: &[E], out: &mut W) {
+        use EntryTyp::*;
         let mut writer = ArchiveBuilder::new(out);
         for entry in entries {
+            writer.append_pax_extensions(as_pax(&entry.ext)).unwrap();
             let mut h = Header::new_ustar();
-            match entry {
-                E::File { path, data } => {
-                    h.set_entry_type(EntryType::Regular);
+            h.set_uid(entry.uid);
+            h.set_gid(entry.gid);
+            h.set_mtime(entry.mtime);
+            h.set_mode(entry.mode);
+            match entry.typ {
+                File => {
+                    let data = entry.data.as_ref().unwrap();
+                    h.set_entry_type(tar::EntryType::Regular);
                     h.set_size(data.len() as u64);
                     writer
-                        .append_data(&mut h, path, Cursor::new(&data))
+                        .append_data(&mut h, &entry.path, Cursor::new(data))
                         .unwrap();
                 }
-                E::Dir { path } => {
-                    h.set_entry_type(EntryType::Directory);
+                Dir => {
+                    h.set_entry_type(tar::EntryType::Directory);
                     h.set_size(0);
-                    writer.append_data(&mut h, path, &b""[..]).unwrap();
+                    writer.append_data(&mut h, &entry.path, &b""[..]).unwrap();
                 }
-                E::Link { path, link } => {
-                    h.set_entry_type(EntryType::Link);
+                Link => {
+                    h.set_entry_type(tar::EntryType::Link);
                     h.set_size(0);
-                    writer.append_link(&mut h, path, link).unwrap();
+                    writer
+                        .append_link(&mut h, &entry.path, entry.link.as_ref().unwrap())
+                        .unwrap();
                 }
-                E::Symlink { path, link } => {
-                    h.set_entry_type(EntryType::Symlink);
+                Symlink => {
+                    h.set_entry_type(tar::EntryType::Symlink);
                     h.set_size(0);
-                    writer.append_link(&mut h, path, link).unwrap();
+                    writer
+                        .append_link(&mut h, &entry.path, entry.link.as_ref().unwrap())
+                        .unwrap();
                 }
-                E::Fifo { path } => {
-                    h.set_entry_type(EntryType::Fifo);
-                    writer.append_data(&mut h, path, &b""[..]).unwrap();
+                Fifo => {
+                    h.set_entry_type(tar::EntryType::Fifo);
+                    h.set_size(0);
+                    writer.append_data(&mut h, &entry.path, &b""[..]).unwrap();
                 }
             }
         }
@@ -408,26 +455,61 @@ mod tests {
             .unwrap()
             .map(|x| x.unwrap())
             .map(|mut x| {
-                let path = x.path().unwrap().into();
-                match x.header().entry_type() {
-                    EntryType::Regular => {
-                        let mut data = vec![];
-                        x.read_to_end(&mut data).unwrap();
-                        E::File { path, data }
+                let path: PathBuf = x.path().unwrap().into();
+                let ext = {
+                    if let Some(ext) = x.pax_extensions().unwrap() {
+                        ext.into_iter()
+                            .map(|x| x.unwrap())
+                            .map(|x| (x.key().unwrap().to_string(), Vec::from(x.value_bytes())))
+                            .collect()
+                    } else {
+                        vec![]
                     }
-                    EntryType::Directory => E::Dir { path },
-                    EntryType::Link => {
-                        let link = x.link_name().unwrap().unwrap().into();
-                        E::Link { path, link }
-                    }
-                    EntryType::Symlink => {
-                        let link = x.link_name().unwrap().unwrap().into();
-                        E::Symlink { path, link }
-                    }
-                    EntryType::Fifo => E::Fifo { path },
+                };
+                let header = x.header();
+                let uid = header.uid().unwrap();
+                let gid = header.gid().unwrap();
+                let mode = header.mode().unwrap();
+                let mtime = header.mtime().unwrap();
+                let entry_type = header.entry_type();
+
+                let typ = match entry_type {
+                    tar::EntryType::Regular => EntryTyp::File,
+                    tar::EntryType::Directory => EntryTyp::Dir,
+                    tar::EntryType::Link => EntryTyp::Link,
+                    tar::EntryType::Symlink => EntryTyp::Symlink,
+                    tar::EntryType::Fifo => EntryTyp::Fifo,
                     x => {
                         panic!("unhandled entry type {x:?}");
                     }
+                };
+
+                let link = match entry_type {
+                    tar::EntryType::Link | tar::EntryType::Symlink => {
+                        Some(x.link_name().unwrap().unwrap().into())
+                    }
+                    _ => None,
+                };
+
+                let data = match entry_type {
+                    tar::EntryType::Regular => {
+                        let mut data = vec![];
+                        x.read_to_end(&mut data).unwrap();
+                        Some(data)
+                    }
+                    _ => None,
+                };
+
+                E {
+                    typ,
+                    path,
+                    link,
+                    ext,
+                    data,
+                    uid,
+                    gid,
+                    mode,
+                    mtime,
                 }
             })
             .collect()
@@ -439,7 +521,7 @@ mod tests {
         F: Fn(Entry<'_, Cursor<Vec<u8>>>) -> B,
     {
         let mut h = Header::new_ustar();
-        h.set_entry_type(EntryType::Regular);
+        h.set_entry_type(tar::EntryType::Regular);
         h.set_size(0);
 
         let buf = {
@@ -523,27 +605,46 @@ mod tests {
     fn test_lower_bound_exclusive() {
         let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
         assert_eq!(lower_bound_exclusive(&set, "dir1/"), Some("dir1!").as_ref());
-        assert_eq!(lower_bound_exclusive(&set, "dir1/file"), Some("dir1/").as_ref());
+        assert_eq!(
+            lower_bound_exclusive(&set, "dir1/file"),
+            Some("dir1/").as_ref()
+        );
         assert_eq!(lower_bound_exclusive(&set, "dir0/file"), None);
-        assert_eq!(lower_bound_exclusive(&set, "dir2/file"), Some("dir2/dir3/").as_ref());
+        assert_eq!(
+            lower_bound_exclusive(&set, "dir2/file"),
+            Some("dir2/dir3/").as_ref()
+        );
     }
 
     #[test]
     fn test_lower_bound_inclusive() {
         let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
-        assert_eq!(lower_bound_inclusive(&set, "dir1/file"), Some("dir1/").as_ref());
+        assert_eq!(
+            lower_bound_inclusive(&set, "dir1/file"),
+            Some("dir1/").as_ref()
+        );
         assert_eq!(lower_bound_inclusive(&set, "dir1/"), Some("dir1/").as_ref());
     }
 
     #[test]
     fn test_serde() {
         let long_name = "a".repeat(101);
+        let with_attrs = {
+            let mut entry = E::file("attrs", b"hii");
+            entry.uid = 1000;
+            entry.gid = 1000;
+            entry.mtime = 1024;
+            entry.mode = 0o755;
+            entry
+        };
         let entries = vec![
             E::file("x", b"hi"),
             E::link("y", "x"),
             E::file(&long_name, b"foo"),
             E::link("z", &long_name),
             E::symlink("s", &long_name),
+            E::fifo("fifo"),
+            with_attrs,
         ];
         let buf = serialize(&entries);
         assert_eq!(entries.into_iter().collect::<EList>(), deserialize(&buf));
@@ -705,28 +806,38 @@ mod tests {
 
     macro_rules! check_podman {
         ($containerfile:expr, $expected_ours_minus_podman:expr, $expected_podman_minus_ours:expr) => {{
-            if let Err(_) = Command::new("podman").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            if let Err(_) = Command::new("podman")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
                 eprintln!("podman missing");
             } else {
                 let (ours, podman) = podman_squash_diff($containerfile).unwrap();
 
+                // doing two of these sequentially is actually annoying because when the first
+                // fails may want to see the other to diagnose the problem..
                 assert_eq!(
                     ours.difference(&podman).cloned().collect::<EList>(),
                     $expected_ours_minus_podman.into_iter().collect::<EList>(),
                     "ours minus podman"
-                    );
+                );
 
                 assert_eq!(
                     podman.difference(&ours).cloned().collect::<EList>(),
                     $expected_podman_minus_ours.into_iter().collect::<EList>(),
                     "podman minus ours"
-                    );
+                );
             }
         }};
     }
 
     // currently we output a dir for . since that is from the busybox layer, but podman doesn't for
-    // some reason. That does seem important if you need to set the permissions on / or whatever
+    // some reason. That does seem important if you need to set the permissions on / or whatever.
+    // and so when we check, we have to check against the exact mtime etc so this is that dir
+    fn busybox_root_dir() -> E {
+        E { typ: EntryTyp::Dir, path: "./".into(), data: None, ext: vec![], link: None, mtime: 1727386302, uid: 0, gid: 0, mode: 0o755 }
+    }
 
     #[rustfmt::skip]
     #[test]
@@ -735,7 +846,7 @@ mod tests {
 FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
 RUN echo hi > x && ln x y && mkfifo fifo
         "#,
-        vec![E::dir("./")], // ours minus podman
+        vec![busybox_root_dir()], // ours minus podman
         vec![]  // podman minus ours
         );
     }
@@ -749,7 +860,7 @@ RUN echo hi > x
 RUN ln x y
 RUN mkfifo fifo
         "#,
-        vec![E::dir("./")], // ours minus podman
+        vec![busybox_root_dir()], // ours minus podman
         vec![]  // podman minus ours
         );
     }
@@ -762,7 +873,20 @@ FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47
 RUN mkdir -p x/y && touch xfile x/file x/y/file
 RUN rm -rf x
         "#,
-        vec![E::dir("./")], // ours minus podman
+        vec![busybox_root_dir()], // ours minus podman
+        vec![]  // podman minus ours
+        );
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn test_podman_4() {
+        check_podman!(r#"
+FROM docker.io/library/busybox@sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564
+RUN touch x && setfattr -n user.MYATTR -v foo x
+RUN chmod 444 x
+        "#,
+        vec![busybox_root_dir()], // ours minus podman
         vec![]  // podman minus ours
         );
     }
