@@ -313,8 +313,12 @@ impl Deletions {
     }
     fn insert(&mut self, path: PathBuf, reason: DeletionState) {
         use DeletionState::*;
+        eprintln!("inserting {:?} for {:?}", path, reason);
         if let Some(state) = self.map.get_mut(&path) {
+            eprintln!("changing from {:?} to {:?} for {:?}", state, reason, path);
             *state = reason;
+            // so old,new of Whiteout=>Shadowed should never happen
+            // because we should never be able to emit something once it is whiteout
             //     old  ,  new
             //match (&state, reason) {
             //    (Whiteout, Whiteout) |
@@ -493,6 +497,10 @@ mod tests {
                 path: path.into(),
                 ..Default::default()
             }
+        }
+        fn with_uid(mut self: Self, uid: u64) -> Self {
+            self.uid = uid;
+            self
         }
     }
 
@@ -867,6 +875,7 @@ mod tests {
     #[rustfmt::skip]
     #[test]
     fn test_squash_chained_deletions() {
+        // triggers a change from shadowed to whiteout
         check_squash!(
             vec![
                 vec![E::dir("x"), E::file("x/a", b"hi")],
@@ -874,6 +883,16 @@ mod tests {
                 vec![E::file("x", b"bye")],
             ],
             vec![E::file("x", b"bye")]
+        );
+
+        // triggers a change from shadowed to opaque
+        check_squash!(
+            vec![
+                vec![E::dir("x").with_uid(1), E::file("x/a", b"hi")],
+                vec![E::file("x/.wh..wh..opq", b"")],
+                vec![E::dir("x").with_uid(2)],
+            ],
+            vec![E::dir("x").with_uid(2)]
         );
     }
 
