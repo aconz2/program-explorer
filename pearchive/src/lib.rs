@@ -82,22 +82,22 @@ pub trait UnpackVisitor {
     fn on_file(&mut self, path: &Path, data: &[u8]) -> bool;
 }
 
-struct PackFsToFile {
-    writer: BufWriter::<File>,
+struct PackFsToWriter<W: Write + AsRawFd> {
+    writer: BufWriter::<W>,
     depth: usize,
 }
 
-impl PackFsToFile {
-    fn new(out: File) -> Self {
+impl<W: Write + AsRawFd> PackFsToWriter<W> {
+    fn new<'a>(out: W) -> Self {
         Self { depth: 0, writer: BufWriter::new(out) }
     }
 
-    fn into_file(self) -> Result<File, Error> {
+    fn into_file(self) -> Result<W, Error> {
         self.writer.into_inner().map_err(|_| Error::Write)
     }
 }
 
-impl PackFsVisitor for PackFsToFile {
+impl<W: Write + AsRawFd> PackFsVisitor for PackFsToWriter<W> {
     fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), Error> {
         let size_u32: u32 = size.try_into().map_err(|_| Error::Write)?;
         self.writer.write_all(&[ArchiveFormat1Tag::File as u8]).map_err(|_| Error::Write)?;
@@ -338,10 +338,14 @@ pub fn visit_dir<V: PackFsVisitor>(dir: &Path, v: &mut V) -> Result<(), Error> {
     visit_dirc(&cstr, v)
 }
 
-pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
-    let mut visitor = PackFsToFile::new(file);
+pub fn pack_dir_to_writer<W: Write + AsRawFd>(dir: &Path, writer: W) -> Result<W, Error> {
+    let mut visitor = PackFsToWriter::new(writer);
     visit_dir(dir, &mut visitor).unwrap();
     visitor.into_file()
+}
+
+pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
+    pack_dir_to_writer(dir, file)
 }
 
 /// deemed unsafe because we unpack to cwd with no path traversal protection, caller should ensure
