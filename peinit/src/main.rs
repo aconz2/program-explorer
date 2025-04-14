@@ -9,8 +9,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use rustix::fs::{chown, mkdir};
-use rustix::io::FdFlags;
+use rustix::fs::{chown, mkdir, open, OFlags, Mode};
 use rustix::mount::MountFlags as MS;
 use rustix::mount::{mount, mount_bind, mount_bind_recursive};
 use rustix::process::{chdir, chroot};
@@ -82,11 +81,6 @@ fn setup_panic() {
     }));
 }
 
-fn clear_cloexec<Fd: rustix::fd::AsFd>(fd: Fd) -> rustix::io::Result<()> {
-    //check_libc(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) })
-    rustix::io::fcntl_setfd(fd, FdFlags::empty())
-}
-
 // debugging code
 //fn mountinfo(name: &str) {
 //    if !name.is_empty() {
@@ -146,13 +140,13 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
 // kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
-    let mut file = File::open(archive).unwrap();
+    // NOTE this does not set CLOEXEC
+    let mut file: File = open(archive, OFlags::RDONLY, Mode::empty()).unwrap().into();
     let (archive_size, config) = read_io_file_config(&mut file).unwrap();
 
     //let mut cmd = Command::new("strace").arg("/bin/pearchive");
     let mut cmd = Command::new("/bin/pearchive");
 
-    clear_cloexec(&file).unwrap();
     let fd = file.as_raw_fd();
 
     cmd.arg("unpackfd")
@@ -178,8 +172,7 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 // TODO: maybe do this in process?
-fn pack_output<P: AsRef<OsStr>, F: rustix::fd::AsFd + AsRawFd>(dir: P, archive: F) {
-    clear_cloexec(&archive).unwrap();
+fn pack_output<P: AsRef<OsStr>, F: AsRawFd>(dir: P, archive: F) {
     let fd = archive.as_raw_fd();
     let ret = Command::new("/bin/pearchive")
         .arg("packfd")
@@ -401,7 +394,8 @@ fn main() {
 
     {
         // output
-        let mut f = File::create(INOUT_DEVICE).unwrap();
+        // NOTE this does not set CLOEXEC
+        let mut f: File = open(INOUT_DEVICE, OFlags::RDWR, Mode::empty()).unwrap().into();
         write_io_file_response(&mut f, &response).unwrap();
 
         match config.response_format {
