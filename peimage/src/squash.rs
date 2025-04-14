@@ -16,6 +16,9 @@ pub enum SquashError {
     HardlinkNoLink,
     Finish,
     Utf8Error,
+    MkfsFailed,
+    Mkfifo,
+    FifoOpen,
 }
 
 impl From<io::Error> for SquashError {
