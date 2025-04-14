@@ -119,12 +119,10 @@ fn spawn_worker(
 
 // a bit ugly since we can't easily use ? to munge the errors
 pub fn run(input: Input) -> OutputResult {
-    let io_file_fd = input.io_file.as_raw_fd();
     let pmems = CloudHypervisorPmem::Two([
         (input.rootfs, CloudHypervisorPmemMode::ReadOnly),
-        //(input.io_file.path().into(), CloudHypervisorPmemMode::ReadWrite),
         (
-            format!("/dev/fd/{}", io_file_fd).into(),
+            format!("/dev/fd/{}", input.io_file.as_raw_fd()).into(),
             CloudHypervisorPmemMode::ReadWrite,
         ),
     ]);
@@ -336,7 +334,6 @@ mod tests {
     fn cpuset_good() {
         // TODO bad test only works on this machine
         const N: usize = 32;
-        let mut s = ['1'; N];
         let set = cpuset(2, 15, 2).unwrap();
         //println!("{:?}", set);
         for x in set {

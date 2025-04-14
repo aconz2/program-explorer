@@ -97,3 +97,42 @@ fn round_up_file_to_pmem_size<F: AsFd>(f: F) -> rustix::io::Result<u64> {
     }
     Ok(newlen)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_iofile() {
+        let mut io_file = {
+            let mut builder = IoFileBuilder::new().unwrap();
+            builder.write_all(b"hello world").unwrap();
+            builder.finish().unwrap().into_inner()
+        };
+        let len = io_file.metadata().unwrap().len();
+        assert_eq!(len, PMEM_ALIGN_SIZE);
+
+        io_file.seek(SeekFrom::Start(0)).unwrap();
+        let mut buf = [0u8; 11];
+        assert_eq!(11, io_file.read(&mut buf).unwrap());
+        assert_eq!(&buf, b"hello world");
+
+        // can write 2MB of stuff
+        io_file.seek(SeekFrom::Start(0)).unwrap();
+        let data = &[0xff].repeat(PMEM_ALIGN_SIZE as usize);
+        io_file.write_all(&data).unwrap();
+
+        // but can't write 1 byte more
+        assert!(io_file.write_all(&[0xff]).is_err());
+
+        // can't shrink
+        assert!(io_file.set_len(1024).is_err());
+    }
+
+    #[test]
+    fn test_round_up_to() {
+        assert_eq!(PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(0));
+        assert_eq!(PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE - 1));
+        assert_eq!(PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE));
+        assert_eq!(2*PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE + 1));
+    }
+}
