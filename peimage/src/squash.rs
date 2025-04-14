@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
 use std::cmp::Ord;
-use std::collections::{BTreeSet,BTreeMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io;
 use std::io::{Read, Seek, Write};
@@ -270,7 +270,9 @@ impl Deletions {
         //None
         let p = p.as_ref();
         //eprintln!("is_deleted {:?}", p);
-        let mut iter = self.map.range::<Path, _>((Bound::Unbounded, Bound::Included(p)));
+        let mut iter = self
+            .map
+            .range::<Path, _>((Bound::Unbounded, Bound::Included(p)));
         let (key, state) = iter.next_back()?;
         //eprintln!("is_deleted {:?} bound included {:?} {:?}", p, key, state);
         //if key == p { // exact match on the key we are searching for
@@ -298,7 +300,7 @@ impl Deletions {
             DeletionState::Whiteout if p.starts_with(key) => {
                 return Some(DeletionReason::SingleDir);
             }
-            DeletionState::Opaque if key !=p && p.starts_with(key) => {
+            DeletionState::Opaque if key != p && p.starts_with(key) => {
                 return Some(DeletionReason::Opaque);
             }
             _ => {}
@@ -313,32 +315,30 @@ impl Deletions {
     }
     fn insert(&mut self, path: PathBuf, reason: DeletionState) {
         use DeletionState::*;
-        eprintln!("inserting {:?} for {:?}", path, reason);
+        // TODO use try_insert when stable
+
         if let Some(state) = self.map.get_mut(&path) {
-            eprintln!("changing from {:?} to {:?} for {:?}", state, reason, path);
-            *state = reason;
+            //*state = reason;
             // so old,new of Whiteout=>Shadowed should never happen
             // because we should never be able to emit something once it is whiteout
             //     old  ,  new
-            //match (&state, reason) {
-            //    (Whiteout, Whiteout) |
-            //    (Opaque, Opaque) |
-            //    (Shadowed, Shadowed)  => {
-            //        // kinda weird duplicate but okay
-            //    }
-            //    (Whiteout, Opaque) => { }
-            //    (Whiteout, Shadowed) => { }
-            //    (Opaque, Whiteout) => {}
-            //    (Opaque, Shadowed) => {}
-            //    // if something is already in the map b/c it is shadowed (already seen), and then a
-            //    // lower layer whiteouts/opaques it, update to reflect that
-            //    (Shadowed, Whiteout) => {
-            //        *state = Whiteout;
-            //    }
-            //    (Shadowed, Opaque) => {
-            //        *state = Opaque;
-            //    }
-            //}
+            match (&state, reason) {
+                (Whiteout, Whiteout) | (Opaque, Opaque) | (Shadowed, Shadowed) => {
+                    // kinda weird duplicate but okay
+                }
+                (Whiteout, Opaque) | (Whiteout, Shadowed) => {
+                    // no change, stays as whiteout
+                }
+
+                // _ + Whiteout = Whiteout
+                (Opaque, Whiteout) | (Shadowed, Whiteout) => {
+                    *state = Whiteout;
+                }
+                // Shadowed + Opaque = Whiteout
+                (Shadowed, Opaque) | (Opaque, Shadowed) => {
+                    *state = Whiteout;
+                }
+            }
         } else {
             self.map.insert(path, reason);
         }
@@ -875,7 +875,10 @@ mod tests {
     #[rustfmt::skip]
     #[test]
     fn test_squash_chained_deletions() {
-        // triggers a change from shadowed to whiteout
+        // test states `<from> then <to>` where the <from> state is encountered in a later layer
+        // and then <to> is encountered in an earlier layer
+
+        // shadowed then whiteout
         check_squash!(
             vec![
                 vec![E::dir("x"), E::file("x/a", b"hi")],
@@ -885,7 +888,7 @@ mod tests {
             vec![E::file("x", b"bye")]
         );
 
-        // triggers a change from shadowed to opaque
+        // shadowed then opaque
         check_squash!(
             vec![
                 vec![E::dir("x").with_uid(1), E::file("x/a", b"hi")],
@@ -893,6 +896,47 @@ mod tests {
                 vec![E::dir("x").with_uid(2)],
             ],
             vec![E::dir("x").with_uid(2)]
+        );
+
+        // whiteout then opaque
+        check_squash!(
+            vec![
+                vec![E::dir("x"), E::file("x/a", b"hi")],
+                vec![E::file("x/.wh..wh..opq", b"")],
+                vec![E::file(".wh.x", b"")],
+            ],
+            vec![]
+        );
+
+        // whiteout then shadowed
+        check_squash!(
+            vec![
+                vec![E::file("x", b"hello")],
+                vec![E::file("x", b"hi")],
+                vec![E::file(".wh.x", b"")],
+            ],
+            vec![]
+        );
+
+        // opaque then shadowed
+        check_squash!(
+            vec![
+                vec![E::dir("x").with_uid(1)],
+                vec![E::dir("x").with_uid(2), E::file("x/a", b"hi")],
+                vec![E::file("x/.wh..wh..opq", b"")],
+            ],
+            vec![E::dir("x").with_uid(2)]
+        );
+
+        // opaque then whiteout
+        // this is not realistic
+        check_squash!(
+            vec![
+                vec![E::dir("x"), E::file("x/a", b"hi")],
+                vec![E::file(".wh.x", b"")],
+                vec![E::file("x/.wh..wh..opq", b"")],
+            ],
+            vec![]
         );
     }
 
@@ -981,7 +1025,17 @@ mod tests {
     // some reason. That does seem important if you need to set the permissions on / or whatever.
     // and so when we check, we have to check against the exact mtime etc so this is that dir
     fn busybox_root_dir() -> E {
-        E { typ: EntryTyp::Dir, path: "./".into(), data: None, ext: vec![], link: None, mtime: 1727386302, uid: 0, gid: 0, mode: 0o755 }
+        E {
+            typ: EntryTyp::Dir,
+            path: "./".into(),
+            data: None,
+            ext: vec![],
+            link: None,
+            mtime: 1727386302,
+            uid: 0,
+            gid: 0,
+            mode: 0o755,
+        }
     }
 
     #[rustfmt::skip]
