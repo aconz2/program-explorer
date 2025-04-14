@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -184,18 +183,18 @@ pub enum Error {
 }
 
 // todo use a single write
-fn write_u32_le_slice(file: &mut File, xs: &[u32]) -> std::io::Result<()> {
+fn write_u32_le_slice<W: Write>(file: &mut W, xs: &[u32]) -> std::io::Result<()> {
     for x in xs {
         file.write_u32::<LE>(*x)?;
     }
     Ok(())
 }
 
-fn read_u32_le_slice(file: &mut File, xs: &mut [u32]) -> std::io::Result<()> {
+fn read_u32_le_slice<R: Read>(file: &mut R, xs: &mut [u32]) -> std::io::Result<()> {
     file.read_u32_into::<LE>(xs)
 }
 
-fn read_u32_le_pair(file: &mut File) -> std::io::Result<(u32, u32)> {
+fn read_u32_le_pair<R: Read>(file: &mut R) -> std::io::Result<(u32, u32)> {
     let mut buf = [0; 2];
     read_u32_le_slice(file, &mut buf)?;
     Ok((buf[0], buf[1]))
@@ -207,8 +206,8 @@ fn read_u32_le_pair(file: &mut File) -> std::io::Result<(u32, u32)> {
 // file is left with cursor at beginning of archive but you then must
 // seek back to 0 to write the archive size
 // file should be at 0, but we don't seek it so
-pub fn write_io_file_config(
-    file: &mut File,
+pub fn write_io_file_config<W: Write>(
+    file: &mut W,
     config: &Config,
     archive_size: u32,
 ) -> Result<(), Error> {
@@ -219,7 +218,7 @@ pub fn write_io_file_config(
     Ok(())
 }
 
-pub fn read_io_file_config(file: &mut File) -> Result<(u32, Config), Error> {
+pub fn read_io_file_config<R: Read>(file: &mut R) -> Result<(u32, Config), Error> {
     let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     let mut buf = vec![0; response_size as usize];
     file.read_exact(&mut buf).map_err(|_| Error::Io)?;
@@ -230,7 +229,7 @@ pub fn read_io_file_config(file: &mut File) -> Result<(u32, Config), Error> {
 // coming out of the guest, we have
 // <u32: archive size> <u32: response size> <response> <archive>
 // response is always in json format and archive_size may be 0
-pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<(), Error> {
+pub fn write_io_file_response<W: Write>(file: &mut W, response: &Response) -> Result<(), Error> {
     let response_bytes = serde_json::to_vec(&response).map_err(|_| Error::Ser)?;
     let response_size: u32 = response_bytes.len().try_into().unwrap();
     write_u32_le_slice(file, &[0, response_size]).map_err(|_| Error::Io)?;
@@ -243,7 +242,7 @@ pub fn write_io_file_response(file: &mut File, response: &Response) -> Result<()
 // response is always in json format and archive_size may be 0
 // we return the archive size and bytes of the response json
 // file cursor is left at beginning of archive
-pub fn read_io_file_response_bytes(file: &mut File) -> Result<(u32, Vec<u8>), Error> {
+pub fn read_io_file_response_bytes<R: Read + Seek>(file: &mut R) -> Result<(u32, Vec<u8>), Error> {
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
     let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     let mut ret = vec![0; response_size as usize];
@@ -252,7 +251,7 @@ pub fn read_io_file_response_bytes(file: &mut File) -> Result<(u32, Vec<u8>), Er
 }
 
 // returns a vec with the bytes of the io file <u32: response size> <response> <archive>
-pub fn read_io_file_response_archive_bytes(file: &mut File) -> Result<Vec<u8>, Error> {
+pub fn read_io_file_response_archive_bytes<R: Read + Seek>(file: &mut R) -> Result<Vec<u8>, Error> {
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
     let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     // could also truncate to archive_end and read_to_end to avoid the zero initialize
@@ -265,7 +264,7 @@ pub fn read_io_file_response_archive_bytes(file: &mut File) -> Result<Vec<u8>, E
     Ok(ret)
 }
 
-pub fn read_io_file_response(file: &mut File) -> Result<(u32, Response), Error> {
+pub fn read_io_file_response<R: Read + Seek>(file: &mut R) -> Result<(u32, Response), Error> {
     let (archive_size, response_bytes) = read_io_file_response_bytes(file)?;
     let response = serde_json::from_slice(&response_bytes).map_err(|_| Error::Ser)?;
     Ok((archive_size, response))

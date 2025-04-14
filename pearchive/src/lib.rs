@@ -88,7 +88,7 @@ struct PackFsToWriter<W: Write + AsRawFd> {
 }
 
 impl<W: Write + AsRawFd> PackFsToWriter<W> {
-    fn new<'a>(out: W) -> Self {
+    fn new(out: W) -> Self {
         Self { depth: 0, writer: BufWriter::new(out) }
     }
 

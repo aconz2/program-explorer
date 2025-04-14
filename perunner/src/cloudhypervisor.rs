@@ -1,5 +1,4 @@
 //use std::os::fd::AsRawFd;
-use std::fs;
 use std::path::{PathBuf};
 use std::process::{Command,Child,Stdio};
 //use std::os::unix::net::{UnixListener,UnixStream};
@@ -11,10 +10,7 @@ use std::time::Duration;
 use tempfile::{NamedTempFile};
 use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
 //use serde::Serialize;
-//use libc;
 use api_client;
-
-const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 
 #[derive(Debug,Default)]
 pub enum Error {
@@ -298,18 +294,4 @@ impl CloudHypervisor {
             err_file: Some(self.err_file),
         }
     }
-}
-
-fn round_up_to<const N: u64>(x: u64) -> u64 {
-    if x == 0 { return N; }
-    ((x + (N - 1)) / N) * N
-}
-
-pub fn round_up_file_to_pmem_size(f: &mut fs::File) -> io::Result<u64> {
-    let cur = f.metadata()?.len();
-    let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
-    if cur != newlen {
-        f.set_len(newlen)?;
-    }
-    Ok(newlen)
 }

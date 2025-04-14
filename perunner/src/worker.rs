@@ -1,4 +1,3 @@
-//use std::io;
 use std::thread;
 use std::thread::{spawn,JoinHandle};
 use crossbeam::channel;
@@ -6,14 +5,15 @@ use crossbeam::channel::{Receiver,Sender};
 use std::time::Duration;
 use waitid_timeout::{WaitIdDataOvertime,Siginfo};
 use std::path::PathBuf;
-use log::{trace};
+use std::os::fd::AsRawFd;
 
+use log::{trace};
 use nix;
 use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
-use tempfile::NamedTempFile;
 
 use crate::cloudhypervisor;
 use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem,CloudHypervisorLogs,CloudHypervisorPmem,CloudHypervisorPmemMode};
+use crate::iofile::IoFile;
 
 type JoinHandleT = JoinHandle<()>;
 
@@ -21,13 +21,13 @@ pub struct Input {
     pub id: u64,
     pub ch_config: CloudHypervisorConfig,
     pub rootfs: PathBuf,
-    pub io_file: NamedTempFile,
+    pub io_file: IoFile,
     pub ch_timeout: Duration,
 }
 
 pub struct Output {
     pub id: u64,
-    pub io_file: NamedTempFile,
+    pub io_file: IoFile,
     pub ch_logs: CloudHypervisorLogs,
 }
 
@@ -105,13 +105,13 @@ fn spawn_worker(id: usize,
     })
 }
 
-// TODO another idea is to preboot a task and then wait for the input, but if we want to support
-// choosing kernel version, then doesn't really work
 // a bit ugly since we can't easily use ? to munge the errors
 pub fn run(input: Input) -> OutputResult {
+    let io_file_fd = input.io_file.as_raw_fd();
     let pmems = CloudHypervisorPmem::Two([
         (input.rootfs, CloudHypervisorPmemMode::ReadOnly),
-        (input.io_file.path().into(), CloudHypervisorPmemMode::ReadWrite),
+        //(input.io_file.path().into(), CloudHypervisorPmemMode::ReadWrite),
+        (format!("/dev/fd/{}", io_file_fd).into(), CloudHypervisorPmemMode::ReadWrite),
     ]);
     let mut ch = {
         match CloudHypervisor::start(input.ch_config, Some(pmems)) {

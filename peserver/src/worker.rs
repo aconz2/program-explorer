@@ -14,7 +14,6 @@ use pingora::protocols::http::ServerSession;
 
 use async_trait::async_trait;
 use http::{Method,Response,StatusCode,header};
-use tempfile::NamedTempFile;
 use serde::{Serialize};
 use log::{info,error,log_enabled,debug};
 use clap::Parser;
@@ -23,7 +22,9 @@ use prometheus::{register_int_counter,IntCounter};
 use arc_swap::ArcSwap;
 
 use perunner::{worker,create_runtime_spec};
-use perunner::cloudhypervisor::{CloudHypervisorConfig,round_up_file_to_pmem_size,ChLogLevel};
+use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
+use perunner::iofile::IoFileBuilder;
+
 use peimage::index::PEImageMultiIndex;
 
 use peserver::api;
@@ -58,7 +59,7 @@ enum Error {
     BadRequest,
     BadImagePath,
     NoSuchImage,
-    TempfileCreate,
+    IoFileCreate,
     QueueFull,
     WorkerRecv,
     BadContentType,
@@ -109,7 +110,7 @@ impl From<Error> for StatusCode {
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv |
-            TempfileCreate |
+            IoFileCreate |
             ResponseRead |
             Worker |
             Serialize |
@@ -187,20 +188,22 @@ impl HttpRunnerApp {
             kernel_inspect     : false,
         };
 
-        let mut io_file = NamedTempFile::new().map_err(|_| Error::TempfileCreate)?;
-        match content_type {
-            ContentType::ApplicationJson => {
-                // this is blocking, but is going to tmpfs so I don't think its bad to do this?
-                peinit::write_io_file_config(io_file.as_file_mut(), &pe_config, 0).map_err(|_| Error::Internal)?;
+        let io_file = {
+            let mut builder = IoFileBuilder::new().map_err(|_| Error::IoFileCreate)?;
+            match content_type {
+                ContentType::ApplicationJson => {
+                    // this is blocking, but is going to tmpfs so I don't think its bad to do this?
+                    peinit::write_io_file_config(&mut builder, &pe_config, 0).map_err(|_| Error::Internal)?;
+                }
+                ContentType::PeArchiveV1 => {
+                    // this is blocking but should be fine, right?
+                    let archive_size: u32 = (body.len() - body_offset).try_into().map_err(|_| Error::Internal)?;
+                    peinit::write_io_file_config(&mut builder, &pe_config, archive_size).map_err(|_| Error::Internal)?;
+                    builder.write_all(&body[body_offset..]).map_err(|_| Error::Internal)?;
+                }
             }
-            ContentType::PeArchiveV1 => {
-                // this is blocking but should be fine, right?
-                let archive_size: u32 = (body.len() - body_offset).try_into().map_err(|_| Error::Internal)?;
-                peinit::write_io_file_config(io_file.as_file_mut(), &pe_config, archive_size).map_err(|_| Error::Internal)?;
-                io_file.write_all(&body[body_offset..]).map_err(|_| Error::Internal)?;
-            }
-        }
-        let _ = round_up_file_to_pmem_size(io_file.as_file_mut()).map_err(|_| Error::Internal)?;
+            builder.finish().map_err(|_| Error::IoFileCreate)?
+        };
 
         let worker_input = worker::Input {
             id         : 42, // id is useless because we are passing a return channel
@@ -247,12 +250,12 @@ impl HttpRunnerApp {
 
         match response_format {
             peinit::ResponseFormat::JsonV1 => {
-                peinit::read_io_file_response_bytes(worker_output.io_file.as_file_mut())
+                peinit::read_io_file_response_bytes(&mut worker_output.io_file)
                     .map_err(|_| Error::ResponseRead)
                     .map(|(_archive_size, json_bytes)| response_json_vec(StatusCode::OK, json_bytes))
             }
             peinit::ResponseFormat::PeArchiveV1 => {
-                peinit::read_io_file_response_archive_bytes(worker_output.io_file.as_file_mut())
+                peinit::read_io_file_response_archive_bytes(&mut worker_output.io_file)
                     .map_err(|_| Error::ResponseRead)
                     .map(|response_bytes| response_pearchivev1(StatusCode::OK, response_bytes))
             }

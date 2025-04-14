@@ -1,5 +1,6 @@
 pub mod cloudhypervisor;
 pub mod worker;
+pub mod iofile;
 
 use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;

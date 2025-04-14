@@ -1305,6 +1305,7 @@ dependencies = [
  "peimage",
  "peinit",
  "rand 0.8.5",
+ "rustix 1.0.5",
  "serde",
  "serde_json",
  "sha2",

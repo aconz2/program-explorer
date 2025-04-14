@@ -1,23 +1,22 @@
 use std::time::Duration;
-use std::fs::File;
 use std::io;
 use std::io::{Write,Seek,SeekFrom,Read};
 use std::ffi::{OsString};
 use std::path::{Path,PathBuf};
+use std::os::fd::AsRawFd;
 
-use tempfile::NamedTempFile;
 use byteorder::{WriteBytesExt,LE};
 use memmap2::{Mmap,MmapOptions};
 use clap::{Parser};
 
-use pearchive::{pack_dir_to_file,UnpackVisitor,unpack_visitor};
+use pearchive::{pack_dir_to_writer,UnpackVisitor,unpack_visitor};
 use peinit::{ResponseFormat};
 use peimage::index::{PEImageMultiIndex,PEImageMultiIndexKeyType};
 
 use perunner::create_runtime_spec;
-
-use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel,round_up_file_to_pmem_size};
+use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
 use perunner::worker;
+use perunner::iofile::IoFileBuilder;
 
 //fn sha2_hex(buf: &[u8]) -> String {
 //    use sha2::{Sha256,Digest};
@@ -27,21 +26,19 @@ use perunner::worker;
 //}
 
 // this is kinda dupcliated with pearchive::packdev
-fn create_pack_file_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(dir: &Option<P1>, file: P2, config: &peinit::Config) {
-    let mut f = File::create(file).unwrap();
-    () = peinit::write_io_file_config(&mut f, config, 0).unwrap();
-    let mut f = if let Some(dir) = dir {
-        let archive_start_pos = f.stream_position().unwrap();
-        let mut f = pack_dir_to_file(dir.as_ref(), f).unwrap();
-        let archive_end_pos = f.stream_position().unwrap();
+fn create_pack_file_from_dir<P: AsRef<Path>, W: Write + AsRawFd + Seek>(dir: &Option<P>, mut file: W, config: &peinit::Config) -> W {
+    peinit::write_io_file_config(&mut file, config, 0).unwrap();
+    if let Some(dir) = dir {
+        let archive_start_pos = file.stream_position().unwrap();
+        let mut file = pack_dir_to_writer(dir.as_ref(), file).unwrap();
+        let archive_end_pos = file.stream_position().unwrap();
         let size: u32 = (archive_end_pos - archive_start_pos).try_into().unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
-        f.write_u32::<LE>(size).unwrap();
-        f
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_u32::<LE>(size).unwrap();
+        file
     } else {
-        f
-    };
-    round_up_file_to_pmem_size(&mut f).unwrap();
+        file
+    }
 }
 
 fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
@@ -97,13 +94,14 @@ fn dump_file<F: Read>(name: &str, file: &mut F) {
 
 fn handle_worker_output(output: worker::OutputResult, response_format: &ResponseFormat, stdout: bool) {
     match output {
-        Ok(worker::Output{mut io_file, ch_logs, id}) => {
+        Ok(worker::Output{io_file, ch_logs, id}) => {
             let _ = id;
             if let Some(mut err_file) = ch_logs.err_file { dump_file("ch err", &mut err_file); }
             if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
             if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
 
-            let (archive_size, response) = peinit::read_io_file_response(io_file.as_file_mut()).unwrap();
+            let mut file = io_file.into_inner();
+            let (archive_size, response) = peinit::read_io_file_response(&mut file).unwrap();
             eprintln!("response {:#?}", response);
             match response_format {
                 ResponseFormat::JsonV1 => {
@@ -112,9 +110,9 @@ fn handle_worker_output(output: worker::OutputResult, response_format: &Response
                 ResponseFormat::PeArchiveV1 => {
                     let mapping = unsafe {
                         MmapOptions::new()
-                        .offset(io_file.stream_position().unwrap())
+                        .offset(file.stream_position().unwrap())
                         .len(archive_size.try_into().unwrap())
-                        .map(io_file.as_file())
+                        .map(&file)
                         .unwrap()
                     };
 
@@ -281,8 +279,10 @@ fn main() {
         let cpus = worker::cpuset(2, num_workers, 2).expect("couldn't make cpuset");
         let mut pool = worker::Pool::new(&cpus);
         for id in 0..args.parallel {
-            let io_file = NamedTempFile::new().unwrap();
-            create_pack_file_from_dir(&args.input, &io_file, &pe_config);
+            let io_file = {
+                let builder = create_pack_file_from_dir(&args.input, IoFileBuilder::new().unwrap(), &pe_config);
+                builder.finish().unwrap()
+            };
             let worker_input = worker::Input {
                 id: id,
                 ch_config: ch_config.clone(),
@@ -301,8 +301,10 @@ fn main() {
         let _ = pool.shutdown();
 
     } else {
-        let io_file = NamedTempFile::new().unwrap();
-        create_pack_file_from_dir(&args.input, &io_file, &pe_config);
+        let io_file = {
+            let builder = create_pack_file_from_dir(&args.input, IoFileBuilder::new().unwrap(), &pe_config);
+            builder.finish().unwrap()
+        };
         //std::fs::copy(io_file.path(), "/tmp/perunner-io-file").unwrap();
         let worker_input = worker::Input {
             id: 0,
