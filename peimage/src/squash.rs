@@ -1,6 +1,4 @@
-use std::borrow::Borrow;
-use std::cmp::Ord;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap};
 use std::ffi::OsStr;
 use std::io;
 use std::io::{Read, Seek, Write};
@@ -56,9 +54,6 @@ enum DeletionReason {
 
 #[derive(Default)]
 struct Deletions {
-    //singles: BTreeSet<PathBuf>,
-    //opaques: BTreeSet<PathBuf>,
-    //seen: BTreeSet<PathBuf>,
     map: BTreeMap<PathBuf, DeletionState>,
 
     whiteout_q: Vec<PathBuf>,
@@ -72,47 +67,40 @@ pub struct Stats {
     opaques: usize,
     shadowed: usize,
     deletions_map_size: usize,
-    //singles_size: usize,
-    //opaques_size: usize,
-    //seen_size: usize,
 }
 
 // important notes about the OCI spec
 // "Extracting a layer with hardlink references to files outside of the layer may fail."
 //
-// so GzDecoder doesn't have an option for Read+Seek,. What we really want is a trait for
+// GzDecoder doesn't have an option for Read+Seek,. What we really want is a trait for
 // SeekStart since we don't expect to be able to randomly seek in a compressed stream but we can
 // easily restart from the beginning. Instead take the underlying reader directly.
-// That does mean we are not agnostic to the compression which is a bit annoying
-// but in practice I think everything is (unfortunately) tgz TODO not true, tar+{,gzip,zstd}
-// this does make testing slightly more annoying since we first compress our layers. I
-// considered either dynamically checking or something like that but gets complicated
 //
-// compared to sylabs https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go
-// we do not store the contents of every file in memory, but we do have to have a seekable
-// stream since we take a second pass. Using libz-ng, a second pass through is less of a time
-// concern, but it does still mean you can't stream in. This also implements a better check of
-// opaque deleted/shadowed files in my opinion because they check each path component of each file
-// against a map from string to (bool, bool) which is a huge number of lookups. Here we can use
-// a btree and then check the prefix (cry for a trie, but idk if it would really be
-// worth it here)
-// Hardlinks are annoying means that on our first pass through TODO
+// Compared to sylabs https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go
+// they buffer files per layer in memory to deal with hardlinks. I haven't (yet) run into or
+// understand fully the situations they are handling, but for now we are not buffering file data in
+// memory or handling hardlinks specially at all. If we do handle hardlinks, I think doing a second
+// pass is a better option, though it does eliminate the possibility of streaming from network, but
+// I think that is okay. I intend to wait for all layers to be done until processing.
+// I also think the whiteout/opaque handling is better here because we do a single BTree lookup
+// that handles exact match and prefix handling without doing a hash lookup of every path and all
+// its ancestors.
 //
-// Total memory usage is something like the sum of path lengths from all entries, since we store
-// deleted ones, opaque ones, and non-deleted ones since these then get shown as, minus the size of
-// those paths lengths from the first layer. This is actually pretty good for containers with a
-// big first layer and some smaller layers after that.
-// note we don't have to store deletions on the first (last iteration) layer since we wouldn't
-// check them
+// Total memory usage is something like the sum of path lengths from all entries
+// minus the size of those paths lengths from the first layer.
+// This is actually pretty good for containers with a big first layer and some smaller layers after that.
 //
 // Ran into some weirdness with unicode paths, in index.docker.io/library/gcc:13.3.0 there is a
 // file "etc/ssl/certs/NetLock_Arany_=Class_Gold=_Főtanúsítvány.pem" whose path name is 62 bytes
 // long, but for some reason the tar layer stored this utf8 path name in a pax extension header
 // (key = "path") and in the header itself is an asciify "etc/ssl/certs/NetLock_Arany_=Class_Gold=_Ftanstvny.pem"
 // and I wasn't writing out the pax extensions so the output tar was getting the ascii version
+// That was fixed by using ArchiveWriter.append_data which takes care of writing the path out,
+// though I thought it would be sufficient to just make sure to write any pax extensions
 //
 // GzDecoder will create a BufReader internally if it doesn't get a BufRead, so no need to pass in
-// a BufRead
+// a BufRead. TODO when handling more compression types, revisit this since if we have an
+// uncompressed thing we'll want to make sure to use a BufReader
 
 pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<Stats, SquashError>
 where
@@ -219,13 +207,13 @@ where
                 }
             }
 
-            // once we write a file, we mark it as deleted so we do not write it again
             // on the last layer there is no point storing the deletion
             if i != 0 {
                 deletions.insert_seen(entry.path()?.into());
             }
         }
 
+        // apply whiteouts/opques except on the last layer
         if i != 0 {
             deletions.end_of_layer();
         }
@@ -234,9 +222,6 @@ where
     aw.finish().map_err(|_| SquashError::Finish)?;
 
     stats.deletions_map_size = deletions.map.len();
-    //stats.seen_size = deletions.seen.len();
-    //stats.whiteout_size = deletions..len();
-    //stats.opaque_size = deletions.opaques.len();
 
     Ok(stats)
 }
@@ -249,78 +234,46 @@ impl Deletions {
         self.opaque_q.push(p);
     }
     fn insert_seen(&mut self, p: PathBuf) {
-        //self.seen.insert(p);
         self.insert(p, DeletionState::Shadowed);
     }
     fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<DeletionReason> {
-        //let p = p.as_ref();
-        //if self.seen.contains(p) {
-        //    return Some(DeletionReason::Shadowed);
-        //} else if let Some(x) = lower_bound_inclusive(&self.singles, p) {
-        //    if p == x {
-        //        return Some(DeletionReason::Single);
-        //    } else if p.starts_with(x) {
-        //        return Some(DeletionReason::SingleDir);
-        //    }
-        //} else if let Some(x) = lower_bound_exclusive(&self.opaques, p) {
-        //    if p.starts_with(x) {
-        //        return Some(DeletionReason::Opaque);
-        //    }
-        //}
-        //None
         let p = p.as_ref();
-        //eprintln!("is_deleted {:?}", p);
-        let mut iter = self
+
+        // Query for an exact match of the path and anything less than it
+        // the first element of iter could be an exact match
+        let (key, state) = self
             .map
-            .range::<Path, _>((Bound::Unbounded, Bound::Included(p)));
-        let (key, state) = iter.next_back()?;
-        //eprintln!("is_deleted {:?} bound included {:?} {:?}", p, key, state);
-        //if key == p { // exact match on the key we are searching for
-        //    match state {
-        //        DeletionState::Shadowed => {
-        //            return Some(DeletionReason::Shadowed);
-        //        }
-        //        DeletionState::Whiteout => {
-        //            return Some(DeletionReason::Single);
-        //        }
-        //        _ => {} // Opaque exact match doesn't do anything
-        //    }
-        //} else if *state == DeletionState::Whiteout && p.starts_with(key) {
-        //    return Some(DeletionReason::SingleDir);
-        //} else if *state == DeletionState::Opaque && p.starts_with(key) {
-        //    return Some(DeletionReason::Opaque);
-        //}
+            .range::<Path, _>((Bound::Unbounded, Bound::Included(p)))
+            .next_back()?;
+
+        // it would be nice if the iter already told us if we matched
+        // and/or a starts_with_or_eq which just ran the components iter once and returned a
+        // tristate
+        // looking at Components more, I'm wondering if we should be normalizing paths (/ suffix for dirs) and storing
+        // as OsString since the iter logic on every compare might be adding up
+
         match state {
             DeletionState::Shadowed if key == p => {
-                return Some(DeletionReason::Shadowed);
+                Some(DeletionReason::Shadowed)
             }
             DeletionState::Whiteout if key == p => {
-                return Some(DeletionReason::Single);
+                Some(DeletionReason::Single)
             }
             DeletionState::Whiteout if p.starts_with(key) => {
-                return Some(DeletionReason::SingleDir);
+                Some(DeletionReason::SingleDir)
             }
             DeletionState::Opaque if key != p && p.starts_with(key) => {
-                return Some(DeletionReason::Opaque);
+                Some(DeletionReason::Opaque)
             }
-            _ => {}
+            _ => None
         }
-
-        // not an exact match
-        let (key, state) = iter.next_back()?;
-        if *state == DeletionState::Opaque && p.starts_with(key) {
-            return Some(DeletionReason::Opaque);
-        }
-        None
     }
+
     fn insert(&mut self, path: PathBuf, reason: DeletionState) {
         use DeletionState::*;
         // TODO use try_insert when stable
 
         if let Some(state) = self.map.get_mut(&path) {
-            //*state = reason;
-            // so old,new of Whiteout=>Shadowed should never happen
-            // because we should never be able to emit something once it is whiteout
             //     old  ,  new
             match (&state, reason) {
                 (Whiteout, Whiteout) | (Opaque, Opaque) | (Shadowed, Shadowed) => {
@@ -329,7 +282,6 @@ impl Deletions {
                 (Whiteout, Opaque) | (Whiteout, Shadowed) => {
                     // no change, stays as whiteout
                 }
-
                 // _ + Whiteout = Whiteout
                 (Opaque, Whiteout) | (Shadowed, Whiteout) => {
                     *state = Whiteout;
@@ -344,14 +296,6 @@ impl Deletions {
         }
     }
     fn end_of_layer(&mut self) {
-        //self.map.extend(
-        //    self.whiteout_q.drain(..)
-        //    .map(|x| (x, DeletionState::Whiteout))
-        //);
-        //self.map.extend(
-        //    self.opaque_q.drain(..)
-        //    .map(|x| (x, DeletionState::Opaque))
-        //);
         // have to take to not have a double borrow
         for x in std::mem::take(&mut self.whiteout_q).into_iter() {
             self.insert(x, DeletionState::Whiteout);
@@ -359,30 +303,7 @@ impl Deletions {
         for x in std::mem::take(&mut self.opaque_q).into_iter() {
             self.insert(x, DeletionState::Opaque);
         }
-        //for x in self.opaque_q.drain(..) {
-        //    self.insert(DeletionState::Opaque, x);
-        //}
-        //self.singles.extend(self.singles_q.drain(..));
-        //self.opaques.extend(self.opaques_q.drain(..));
     }
-}
-
-fn lower_bound_exclusive<'a, K, T>(set: &'a BTreeSet<T>, key: &K) -> Option<&'a T>
-where
-    T: Borrow<K> + Ord,
-    K: Ord + ?Sized,
-{
-    let mut iter = set.range((Bound::Unbounded, Bound::Excluded(key)));
-    iter.next_back()
-}
-
-fn lower_bound_inclusive<'a, K, T>(set: &'a BTreeSet<T>, key: &K) -> Option<&'a T>
-where
-    T: Borrow<K> + Ord,
-    K: Ord + ?Sized,
-{
-    let mut iter = set.range((Bound::Unbounded, Bound::Included(key)));
-    iter.next_back()
 }
 
 fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> {
@@ -391,7 +312,6 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
     //    return Ok(None)
     //}
     let path = entry.path()?; // can fail if not unicode on Windows (so should never fail)
-                              // TODO bad bad do prefix check against bytes, not string
     let name = {
         if let Some(name) = path.file_name() {
             name.as_encoded_bytes()
@@ -422,6 +342,7 @@ mod tests {
     use super::*;
 
     use std::error;
+    use std::collections::BTreeSet;
     use std::io::{Cursor, Seek, SeekFrom};
     use std::process::{Command, Stdio};
 
@@ -723,31 +644,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lower_bound_exclusive() {
-        let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
-        assert_eq!(lower_bound_exclusive(&set, "dir1/"), Some("dir1!").as_ref());
-        assert_eq!(
-            lower_bound_exclusive(&set, "dir1/file"),
-            Some("dir1/").as_ref()
-        );
-        assert_eq!(lower_bound_exclusive(&set, "dir0/file"), None);
-        assert_eq!(
-            lower_bound_exclusive(&set, "dir2/file"),
-            Some("dir2/dir3/").as_ref()
-        );
-    }
-
-    #[test]
-    fn test_lower_bound_inclusive() {
-        let set: BTreeSet<_> = vec!["dir1/", "dir1!", "dir2/dir3/"].into_iter().collect();
-        assert_eq!(
-            lower_bound_inclusive(&set, "dir1/file"),
-            Some("dir1/").as_ref()
-        );
-        assert_eq!(lower_bound_inclusive(&set, "dir1/"), Some("dir1/").as_ref());
-    }
-
-    #[test]
     fn test_serde() {
         let long_name = "a".repeat(101);
         let with_attrs = {
@@ -874,7 +770,7 @@ mod tests {
 
     #[rustfmt::skip]
     #[test]
-    fn test_squash_chained_deletions() {
+    fn test_squash_deletion_state_update() {
         // test states `<from> then <to>` where the <from> state is encountered in a later layer
         // and then <to> is encountered in an earlier layer
 
@@ -1000,6 +896,7 @@ mod tests {
                 .stderr(Stdio::null())
                 .status()
             {
+                // TODO is there a nicer way to signal test skipped?
                 eprintln!("podman missing");
             } else {
                 let (ours, podman) = podman_squash_diff($containerfile).unwrap();
