@@ -600,3 +600,6 @@ perf stat sh -c '../target/release/squash-oci /mnt/storage/program-explorer/ocid
     3.988766890 seconds time elapsed
     3.056409000 seconds user
     2.166840000 seconds sys
+
+1.96s with PathBuf for gcc:13.3.0
+1.90 with OsString

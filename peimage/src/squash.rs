@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::io::{Read, Seek, Write};
 use std::ops::Bound;
@@ -26,7 +26,7 @@ impl From<io::Error> for SquashError {
 
 #[derive(PartialEq, Debug)]
 enum Whiteout {
-    Single(PathBuf),
+    Whiteout(PathBuf),
     Opaque(PathBuf),
 }
 
@@ -39,23 +39,38 @@ enum DeletionState {
 
 #[derive(PartialEq, Debug)]
 enum DeletionReason {
-    Single,
-    SingleDir,
+    Whiteout,
+    WhiteoutDir,
     Opaque,
     Shadowed,
 }
 
-//                 Match Type
-//               |   Exact  |   Child   |
-// DeletionState |----------------------|
-//      Whiteout |  Single  | SingleDir |
-//        Opaque |    -     |  Opaque   |
-//      Shadowed | Shadowed |     -     |
+//                        Match Type
+//               |    Exact   |    Child    |
+// DeletionState |--------------------------|
+//      Whiteout |  Whiteout  | WhiteoutDir |
+//        Opaque |     -      |   Opaque    |
+//      Shadowed |  Shadowed  |      -      |
+
+trait Deletions {
+    fn push_whiteout(&mut self, x: PathBuf);
+    fn push_opaque(&mut self, x: PathBuf);
+    fn is_deleted<P: AsRef<Path>>(&mut self, x: P) -> Option<DeletionReason>;
+    fn insert_seen(&mut self, p: PathBuf);
+    fn end_of_layer(&mut self);
+}
 
 #[derive(Default)]
-struct Deletions {
-    map: BTreeMap<PathBuf, DeletionState>,
+struct DeletionsOsString {
+    map: BTreeMap<OsString, DeletionState>,
+    whiteout_q: Vec<OsString>,
+    opaque_q: Vec<OsString>,
+}
 
+#[allow(dead_code)]
+#[derive(Default)]
+struct DeletionsPathBuf {
+    map: BTreeMap<PathBuf, DeletionState>,
     whiteout_q: Vec<PathBuf>,
     opaque_q: Vec<PathBuf>,
 }
@@ -101,13 +116,20 @@ pub struct Stats {
 // GzDecoder will create a BufReader internally if it doesn't get a BufRead, so no need to pass in
 // a BufRead. TODO when handling more compression types, revisit this since if we have an
 // uncompressed thing we'll want to make sure to use a BufReader
+//
+// DeletionsOsString is slightly (~3-5%) faster on gcc:13.3.0 map size grows to 23k, this is
+// beacuse (I assume) equality and starts_with tests are directly on bytes and not iterator
+// comparisons of Components. But, I'm undecided which to go with, so leaving as a trait with both
+// impls for right now
 
 pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<Stats, SquashError>
 where
     W: Write,
     R: Read + Seek,
 {
-    let mut deletions = Deletions::default();
+    let mut deletions = DeletionsOsString::default();
+    //let mut deletions = DeletionsPathBuf::default();
+
     //let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
     let mut aw = ArchiveBuilder::new(out);
@@ -122,7 +144,7 @@ where
             let mut entry = entry?;
 
             match whiteout(&entry)? {
-                Some(Whiteout::Single(path)) => {
+                Some(Whiteout::Whiteout(path)) => {
                     if i != 0 {
                         deletions.push_whiteout(path);
                     }
@@ -153,12 +175,12 @@ where
             //    eprintln!("entry is gnu");
             //}
 
-            match deletions.is_deleted(&entry.path()?) {
-                Some(DeletionReason::Single) => {
+            match deletions.is_deleted(entry.path()?) {
+                Some(DeletionReason::Whiteout) => {
                     stats.deletions += 1;
                     continue;
                 }
-                Some(DeletionReason::SingleDir) => {
+                Some(DeletionReason::WhiteoutDir) => {
                     stats.deletion_dirs += 1;
                     continue;
                 }
@@ -209,7 +231,7 @@ where
 
             // on the last layer there is no point storing the deletion
             if i != 0 {
-                deletions.insert_seen(entry.path()?.into());
+                deletions.insert_seen(entry.path()?.as_os_str().into());
             }
         }
 
@@ -226,7 +248,149 @@ where
     Ok(stats)
 }
 
-impl Deletions {
+fn without_trailing_slash(x: OsString) -> OsString {
+    let b = x.as_os_str().as_bytes();
+    if b.ends_with(b"/") {
+        // can you do this without allocating?
+        let mut ret = OsString::new();
+        ret.push(OsStr::from_bytes(&b[..b.len() - 1]));
+        ret
+    } else {
+        x
+    }
+}
+
+// checks if key starts_with prefix where both should have no trailing slash
+/// assert!(!os_str_starts_with(OsStr::new("xfile"), OsStr::new("x")));
+/// assert!(os_str_starts_with(OsStr::new("x/file"), OsStr::new("x")));
+fn os_str_starts_with(x: &OsStr, prefix: &OsStr) -> bool {
+    let x = x.as_bytes();
+    let prefix = prefix.as_bytes();
+    if let Some(rem) = x.strip_prefix(prefix) {
+        rem.starts_with(b"/")
+    } else {
+        false
+    }
+}
+
+impl DeletionsOsString {
+    fn insert(&mut self, path: OsString, reason: DeletionState) {
+        use DeletionState::*;
+        // TODO use try_insert when stable
+
+        if let Some(state) = self.map.get_mut(&path) {
+            //     old  ,  new
+            match (&state, reason) {
+                (Whiteout, Whiteout) | (Opaque, Opaque) | (Shadowed, Shadowed) => {
+                    // kinda weird duplicate but okay
+                }
+                (Whiteout, Opaque) | (Whiteout, Shadowed) => {
+                    // no change, stays as whiteout
+                }
+                // _ + Whiteout = Whiteout
+                (Opaque, Whiteout) | (Shadowed, Whiteout) => {
+                    *state = Whiteout;
+                }
+                // Shadowed + Opaque = Whiteout
+                (Shadowed, Opaque) | (Opaque, Shadowed) => {
+                    *state = Whiteout;
+                }
+            }
+        } else {
+            self.map.insert(path, reason);
+        }
+    }
+}
+
+impl Deletions for DeletionsOsString {
+    // push_* normally take output from fn whiteout which will always return results without a
+    // trailing / but in testing and/or just to safeguard the logic with OsString, we check
+    fn push_whiteout(&mut self, p: PathBuf) {
+        self.whiteout_q.push(without_trailing_slash(p.into()));
+    }
+    fn push_opaque(&mut self, p: PathBuf) {
+        self.opaque_q.push(without_trailing_slash(p.into()));
+    }
+    fn insert_seen(&mut self, p: PathBuf) {
+        self.insert(p.into(), DeletionState::Shadowed);
+    }
+    fn is_deleted<P: AsRef<Path>>(&mut self, p: P) -> Option<DeletionReason> {
+        let p = {
+            let p = p.as_ref().as_os_str();
+            let b = p.as_bytes();
+            if b.ends_with(b"/") {
+                OsStr::from_bytes(&b[..b.len() - 1])
+            } else {
+                p
+            }
+        };
+        // Query for an exact match of the path and anything less than it,
+        // the first element of iter could be an exact match
+        let (key, state) = self
+            .map
+            .range::<OsStr, _>((Bound::Unbounded, Bound::Included(p)))
+            .next_back()?;
+
+        // it would be nice if the iter already told us if we matched
+        // and/or a starts_with_or_eq which just ran the components iter once and returned a
+        // tristate
+        // looking at Components more, I'm wondering if we should be normalizing paths (/ suffix for dirs) and storing
+        // as OsString since the iter logic on every compare might be adding up
+
+        match state {
+            DeletionState::Shadowed if key == p => Some(DeletionReason::Shadowed),
+            DeletionState::Whiteout if key == p => Some(DeletionReason::Whiteout),
+            DeletionState::Whiteout if os_str_starts_with(p, key) => {
+                Some(DeletionReason::WhiteoutDir)
+            }
+            DeletionState::Opaque if key != p && os_str_starts_with(p, key) => {
+                Some(DeletionReason::Opaque)
+            }
+            _ => None,
+        }
+    }
+
+    fn end_of_layer(&mut self) {
+        // have to take to not have a double borrow
+        for x in std::mem::take(&mut self.whiteout_q).into_iter() {
+            self.insert(x, DeletionState::Whiteout);
+        }
+        for x in std::mem::take(&mut self.opaque_q).into_iter() {
+            self.insert(x, DeletionState::Opaque);
+        }
+    }
+}
+
+impl DeletionsPathBuf {
+    fn insert(&mut self, path: PathBuf, reason: DeletionState) {
+        use DeletionState::*;
+        // TODO use try_insert when stable
+
+        if let Some(state) = self.map.get_mut(&path) {
+            //     old  ,  new
+            match (&state, reason) {
+                (Whiteout, Whiteout) | (Opaque, Opaque) | (Shadowed, Shadowed) => {
+                    // kinda weird duplicate but okay
+                }
+                (Whiteout, Opaque) | (Whiteout, Shadowed) => {
+                    // no change, stays as whiteout
+                }
+                // _ + Whiteout = Whiteout
+                (Opaque, Whiteout) | (Shadowed, Whiteout) => {
+                    *state = Whiteout;
+                }
+                // Shadowed + Opaque = Whiteout
+                (Shadowed, Opaque) | (Opaque, Shadowed) => {
+                    *state = Whiteout;
+                }
+            }
+        } else {
+            self.map.insert(path, reason);
+        }
+    }
+}
+
+impl Deletions for DeletionsPathBuf {
     fn push_whiteout(&mut self, p: PathBuf) {
         self.whiteout_q.push(p);
     }
@@ -254,39 +418,13 @@ impl Deletions {
 
         match state {
             DeletionState::Shadowed if key == p => Some(DeletionReason::Shadowed),
-            DeletionState::Whiteout if key == p => Some(DeletionReason::Single),
-            DeletionState::Whiteout if p.starts_with(key) => Some(DeletionReason::SingleDir),
+            DeletionState::Whiteout if key == p => Some(DeletionReason::Whiteout),
+            DeletionState::Whiteout if p.starts_with(key) => Some(DeletionReason::WhiteoutDir),
             DeletionState::Opaque if key != p && p.starts_with(key) => Some(DeletionReason::Opaque),
             _ => None,
         }
     }
 
-    fn insert(&mut self, path: PathBuf, reason: DeletionState) {
-        use DeletionState::*;
-        // TODO use try_insert when stable
-
-        if let Some(state) = self.map.get_mut(&path) {
-            //     old  ,  new
-            match (&state, reason) {
-                (Whiteout, Whiteout) | (Opaque, Opaque) | (Shadowed, Shadowed) => {
-                    // kinda weird duplicate but okay
-                }
-                (Whiteout, Opaque) | (Whiteout, Shadowed) => {
-                    // no change, stays as whiteout
-                }
-                // _ + Whiteout = Whiteout
-                (Opaque, Whiteout) | (Shadowed, Whiteout) => {
-                    *state = Whiteout;
-                }
-                // Shadowed + Opaque = Whiteout
-                (Shadowed, Opaque) | (Opaque, Shadowed) => {
-                    *state = Whiteout;
-                }
-            }
-        } else {
-            self.map.insert(path, reason);
-        }
-    }
     fn end_of_layer(&mut self) {
         // have to take to not have a double borrow
         for x in std::mem::take(&mut self.whiteout_q).into_iter() {
@@ -323,7 +461,7 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
     }
     if let Some(trimmed) = name.strip_prefix(b".wh.") {
         let hidden = path.with_file_name(OsStr::from_bytes(trimmed));
-        return Ok(Some(Whiteout::Single(hidden)));
+        return Ok(Some(Whiteout::Whiteout(hidden)));
     }
 
     Ok(None)
@@ -592,7 +730,7 @@ mod tests {
 
         for (x, y) in files.into_iter() {
             make_entry(x, |e| {
-                assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Single(y.into())));
+                assert_eq!(whiteout(&e).unwrap(), Some(Whiteout::Whiteout(y.into())));
             });
         }
 
@@ -609,30 +747,36 @@ mod tests {
         // deletions should be the same whether the tar stream has trailing slashes on the dirs
         // this is because we use Path == and Path.starts_with which is smarter than String == and
         // String.starts_with
-        for trailing_slash in vec![false].into_iter() {
-            let mut d = Deletions::default();
-            assert_eq!(d.is_deleted("foo"), None);
-            // TODO I tried making push_whiteout take P: Into<PathBuf> but wasn't working great
-            d.push_whiteout((if trailing_slash {"x/"} else {"x"}).into());
-            d.end_of_layer();
-            assert_eq!(d.is_deleted("x"), Some(DeletionReason::Single));
-            assert_eq!(d.is_deleted("x/"), Some(DeletionReason::Single));
-            assert_eq!(d.is_deleted("x/file"), Some(DeletionReason::SingleDir));
-            assert_eq!(d.is_deleted("xfile"), None);
+        // TODO this doesn't report the type and whether trailing slash was being used
+        fn test<D: Deletions + Default>() {
+            for trailing_slash in vec![false].into_iter() {
+                let mut d = D::default();
+                assert_eq!(d.is_deleted("foo"), None);
 
-            d.push_opaque((if trailing_slash {"a/b/"} else {"a/b"}).into());
-            d.end_of_layer();
-            assert_eq!(d.is_deleted("a/b"), None);
-            assert_eq!(d.is_deleted("a/b/"), None);
-            assert_eq!(d.is_deleted("a/b/foo"), Some(DeletionReason::Opaque));
-            assert_eq!(d.is_deleted("a/b/foo/"), Some(DeletionReason::Opaque));
+                d.push_whiteout((if trailing_slash {"x/"} else {"x"}).into());
+                d.end_of_layer();
+                assert_eq!(d.is_deleted("x"), Some(DeletionReason::Whiteout));
+                assert_eq!(d.is_deleted("x/"), Some(DeletionReason::Whiteout));
+                assert_eq!(d.is_deleted("x/file"), Some(DeletionReason::WhiteoutDir));
+                assert_eq!(d.is_deleted("xfile"), None);
 
-            d.insert_seen((if trailing_slash {"q/"} else {"q"}).into());
-            assert_eq!(d.is_deleted("q"), Some(DeletionReason::Shadowed), "trailing_slash={}", trailing_slash);
-            assert_eq!(d.is_deleted("q/"), Some(DeletionReason::Shadowed));
-            assert_eq!(d.is_deleted("q/file"), None);
-            assert_eq!(d.is_deleted("qfile"), None);
+                d.push_opaque((if trailing_slash {"a/b/"} else {"a/b"}).into());
+                d.end_of_layer();
+                assert_eq!(d.is_deleted("a/b"), None);
+                assert_eq!(d.is_deleted("a/b/"), None);
+                assert_eq!(d.is_deleted("a/b/foo"), Some(DeletionReason::Opaque));
+                assert_eq!(d.is_deleted("a/b/foo/"), Some(DeletionReason::Opaque));
+
+                d.insert_seen((if trailing_slash {"q/"} else {"q"}).into());
+                assert_eq!(d.is_deleted("q"), Some(DeletionReason::Shadowed));
+                assert_eq!(d.is_deleted("q/"), Some(DeletionReason::Shadowed));
+                assert_eq!(d.is_deleted("q/file"), None);
+                assert_eq!(d.is_deleted("qfile"), None);
+            }
         }
+
+        test::<DeletionsOsString>();
+        test::<DeletionsPathBuf>();
     }
 
     #[test]
@@ -868,6 +1012,27 @@ mod tests {
         );
     }
 
+    // TODO unhandled
+    #[rustfmt::skip]
+    #[test]
+    #[ignore]
+    fn test_squash_root() {
+        check_squash!(
+            vec![
+                vec![E::dir(".").with_uid(10)],
+            ],
+            vec![E::dir(".").with_uid(10)]
+        );
+
+        check_squash!(
+            vec![
+                vec![E::dir("./").with_uid(10), E::file("foo", b""), E::file("./foo", b"")],
+                vec![E::file("./.wh..wh..opq", b"").with_uid(10)],
+            ],
+            vec![E::dir(".").with_uid(10)]
+        );
+    }
+
     /// returns the difference (podman - squash) of podman exporting a flat image vs us squashing
     /// the layers produced when running the containerfile
     fn podman_squash_diff(containerfile: &str) -> Result<(EList, EList), Box<dyn error::Error>> {
@@ -908,27 +1073,6 @@ mod tests {
                 );
             }
         }};
-    }
-
-    // TODO unhandled
-    #[rustfmt::skip]
-    #[test]
-    #[ignore]
-    fn test_squash_root() {
-        check_squash!(
-            vec![
-                vec![E::dir(".").with_uid(10)],
-            ],
-            vec![E::dir(".").with_uid(10)]
-        );
-
-        check_squash!(
-            vec![
-                vec![E::dir("./").with_uid(10), E::file("foo", b""), E::file("./foo", b"")],
-                vec![E::file("./.wh..wh..opq", b"").with_uid(10)],
-            ],
-            vec![E::dir(".").with_uid(10)]
-        );
     }
 
     // currently we output a dir for . since that is from the busybox layer, but podman doesn't for
