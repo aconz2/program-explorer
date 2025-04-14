@@ -910,6 +910,27 @@ mod tests {
         }};
     }
 
+    // TODO unhandled
+    #[rustfmt::skip]
+    #[test]
+    #[ignore]
+    fn test_squash_root() {
+        check_squash!(
+            vec![
+                vec![E::dir(".").with_uid(10)],
+            ],
+            vec![E::dir(".").with_uid(10)]
+        );
+
+        check_squash!(
+            vec![
+                vec![E::dir("./").with_uid(10), E::file("foo", b""), E::file("./foo", b"")],
+                vec![E::file("./.wh..wh..opq", b"").with_uid(10)],
+            ],
+            vec![E::dir(".").with_uid(10)]
+        );
+    }
+
     // currently we output a dir for . since that is from the busybox layer, but podman doesn't for
     // some reason. That does seem important if you need to set the permissions on / or whatever.
     // and so when we check, we have to check against the exact mtime etc so this is that dir
