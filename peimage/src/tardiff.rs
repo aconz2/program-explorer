@@ -19,12 +19,28 @@ impl fmt::Display for TardiffError {
 
 impl error::Error for TardiffError {}
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum EntryTyp {
+    File,
+    Dir,
+    Link,
+    Symlink,
+    Fifo,
+}
+
+type Ext = Vec<(String, Vec<u8>)>;
+
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
-enum Entry {
-    File { path: PathBuf, digest: String },
-    Dir { path: PathBuf },
-    Link { path: PathBuf, link: PathBuf },
-    Slink { path: PathBuf, link: PathBuf },
+struct Entry {
+    typ: EntryTyp,
+    path: PathBuf,
+    data: Option<String>, // digest
+    ext: Ext,
+    link: Option<PathBuf>,
+    mtime: u64,
+    uid: u64,
+    gid: u64,
+    mode: u32,
 }
 
 #[derive(Debug)]
@@ -47,24 +63,60 @@ fn gather_entries<R: Read>(ar: &mut Archive<R>) -> Result<BTreeSet<Entry>, Box<d
         let mut entry = entry?;
         let path: PathBuf = entry.path()?.into();
 
-        match entry.header().entry_type() {
-            EntryType::Regular => {
-                let digest = sha_reader(&mut entry)?;
-                ret.insert(Entry::File { path, digest });
+        let header = entry.header();
+        let uid = header.uid().unwrap();
+        let gid = header.gid().unwrap();
+        let mode = header.mode().unwrap();
+        let mtime = header.mtime().unwrap();
+        let entry_type = header.entry_type();
+
+        let typ = match entry_type {
+            EntryType::Regular => EntryTyp::File,
+            EntryType::Directory => EntryTyp::Dir,
+            EntryType::Link => EntryTyp::Link,
+            EntryType::Symlink => EntryTyp::Symlink,
+            EntryType::Fifo => EntryTyp::Fifo,
+            x => {
+                panic!("unhandled entry type {x:?}");
             }
-            EntryType::Directory => {
-                ret.insert(Entry::Dir { path });
+        };
+
+        let link = match entry_type {
+            tar::EntryType::Link | tar::EntryType::Symlink => {
+                Some(entry.link_name()?.ok_or(TardiffError::NoLink)?.into())
             }
-            EntryType::Link => {
-                let link: PathBuf = entry.link_name()?.ok_or(TardiffError::NoLink)?.into();
-                ret.insert(Entry::Link { path, link });
+            _ => None,
+        };
+
+        let data = match entry_type {
+            tar::EntryType::Regular => Some(sha_reader(&mut entry)?),
+            _ => None,
+        };
+
+        let ext = {
+            if let Some(ext) = entry.pax_extensions().unwrap() {
+                ext.into_iter()
+                    .map(|x| x.unwrap())
+                    .map(|x| (x.key().unwrap().to_string(), Vec::from(x.value_bytes())))
+                    .collect()
+            } else {
+                vec![]
             }
-            EntryType::Symlink => {
-                let link: PathBuf = entry.link_name()?.ok_or(TardiffError::NoLink)?.into();
-                ret.insert(Entry::Slink { path, link });
-            }
-            e => panic!("unhandled type {:?}", e),
-        }
+        };
+
+        let e = Entry {
+            typ,
+            path,
+            link,
+            ext,
+            data,
+            uid,
+            gid,
+            mode,
+            mtime,
+        };
+
+        ret.insert(e);
     }
 
     Ok(ret)

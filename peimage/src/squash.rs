@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io;
 use std::io::{Read, Seek, Write};
@@ -253,19 +253,11 @@ impl Deletions {
         // as OsString since the iter logic on every compare might be adding up
 
         match state {
-            DeletionState::Shadowed if key == p => {
-                Some(DeletionReason::Shadowed)
-            }
-            DeletionState::Whiteout if key == p => {
-                Some(DeletionReason::Single)
-            }
-            DeletionState::Whiteout if p.starts_with(key) => {
-                Some(DeletionReason::SingleDir)
-            }
-            DeletionState::Opaque if key != p && p.starts_with(key) => {
-                Some(DeletionReason::Opaque)
-            }
-            _ => None
+            DeletionState::Shadowed if key == p => Some(DeletionReason::Shadowed),
+            DeletionState::Whiteout if key == p => Some(DeletionReason::Single),
+            DeletionState::Whiteout if p.starts_with(key) => Some(DeletionReason::SingleDir),
+            DeletionState::Opaque if key != p && p.starts_with(key) => Some(DeletionReason::Opaque),
+            _ => None,
         }
     }
 
@@ -341,8 +333,8 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
 mod tests {
     use super::*;
 
-    use std::error;
     use std::collections::BTreeSet;
+    use std::error;
     use std::io::{Cursor, Seek, SeekFrom};
     use std::process::{Command, Stdio};
 
