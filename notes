@@ -603,3 +603,5 @@ perf stat sh -c '../target/release/squash-oci /mnt/storage/program-explorer/ocid
 
 1.96s with PathBuf for gcc:13.3.0
 1.90 with OsString
+
+so with the switch from tmpfile to memfd for the io file to ch, we are leaving all those fds without cloexec and so every child will have access to them. Currently only ch is called as a child but would be nice to be able to enforce that like "disallow Command" everywhere except where approved. And we should maybe be (in preexec) dup2'ing that the memfd fd to 3 then close_range(4, ~0) so that the ch process only has the fd's we want. I believe this can work for kernel, initramfs, and image as well
