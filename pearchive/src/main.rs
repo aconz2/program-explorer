@@ -1,17 +1,16 @@
 use std::env;
-use std::path::Path;
 use std::fs::File;
-use std::io::{Seek,SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::os::fd::FromRawFd;
+use std::path::Path;
 
 use pearchive::{
-    pack_dir_to_file,
+    pack_dir_to_file, unpack_data_to_dir_with_unshare_chroot,
     unpack_file_to_dir_with_unshare_chroot,
-    unpack_data_to_dir_with_unshare_chroot,
 };
 
+use byteorder::{WriteBytesExt, LE};
 use memmap2::MmapOptions;
-use byteorder::{WriteBytesExt,LE};
 
 #[derive(Debug)]
 enum Error {
@@ -53,9 +52,19 @@ fn unpack(args: &[String]) {
 /// uses stream offset as beginning of map
 #[allow(clippy::get_first)]
 fn unpackfd(args: &[String]) {
-    let in_fd = args.get(0).ok_or(Error::MissingArg).unwrap().parse::<libc::c_int>().unwrap();
+    let in_fd = args
+        .get(0)
+        .ok_or(Error::MissingArg)
+        .unwrap()
+        .parse::<libc::c_int>()
+        .unwrap();
     let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
-    let len = args.get(2).ok_or(Error::MissingArg).unwrap().parse::<usize>().unwrap();
+    let len = args
+        .get(2)
+        .ok_or(Error::MissingArg)
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
 
     let outpath = Path::new(&outname);
 
@@ -80,7 +89,12 @@ fn unpackfd(args: &[String]) {
 #[allow(clippy::get_first)]
 fn packfd(args: &[String]) {
     let indir = args.get(0).ok_or(Error::MissingArg).unwrap();
-    let out_fd = args.get(1).ok_or(Error::MissingArg).unwrap().parse::<libc::c_int>().unwrap();
+    let out_fd = args
+        .get(1)
+        .ok_or(Error::MissingArg)
+        .unwrap()
+        .parse::<libc::c_int>()
+        .unwrap();
     let indirpath = Path::new(indir);
     assert!(indirpath.is_dir(), "{:?} should be a dir", indirpath);
 
@@ -105,10 +119,18 @@ fn packfd(args: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
-        Some("pack")      => {      pack(&args[2..]); },
-        Some("unpack")    => {    unpack(&args[2..]); },
-        Some("packfd")    => {  packfd(&args[2..]); },
-        Some("unpackfd") => { unpackfd(&args[2..]); },
+        Some("pack") => {
+            pack(&args[2..]);
+        }
+        Some("unpack") => {
+            unpack(&args[2..]);
+        }
+        Some("packfd") => {
+            packfd(&args[2..]);
+        }
+        Some("unpackfd") => {
+            unpackfd(&args[2..]);
+        }
         _ => {
             println!("pack <input-dir> <output-file>");
             println!("unpack <input-file> <output-dir>");

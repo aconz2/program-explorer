@@ -1,22 +1,22 @@
-use std::time::Duration;
+use std::ffi::OsString;
 use std::io;
-use std::io::{Write,Seek,SeekFrom,Read};
-use std::ffi::{OsString};
-use std::path::{Path,PathBuf};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use byteorder::{WriteBytesExt,LE};
-use memmap2::{Mmap,MmapOptions};
-use clap::{Parser};
+use byteorder::{WriteBytesExt, LE};
+use clap::Parser;
+use memmap2::{Mmap, MmapOptions};
 
-use pearchive::{pack_dir_to_writer,UnpackVisitor,unpack_visitor};
-use peinit::{ResponseFormat};
-use peimage::index::{PEImageMultiIndex,PEImageMultiIndexKeyType};
+use pearchive::{pack_dir_to_writer, unpack_visitor, UnpackVisitor};
+use peimage::index::{PEImageMultiIndex, PEImageMultiIndexKeyType};
+use peinit::ResponseFormat;
 
+use perunner::cloudhypervisor::{ChLogLevel, CloudHypervisorConfig};
 use perunner::create_runtime_spec;
-use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
-use perunner::worker;
 use perunner::iofile::IoFileBuilder;
+use perunner::worker;
 
 //fn sha2_hex(buf: &[u8]) -> String {
 //    use sha2::{Sha256,Digest};
@@ -26,7 +26,11 @@ use perunner::iofile::IoFileBuilder;
 //}
 
 // this is kinda dupcliated with pearchive::packdev
-fn create_pack_file_from_dir<P: AsRef<Path>, W: Write + AsRawFd + Seek>(dir: &Option<P>, mut file: W, config: &peinit::Config) -> W {
+fn create_pack_file_from_dir<P: AsRef<Path>, W: Write + AsRawFd + Seek>(
+    dir: &Option<P>,
+    mut file: W,
+    config: &peinit::Config,
+) -> W {
     peinit::write_io_file_config(&mut file, config, 0).unwrap();
     if let Some(dir) = dir {
         let archive_start_pos = file.stream_position().unwrap();
@@ -45,7 +49,7 @@ fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
     output.clear();
     for b in input {
         match *b {
-            b'\n' | b'\t' | b'\'' => { output.push(*b) },
+            b'\n' | b'\t' | b'\'' => output.push(*b),
             _ => {
                 for e in std::ascii::escape_default(*b) {
                     output.push(e);
@@ -83,7 +87,7 @@ impl UnpackVisitor for UnpackVisitorPrinter {
 }
 
 fn dump_archive(mmap: &Mmap, stdout: bool) {
-    let mut visitor = UnpackVisitorPrinter{stdout: stdout};
+    let mut visitor = UnpackVisitorPrinter { stdout: stdout };
     unpack_visitor(mmap.as_ref(), &mut visitor).unwrap();
 }
 
@@ -92,13 +96,27 @@ fn dump_file<F: Read>(name: &str, file: &mut F) {
     let _ = io::copy(file, &mut io::stderr());
 }
 
-fn handle_worker_output(output: worker::OutputResult, response_format: &ResponseFormat, stdout: bool) {
+fn handle_worker_output(
+    output: worker::OutputResult,
+    response_format: &ResponseFormat,
+    stdout: bool,
+) {
     match output {
-        Ok(worker::Output{io_file, ch_logs, id}) => {
+        Ok(worker::Output {
+            io_file,
+            ch_logs,
+            id,
+        }) => {
             let _ = id;
-            if let Some(mut err_file) = ch_logs.err_file { dump_file("ch err", &mut err_file); }
-            if let Some(mut log_file) = ch_logs.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = ch_logs.con_file { dump_file("ch con", &mut con_file); }
+            if let Some(mut err_file) = ch_logs.err_file {
+                dump_file("ch err", &mut err_file);
+            }
+            if let Some(mut log_file) = ch_logs.log_file {
+                dump_file("ch log", &mut log_file);
+            }
+            if let Some(mut con_file) = ch_logs.con_file {
+                dump_file("ch con", &mut con_file);
+            }
 
             let mut file = io_file.into_inner();
             let (archive_size, response) = peinit::read_io_file_response(&mut file).unwrap();
@@ -110,21 +128,26 @@ fn handle_worker_output(output: worker::OutputResult, response_format: &Response
                 ResponseFormat::PeArchiveV1 => {
                     let mapping = unsafe {
                         MmapOptions::new()
-                        .offset(file.stream_position().unwrap())
-                        .len(archive_size.try_into().unwrap())
-                        .map(&file)
-                        .unwrap()
+                            .offset(file.stream_position().unwrap())
+                            .len(archive_size.try_into().unwrap())
+                            .map(&file)
+                            .unwrap()
                     };
 
                     dump_archive(&mapping, stdout);
                 }
             }
-
         }
         Err(e) => {
-            if let Some(mut err_file) = e.logs.err_file { dump_file("ch err", &mut err_file); }
-            if let Some(mut log_file) = e.logs.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = e.logs.con_file { dump_file("ch con", &mut con_file); }
+            if let Some(mut err_file) = e.logs.err_file {
+                dump_file("ch err", &mut err_file);
+            }
+            if let Some(mut log_file) = e.logs.log_file {
+                dump_file("ch log", &mut log_file);
+            }
+            if let Some(mut con_file) = e.logs.con_file {
+                dump_file("ch con", &mut con_file);
+            }
             eprintln!("oh no something went bad {:?}", e.error);
             if let Some(args) = e.args {
                 eprintln!("launched ch with args {:?}", args);
@@ -158,10 +181,18 @@ struct Args {
     #[arg(long, help = "name of file in input dir to use as stdin")]
     stdin: Option<String>,
 
-    #[arg(long, default_value_t = 1000, help = "timeout (ms) crun waits for the container")]
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "timeout (ms) crun waits for the container"
+    )]
     timeout: u64,
 
-    #[arg(long, default_value_t = 200, help = "timeout (ms) the host waits in addition to timeout")]
+    #[arg(
+        long,
+        default_value_t = 200,
+        help = "timeout (ms) the host waits in addition to timeout"
+    )]
     ch_timeout: u64,
 
     #[arg(long, help = "enable ch console")]
@@ -217,7 +248,9 @@ fn main() {
 
     let image_index = {
         let mut index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name);
-        index.add_path(&args.index).expect("failed to create image index");
+        index
+            .add_path(&args.index)
+            .expect("failed to create image index");
         index
     };
 
@@ -225,7 +258,10 @@ fn main() {
         match image_index.get(&args.image) {
             Some(e) => e,
             None => {
-                eprintln!("image {} not found in the index; available images are: ", args.image);
+                eprintln!(
+                    "image {} not found in the index; available images are: ",
+                    args.image
+                );
                 for (k, v) in image_index.map() {
                     eprintln!("  {} {}", k, v.image.id.digest);
                 }
@@ -244,20 +280,29 @@ fn main() {
 
     // here we just always replace all the image's arguments (entrypoint is empty)
     let env = None;
-    let runtime_spec = create_runtime_spec(&image_index_entry.image.config, Some(&[]), Some(&args.args), env).unwrap();
+    let runtime_spec = create_runtime_spec(
+        &image_index_entry.image.config,
+        Some(&[]),
+        Some(&args.args),
+        env,
+    )
+    .unwrap();
 
     if args.spec_only {
-        println!("{}", serde_json::to_string_pretty(&image_index_entry.image.config).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&image_index_entry.image.config).unwrap()
+        );
         println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
         return;
     }
 
     let ch_config = CloudHypervisorConfig {
-        bin      : cwd.join(&args.ch).into(),
-        kernel   : cwd.join(&args.kernel).into(),
+        bin: cwd.join(&args.ch).into(),
+        kernel: cwd.join(&args.kernel).into(),
         initramfs: cwd.join(&args.initramfs).into(),
         log_level: Some(ch_log_level),
-        console  : args.console,
+        console: args.console,
         keep_args: true,
         event_monitor: args.event_monitor,
     };
@@ -280,7 +325,11 @@ fn main() {
         let mut pool = worker::Pool::new(&cpus);
         for id in 0..args.parallel {
             let io_file = {
-                let builder = create_pack_file_from_dir(&args.input, IoFileBuilder::new().unwrap(), &pe_config);
+                let builder = create_pack_file_from_dir(
+                    &args.input,
+                    IoFileBuilder::new().unwrap(),
+                    &pe_config,
+                );
                 builder.finish().unwrap()
             };
             let worker_input = worker::Input {
@@ -290,19 +339,24 @@ fn main() {
                 io_file: io_file,
                 rootfs: image_index_entry.path.clone(),
             };
-            pool.sender().try_send(worker_input).expect("couldn't submit work");
+            pool.sender()
+                .try_send(worker_input)
+                .expect("couldn't submit work");
         }
         for id in 0..args.parallel {
             println!("hi trying to get work for {id}");
-            let output = pool.receiver().recv_timeout(ch_timeout).expect("should have gotten a response by now");
+            let output = pool
+                .receiver()
+                .recv_timeout(ch_timeout)
+                .expect("should have gotten a response by now");
             handle_worker_output(output, &response_format, args.stdout);
         }
         let pool = pool.close_sender();
         let _ = pool.shutdown();
-
     } else {
         let io_file = {
-            let builder = create_pack_file_from_dir(&args.input, IoFileBuilder::new().unwrap(), &pe_config);
+            let builder =
+                create_pack_file_from_dir(&args.input, IoFileBuilder::new().unwrap(), &pe_config);
             builder.finish().unwrap()
         };
         //std::fs::copy(io_file.path(), "/tmp/perunner-io-file").unwrap();

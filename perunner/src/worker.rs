@@ -1,18 +1,21 @@
-use std::thread;
-use std::thread::{spawn,JoinHandle};
 use crossbeam::channel;
-use crossbeam::channel::{Receiver,Sender};
-use std::time::Duration;
-use waitid_timeout::{WaitIdDataOvertime,Siginfo};
-use std::path::PathBuf;
+use crossbeam::channel::{Receiver, Sender};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::thread;
+use std::thread::{spawn, JoinHandle};
+use std::time::Duration;
+use waitid_timeout::{Siginfo, WaitIdDataOvertime};
 
-use log::{trace};
+use log::trace;
 use nix;
-use nix::sched::{sched_getaffinity,sched_setaffinity,CpuSet};
+use nix::sched::{sched_getaffinity, sched_setaffinity, CpuSet};
 
 use crate::cloudhypervisor;
-use crate::cloudhypervisor::{CloudHypervisor,CloudHypervisorConfig,CloudHypervisorPostMortem,CloudHypervisorLogs,CloudHypervisorPmem,CloudHypervisorPmemMode};
+use crate::cloudhypervisor::{
+    CloudHypervisor, CloudHypervisorConfig, CloudHypervisorLogs, CloudHypervisorPmem,
+    CloudHypervisorPmemMode, CloudHypervisorPostMortem,
+};
 use crate::iofile::IoFile;
 
 type JoinHandleT = JoinHandle<()>;
@@ -66,39 +69,48 @@ impl Pool {
         self.handles.len()
     }
 
-    pub fn sender(&mut self) -> &Sender<Input> { &self.sender }
-    pub fn receiver(&mut self) -> &Receiver<OutputResult> { &self.receiver }
+    pub fn sender(&mut self) -> &Sender<Input> {
+        &self.sender
+    }
+    pub fn receiver(&mut self) -> &Receiver<OutputResult> {
+        &self.receiver
+    }
 
     pub fn close_sender(self) -> PoolShuttingDown {
-        PoolShuttingDown { receiver: self.receiver, handles: self.handles, }
+        PoolShuttingDown {
+            receiver: self.receiver,
+            handles: self.handles,
+        }
     }
 }
 
 impl PoolShuttingDown {
-    pub fn receiver(&mut self) -> &Receiver<OutputResult> { &self.receiver }
+    pub fn receiver(&mut self) -> &Receiver<OutputResult> {
+        &self.receiver
+    }
     pub fn shutdown(self) -> Vec<thread::Result<()>> {
         // do we need to do anything with receiver?
         self.handles.into_iter().map(|h| h.join()).collect()
     }
 }
 
-fn spawn_worker(id: usize,
-                cpuset: CpuSet,
-                input:  Receiver<Input>,
-                output: Sender<OutputResult>,
-               )
-    -> JoinHandleT {
+fn spawn_worker(
+    id: usize,
+    cpuset: CpuSet,
+    input: Receiver<Input>,
+    output: Sender<OutputResult>,
+) -> JoinHandleT {
     spawn(move || {
         trace!("starting worker {id}");
         sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
         for msg in input.iter() {
             match output.send(run(msg)) {
-                Ok(_) => { },
+                Ok(_) => {}
                 Err(_) => {
                     // output got disconnected somehow
                     trace!("worker {id} got disconnected");
                     return;
-                },
+                }
             }
         }
         trace!("worker {id} shutting down");
@@ -111,31 +123,41 @@ pub fn run(input: Input) -> OutputResult {
     let pmems = CloudHypervisorPmem::Two([
         (input.rootfs, CloudHypervisorPmemMode::ReadOnly),
         //(input.io_file.path().into(), CloudHypervisorPmemMode::ReadWrite),
-        (format!("/dev/fd/{}", io_file_fd).into(), CloudHypervisorPmemMode::ReadWrite),
+        (
+            format!("/dev/fd/{}", io_file_fd).into(),
+            CloudHypervisorPmemMode::ReadWrite,
+        ),
     ]);
     let mut ch = {
         match CloudHypervisor::start(input.ch_config, Some(pmems)) {
             Ok(ch) => ch,
-            Err(e) => { return Err(e.into()); }
+            Err(e) => {
+                return Err(e.into());
+            }
         }
     };
-    match ch.wait_timeout_or_kill(input.ch_timeout).map_err(|_| cloudhypervisor::Error::Wait) {
+    match ch
+        .wait_timeout_or_kill(input.ch_timeout)
+        .map_err(|_| cloudhypervisor::Error::Wait)
+    {
         Ok(WaitIdDataOvertime::NotExited) => {
             panic!("ch not exited");
             // TODO this is real bad
-        },
-        Ok(WaitIdDataOvertime::Exited{siginfo, ..}) => {
+        }
+        Ok(WaitIdDataOvertime::Exited { siginfo, .. }) => {
             let info: Siginfo = (&siginfo).into();
             if info != Siginfo::Exited(0) {
                 return Err(ch.postmortem(cloudhypervisor::Error::BadExit));
             }
-        },
-        Ok(WaitIdDataOvertime::ExitedOvertime{..}) => {
+        }
+        Ok(WaitIdDataOvertime::ExitedOvertime { .. }) => {
             return Err(ch.postmortem(cloudhypervisor::Error::Overtime));
-        },
-        Err(e) => { return Err(ch.postmortem(e)); }
+        }
+        Err(e) => {
+            return Err(ch.postmortem(e));
+        }
     }
-    Ok(Output{
+    Ok(Output {
         id: input.id,
         io_file: input.io_file,
         ch_logs: ch.into_logs(),
@@ -148,11 +170,13 @@ pub fn cpuset_all_ht() -> nix::Result<Vec<CpuSet>> {
     let mut i = 0;
     let count = CpuSet::count();
     loop {
-        if i > count { break; }
+        if i > count {
+            break;
+        }
         if all.is_set(i).unwrap_or(false) && all.is_set(i + 1).unwrap_or(false) {
             let mut c = CpuSet::new();
             c.set(i)?;
-            c.set(i+1)?;
+            c.set(i + 1)?;
             ret.push(c);
         }
         i += 2;
@@ -160,21 +184,28 @@ pub fn cpuset_all_ht() -> nix::Result<Vec<CpuSet>> {
     Ok(ret)
 }
 
-pub fn cpuset(core_offset: usize,
-              n_workers: usize,
-              n_cores_per_worker: usize)
-    -> nix::Result<Vec<CpuSet>> {
+pub fn cpuset(
+    core_offset: usize,
+    n_workers: usize,
+    n_cores_per_worker: usize,
+) -> nix::Result<Vec<CpuSet>> {
     // restrict to even offset and even cores per worker to keep workers
     // on separate physical cores
-    if core_offset % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
-    if n_cores_per_worker % 2 == 1 { return nix::Result::Err(nix::errno::Errno::EINVAL); }
+    if core_offset % 2 == 1 {
+        return nix::Result::Err(nix::errno::Errno::EINVAL);
+    }
+    if n_cores_per_worker % 2 == 1 {
+        return nix::Result::Err(nix::errno::Errno::EINVAL);
+    }
     let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
     let mut ret = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
         let mut c = CpuSet::new();
         for j in 0..n_cores_per_worker {
-            let k = core_offset + i*n_cores_per_worker + j;
-            if !all.is_set(k)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
+            let k = core_offset + i * n_cores_per_worker + j;
+            if !all.is_set(k)? {
+                return nix::Result::Err(nix::errno::Errno::ENAVAIL);
+            }
             c.set(k)?;
         }
         ret.push(c);
@@ -186,9 +217,13 @@ pub fn cpuset_range(begin: usize, end: Option<usize>) -> nix::Result<CpuSet> {
     let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
     let mut c = CpuSet::new();
     if let Some(end) = end {
-        if begin > end { return nix::Result::Err(nix::errno::Errno::EINVAL); }
+        if begin > end {
+            return nix::Result::Err(nix::errno::Errno::EINVAL);
+        }
         for i in begin..=end {
-            if !all.is_set(i)? { return nix::Result::Err(nix::errno::Errno::ENAVAIL); }
+            if !all.is_set(i)? {
+                return nix::Result::Err(nix::errno::Errno::ENAVAIL);
+            }
             c.set(i)?;
         }
     } else {
@@ -221,17 +256,16 @@ pub fn cpuset_replicate(x: &CpuSet) -> Vec<CpuSet> {
 pub fn cpusets_string(xs: &[CpuSet]) -> String {
     let n = CpuSet::count();
     xs.iter()
-        .map(|c|
+        .map(|c| {
             (0..n)
-            .filter(|i| c.is_set(*i).unwrap_or(false))
-            .map(|i| format!("{}", i))
-            .collect::<Vec<String>>()
-            .join(",")
-        )
+                .filter(|i| c.is_set(*i).unwrap_or(false))
+                .map(|i| format!("{}", i))
+                .collect::<Vec<String>>()
+                .join(",")
+        })
         .collect::<Vec<String>>()
         .join(" ")
 }
-
 
 #[cfg(feature = "asynk")]
 pub mod asynk {
@@ -266,25 +300,27 @@ pub mod asynk {
             self.handles.len()
         }
 
-        pub fn sender(&self) -> &Sender<SenderElement> { &self.sender }
+        pub fn sender(&self) -> &Sender<SenderElement> {
+            &self.sender
+        }
     }
 
-    fn spawn_worker(id: usize,
-                    cpuset: CpuSet,
-                    input:  Receiver<(Input, oneshot::Sender<OutputResult>)>
-                   )
-        -> JoinHandleT {
+    fn spawn_worker(
+        id: usize,
+        cpuset: CpuSet,
+        input: Receiver<(Input, oneshot::Sender<OutputResult>)>,
+    ) -> JoinHandleT {
         spawn(move || {
             trace!("starting worker {id}");
             sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
             for (msg, output) in input.iter() {
                 match output.send(run(msg)) {
-                    Ok(_) => { },
+                    Ok(_) => {}
                     Err(_) => {
                         // output got disconnected somehow
                         trace!("worker {id} got disconnected");
                         return;
-                    },
+                    }
                 }
             }
             trace!("worker {id} shutting down");
@@ -304,7 +340,9 @@ mod tests {
         let set = cpuset(2, 15, 2).unwrap();
         //println!("{:?}", set);
         for x in set {
-            let s: String = (0..N).map(|i| if x.is_set(i).unwrap() { '1' } else { '_' }).collect();
+            let s: String = (0..N)
+                .map(|i| if x.is_set(i).unwrap() { '1' } else { '_' })
+                .collect();
             println!("{:?}", s);
         }
     }

@@ -1,9 +1,9 @@
 pub mod cloudhypervisor;
-pub mod worker;
 pub mod iofile;
+pub mod worker;
 
-use oci_spec::runtime as oci_runtime;
 use oci_spec::image as oci_image;
+use oci_spec::runtime as oci_runtime;
 
 use once_cell::sync::Lazy;
 
@@ -15,9 +15,8 @@ const SECCOMP_JSON: &[u8] = include_bytes!("../seccomp.json");
 // TODO should we just desrialize on each access?
 // kinda wish crun could take the policy directly (or precompiled) so we didn't have to shovel it
 // so many times
-static SECCOMP: Lazy<oci_runtime::LinuxSeccomp> = Lazy::new(|| {
-    serde_json::from_slice(SECCOMP_JSON).unwrap()
-});
+static SECCOMP: Lazy<oci_runtime::LinuxSeccomp> =
+    Lazy::new(|| serde_json::from_slice(SECCOMP_JSON).unwrap());
 
 #[derive(Debug)]
 pub enum Error {
@@ -30,11 +29,12 @@ pub enum Error {
 }
 
 // the allocations in this make me a bit unhappy, but maybe its all worth it
-pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
-                           entrypoint: Option<&[String]>,
-                           cmd:        Option<&[String]>,
-                           env:        Option<&[String]>,
-                           ) -> Result<oci_runtime::Spec, Error> {
+pub fn create_runtime_spec(
+    image_config: &oci_image::ImageConfiguration,
+    entrypoint: Option<&[String]>,
+    cmd: Option<&[String]>,
+    env: Option<&[String]>,
+) -> Result<oci_runtime::Spec, Error> {
     //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(UID, UID);
     // ugh this api is horrible
@@ -53,14 +53,21 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         .set_gid_mappings(Some(vec![map]));
 
     linux.namespaces_mut().as_mut().unwrap().push(
-        oci_runtime::LinuxNamespaceBuilder::default().typ(oci_runtime::LinuxNamespaceType::Network).build().unwrap()
-        );
+        oci_runtime::LinuxNamespaceBuilder::default()
+            .typ(oci_runtime::LinuxNamespaceType::Network)
+            .build()
+            .unwrap(),
+    );
 
     linux.set_seccomp(Some(SECCOMP.clone()));
 
     // TODO multi arch/os
-    if *image_config.architecture() != oci_image::Arch::Amd64 { return Err(Error::BadArch); }
-    if *image_config.os() != oci_image::Os::Linux { return Err(Error::BadOs); }
+    if *image_config.architecture() != oci_image::Arch::Amd64 {
+        return Err(Error::BadArch);
+    }
+    if *image_config.os() != oci_image::Os::Linux {
+        return Err(Error::BadOs);
+    }
 
     // TODO how does oci-spec-rs deserialize the config .Env into .env ?
 
@@ -69,36 +76,39 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         let mounts = spec.mounts_mut().as_mut().unwrap();
 
         // /tmp
-        mounts.push(oci_runtime::MountBuilder::default()
-            .destination("/tmp")
-            .typ("tmpfs")
-            .options(vec!["size=50%".into(), "mode=777".into()])
-            .build()
-            .unwrap()
-            );
+        mounts.push(
+            oci_runtime::MountBuilder::default()
+                .destination("/tmp")
+                .typ("tmpfs")
+                .options(vec!["size=50%".into(), "mode=777".into()])
+                .build()
+                .unwrap(),
+        );
 
         // /run/pe/input
-        mounts.push(oci_runtime::MountBuilder::default()
-            .destination("/run/pe/input")
-            .typ("bind")
-            .source("/run/input")
-            // idk should this be readonly?
-            // TODO I don't fully understand why this is rbind
-            // https://docs.kernel.org/filesystems/sharedsubtree.html
-            .options(vec!["rw".into(), "rbind".into()])
-            .build()
-            .unwrap()
-            );
+        mounts.push(
+            oci_runtime::MountBuilder::default()
+                .destination("/run/pe/input")
+                .typ("bind")
+                .source("/run/input")
+                // idk should this be readonly?
+                // TODO I don't fully understand why this is rbind
+                // https://docs.kernel.org/filesystems/sharedsubtree.html
+                .options(vec!["rw".into(), "rbind".into()])
+                .build()
+                .unwrap(),
+        );
 
         // /run/pe/output
-        mounts.push(oci_runtime::MountBuilder::default()
-            .destination("/run/pe/output")
-            .typ("bind")
-            .source("/run/output/dir")
-            .options(vec!["rw".into(), "rbind".into()])
-            .build()
-            .unwrap()
-            );
+        mounts.push(
+            oci_runtime::MountBuilder::default()
+                .destination("/run/pe/output")
+                .typ("bind")
+                .source("/run/output/dir")
+                .options(vec!["rw".into(), "rbind".into()])
+                .build()
+                .unwrap(),
+        );
     }
 
     // we "know" that a defaulted runtime spec has Some process
@@ -111,24 +121,38 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
         match image_config.config() {
             Some(config) => {
                 match (entrypoint, config.entrypoint()) {
-                    (Some(xs), _)    => { acc.extend_from_slice(xs); }
-                    (None, Some(xs)) => { acc.extend_from_slice(xs); }
+                    (Some(xs), _) => {
+                        acc.extend_from_slice(xs);
+                    }
+                    (None, Some(xs)) => {
+                        acc.extend_from_slice(xs);
+                    }
                     _ => {}
                 }
                 match (cmd, config.cmd()) {
-                    (Some(xs), _)    => { acc.extend_from_slice(xs); }
-                    (None, Some(xs)) => { acc.extend_from_slice(xs); }
+                    (Some(xs), _) => {
+                        acc.extend_from_slice(xs);
+                    }
+                    (None, Some(xs)) => {
+                        acc.extend_from_slice(xs);
+                    }
                     _ => {}
                 }
             }
             None => {
-                if let Some(xs) = entrypoint { acc.extend_from_slice(xs); }
-                if let Some(xs) = cmd        { acc.extend_from_slice(xs); }
+                if let Some(xs) = entrypoint {
+                    acc.extend_from_slice(xs);
+                }
+                if let Some(xs) = cmd {
+                    acc.extend_from_slice(xs);
+                }
             }
         }
         acc
     };
-    if args.is_empty() { return Err(Error::BadArgs); }
+    if args.is_empty() {
+        return Err(Error::BadArgs);
+    }
     process.set_args(Some(args));
 
     // always adding PATH begrudginly https://github.com/docker-library/busybox/issues/214
@@ -174,16 +198,26 @@ pub fn create_runtime_spec(image_config: &oci_image::ImageConfiguration,
 }
 
 fn parse_user_string(s: &str) -> Result<oci_runtime::User, Error> {
-    if s.is_empty() { return Err(Error::EmptyUser); }
+    if s.is_empty() {
+        return Err(Error::EmptyUser);
+    }
     if let Ok(uid) = s.parse::<u32>() {
         // TODO this is also supposed to lookup the gid in /etc/group I think
-        return oci_runtime::UserBuilder::default().uid(uid).gid(uid).build().map_err(|_| Error::OciUser);
+        return oci_runtime::UserBuilder::default()
+            .uid(uid)
+            .gid(uid)
+            .build()
+            .map_err(|_| Error::OciUser);
     }
     let mut iter = s.splitn(2, ":");
     let a = iter.next().map(|x| x.parse::<u32>());
     let b = iter.next().map(|x| x.parse::<u32>());
     match (a, b) {
-        (Some(Ok(uid)), Some(Ok(gid))) => oci_runtime::UserBuilder::default().uid(uid).gid(gid).build().map_err(|_| Error::OciUser),
-        _ => Err(Error::UnhandledUser)
+        (Some(Ok(uid)), Some(Ok(gid))) => oci_runtime::UserBuilder::default()
+            .uid(uid)
+            .gid(gid)
+            .build()
+            .map_err(|_| Error::OciUser),
+        _ => Err(Error::UnhandledUser),
     }
 }

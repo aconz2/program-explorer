@@ -1,18 +1,18 @@
 //use std::os::fd::AsRawFd;
-use std::path::{PathBuf};
-use std::process::{Command,Child,Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 //use std::os::unix::net::{UnixListener,UnixStream};
 use std::io;
 
 use std::ffi::OsString;
 use std::time::Duration;
 
-use tempfile::{NamedTempFile};
-use waitid_timeout::{ChildWaitIdExt,WaitIdDataOvertime};
+use tempfile::NamedTempFile;
+use waitid_timeout::{ChildWaitIdExt, WaitIdDataOvertime};
 //use serde::Serialize;
 use api_client;
 
-#[derive(Debug,Default)]
+#[derive(Debug, Default)]
 pub enum Error {
     #[default]
     Unk,
@@ -27,7 +27,9 @@ pub enum Error {
 }
 
 impl From<api_client::Error> for Error {
-    fn from(e: api_client::Error) -> Self { Error::Api(e) }
+    fn from(e: api_client::Error) -> Self {
+        Error::Api(e)
+    }
 }
 
 #[allow(dead_code)]
@@ -43,11 +45,11 @@ impl TryFrom<&str> for ChLogLevel {
     type Error = io::Error;
     fn try_from(x: &str) -> io::Result<Self> {
         match x {
-            "warn" =>  Ok(Self::Warn),
-            "info" =>  Ok(Self::Info),
+            "warn" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
             "debug" => Ok(Self::Debug),
             "trace" => Ok(Self::Trace),
-            _ => Err(io::ErrorKind::InvalidData.into())
+            _ => Err(io::ErrorKind::InvalidData.into()),
         }
     }
 }
@@ -62,7 +64,7 @@ impl CloudHypervisorPmemMode {
     fn discard_writes(&self) -> &'static str {
         match self {
             CloudHypervisorPmemMode::ReadOnly => "on",
-            CloudHypervisorPmemMode::ReadWrite => "off"
+            CloudHypervisorPmemMode::ReadWrite => "off",
         }
     }
 }
@@ -117,7 +119,7 @@ impl From<Error> for CloudHypervisorPostMortem {
                 log_file: None,
                 con_file: None,
                 err_file: None,
-            }
+            },
         }
     }
 }
@@ -142,15 +144,13 @@ impl From<Error> for CloudHypervisorPostMortem {
 //}
 
 impl CloudHypervisor {
-
-    pub fn start(config: CloudHypervisorConfig, pmems: Option<CloudHypervisorPmem>) -> Result<Self, Error>
-    {
-        let err_file = NamedTempFile::with_prefix("err-")
-            .map_err(|_| Error::TempfileSetup)?;
-        let log_file = NamedTempFile::with_prefix("log-")
-            .map_err(|_| Error::TempfileSetup)?;
-        let con_file = NamedTempFile::with_prefix("con-")
-            .map_err(|_| Error::TempfileSetup)?;
+    pub fn start(
+        config: CloudHypervisorConfig,
+        pmems: Option<CloudHypervisorPmem>,
+    ) -> Result<Self, Error> {
+        let err_file = NamedTempFile::with_prefix("err-").map_err(|_| Error::TempfileSetup)?;
+        let log_file = NamedTempFile::with_prefix("log-").map_err(|_| Error::TempfileSetup)?;
+        let con_file = NamedTempFile::with_prefix("con-").map_err(|_| Error::TempfileSetup)?;
 
         // Disabling sapi socket as don't really need it
         //let (listener, stream) = setup_socket(rand_path_prefix("sock-"))
@@ -179,8 +179,10 @@ impl CloudHypervisor {
             //       to do bad things (guessing because its like a write to a bad "fd"?)
             //             --cmdline console=hvc0 --console null does work though
             if config.console {
-                x.arg("--cmdline").arg("console=hvc0")
-                 .arg("--console").arg(format!("file={:?}", con_file.path()));
+                x.arg("--cmdline")
+                    .arg("console=hvc0")
+                    .arg("--console")
+                    .arg(format!("file={:?}", con_file.path()));
             } else {
                 x.arg("--console").arg("off");
             }
@@ -190,21 +192,38 @@ impl CloudHypervisor {
             if let Some(ref level) = config.log_level {
                 x.arg("--log-file").arg(log_file.path());
                 match level {
-                    ChLogLevel::Warn  => { }
-                    ChLogLevel::Info  => { x.arg("-v"); }
-                    ChLogLevel::Debug => { x.arg("-vv"); }
-                    ChLogLevel::Trace => { x.arg("-vvv"); }
+                    ChLogLevel::Warn => {}
+                    ChLogLevel::Info => {
+                        x.arg("-v");
+                    }
+                    ChLogLevel::Debug => {
+                        x.arg("-vv");
+                    }
+                    ChLogLevel::Trace => {
+                        x.arg("-vvv");
+                    }
                 }
             }
             match pmems {
                 Some(CloudHypervisorPmem::One([(path, mode)])) => {
-                    x.arg("--pmem")
-                     .arg(format!("file={:?},discard_writes={}", path, mode.discard_writes()));
+                    x.arg("--pmem").arg(format!(
+                        "file={:?},discard_writes={}",
+                        path,
+                        mode.discard_writes()
+                    ));
                 }
                 Some(CloudHypervisorPmem::Two([(path1, mode1), (path2, mode2)])) => {
                     x.arg("--pmem")
-                     .arg(format!("file={},discard_writes={}", path1.display(), mode1.discard_writes()))
-                     .arg(format!("file={},discard_writes={}", path2.display(), mode2.discard_writes()));
+                        .arg(format!(
+                            "file={},discard_writes={}",
+                            path1.display(),
+                            mode1.discard_writes()
+                        ))
+                        .arg(format!(
+                            "file={},discard_writes={}",
+                            path2.display(),
+                            mode2.discard_writes()
+                        ));
                 }
                 None => {}
             }
@@ -216,7 +235,11 @@ impl CloudHypervisor {
 
         let ret = CloudHypervisor {
             err_file: err_file,
-            log_file: if config.log_level.is_some() { Some(log_file) } else { None },
+            log_file: if config.log_level.is_some() {
+                Some(log_file)
+            } else {
+                None
+            },
             con_file: if config.console { Some(con_file) } else { None },
             child: child,
             //socket_listen: listener,
@@ -282,7 +305,6 @@ impl CloudHypervisor {
                 con_file: self.con_file,
                 err_file: Some(self.err_file),
             },
-
         }
     }
 

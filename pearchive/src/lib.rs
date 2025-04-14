@@ -1,17 +1,17 @@
-use std::os::fd::{AsRawFd,OwnedFd};
+use std::collections::HashMap;
+use std::ffi::{CStr, CString, OsStr};
 use std::fs;
 use std::fs::File;
-use std::path::{Path,PathBuf};
-use std::collections::HashMap;
-use std::ffi::{CStr,CString,OsStr};
-use std::io::{Write,BufWriter,Cursor};
+use std::io::{BufWriter, Cursor, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
-use rustix::fs::{RawDir,FileType};
 use memmap2::MmapOptions;
+use rustix::fs::{FileType, RawDir};
 
 mod open;
-use open::{openat,opendirat_cwd,openat_w,opendirat,openpathat};
+use open::{openat, openat_w, opendirat, opendirat_cwd, openpathat};
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
@@ -35,7 +35,7 @@ const MAX_NAME_LEN: usize = 255; // max len on tmpfs
 ///   | pop:  <tag>
 ///
 
-#[derive(Debug,PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     Create,
     OpenAt,
@@ -83,13 +83,16 @@ pub trait UnpackVisitor {
 }
 
 struct PackFsToWriter<W: Write + AsRawFd> {
-    writer: BufWriter::<W>,
+    writer: BufWriter<W>,
     depth: usize,
 }
 
 impl<W: Write + AsRawFd> PackFsToWriter<W> {
     fn new(out: W) -> Self {
-        Self { depth: 0, writer: BufWriter::new(out) }
+        Self {
+            depth: 0,
+            writer: BufWriter::new(out),
+        }
     }
 
     fn into_file(self) -> Result<W, Error> {
@@ -100,38 +103,57 @@ impl<W: Write + AsRawFd> PackFsToWriter<W> {
 impl<W: Write + AsRawFd> PackFsVisitor for PackFsToWriter<W> {
     fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), Error> {
         let size_u32: u32 = size.try_into().map_err(|_| Error::Write)?;
-        self.writer.write_all(&[ArchiveFormat1Tag::File as u8]).map_err(|_| Error::Write)?;
-        self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| Error::Write)?;
-        self.writer.write_all(&size_u32.to_le_bytes()).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&[ArchiveFormat1Tag::File as u8])
+            .map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(name.to_bytes_with_nul())
+            .map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&size_u32.to_le_bytes())
+            .map_err(|_| Error::Write)?;
         self.writer.flush().map_err(|_| Error::Flush)?;
         sendfile_all(&mut fd, self.writer.get_mut(), size)?;
         Ok(())
     }
 
     fn on_dir(&mut self, name: &CStr) -> Result<(), Error> {
-        if self.depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
+        if self.depth > MAX_DIR_DEPTH {
+            return Err(Error::DirTooDeep);
+        }
         self.depth += 1;
-        self.writer.write_all(&[ArchiveFormat1Tag::Dir as u8]).map_err(|_| Error::Write)?;
-        self.writer.write_all(name.to_bytes_with_nul()).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&[ArchiveFormat1Tag::Dir as u8])
+            .map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(name.to_bytes_with_nul())
+            .map_err(|_| Error::Write)?;
         Ok(())
     }
 
     fn leave_dir(&mut self) -> Result<(), Error> {
-        if self.depth == 0 { return Err(Error::EmptyStack); }
+        if self.depth == 0 {
+            return Err(Error::EmptyStack);
+        }
         self.depth -= 1;
-        self.writer.write_all(&[ArchiveFormat1Tag::Pop as u8]).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&[ArchiveFormat1Tag::Pop as u8])
+            .map_err(|_| Error::Write)?;
         Ok(())
     }
 }
 
-pub struct PackMemToWriter<W: Write>  {
-    writer: BufWriter::<W>,
+pub struct PackMemToWriter<W: Write> {
+    writer: BufWriter<W>,
     depth: usize,
 }
 
 impl<W: Write> PackMemToWriter<W> {
     fn new(out: W) -> Self {
-        Self { depth: 0, writer: BufWriter::new(out) }
+        Self {
+            depth: 0,
+            writer: BufWriter::new(out),
+        }
     }
 
     fn into_inner(self) -> Result<W, Error> {
@@ -142,27 +164,43 @@ impl<W: Write> PackMemToWriter<W> {
 impl<W: Write> PackMemVisitor for PackMemToWriter<W> {
     fn file(&mut self, name: &str, data: &[u8]) -> Result<(), Error> {
         let size_u32: u32 = data.len().try_into().map_err(|_| Error::Write)?;
-        self.writer.write_all(&[ArchiveFormat1Tag::File as u8]).map_err(|_| Error::Write)?;
-        self.writer.write_all(name.as_bytes()).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&[ArchiveFormat1Tag::File as u8])
+            .map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(name.as_bytes())
+            .map_err(|_| Error::Write)?;
         self.writer.write_all(&[0]).map_err(|_| Error::Write)?;
-        self.writer.write_all(&size_u32.to_le_bytes()).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&size_u32.to_le_bytes())
+            .map_err(|_| Error::Write)?;
         self.writer.write_all(data).map_err(|_| Error::Write)?;
         Ok(())
     }
 
     fn dir(&mut self, name: &str) -> Result<(), Error> {
-        if self.depth > MAX_DIR_DEPTH { return Err(Error::DirTooDeep); }
+        if self.depth > MAX_DIR_DEPTH {
+            return Err(Error::DirTooDeep);
+        }
         self.depth += 1;
-        self.writer.write_all(&[ArchiveFormat1Tag::Dir as u8]).map_err(|_| Error::Write)?;
-        self.writer.write_all(name.as_bytes()).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&[ArchiveFormat1Tag::Dir as u8])
+            .map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(name.as_bytes())
+            .map_err(|_| Error::Write)?;
         self.writer.write_all(&[0]).map_err(|_| Error::Write)?;
         Ok(())
     }
 
     fn pop(&mut self) -> Result<(), Error> {
-        if self.depth == 0 { return Err(Error::EmptyStack); }
+        if self.depth == 0 {
+            return Err(Error::EmptyStack);
+        }
         self.depth -= 1;
-        self.writer.write_all(&[ArchiveFormat1Tag::Pop as u8]).map_err(|_| Error::Write)?;
+        self.writer
+            .write_all(&[ArchiveFormat1Tag::Pop as u8])
+            .map_err(|_| Error::Write)?;
         Ok(())
     }
 }
@@ -177,7 +215,9 @@ impl Default for PackMemToVec {
 }
 
 impl PackMemToVec {
-    pub fn new() -> Self { Self(PackMemToWriter::new(Cursor::new(vec![]))) }
+    pub fn new() -> Self {
+        Self(PackMemToWriter::new(Cursor::new(vec![])))
+    }
     pub fn with_vec(v: Vec<u8>) -> Self {
         let pos = v.len();
         let mut c = Cursor::new(v);
@@ -206,14 +246,13 @@ fn unshare_user() -> Result<(), Error> {
     let gid = unsafe { libc::getegid() };
     unsafe {
         let ret = libc::unshare(libc::CLONE_NEWUSER);
-        if ret < 0 { return Err(Error::Unshare); }
+        if ret < 0 {
+            return Err(Error::Unshare);
+        }
     }
-    fs::write("/proc/self/uid_map", format!("0 {} 1", uid).as_bytes())
-        .map_err(|_| Error::Write)?;
-    fs::write("/proc/self/setgroups", b"deny")
-        .map_err(|_| Error::Write)?;
-    fs::write("/proc/self/gid_map", format!("0 {} 1", gid).as_bytes())
-        .map_err(|_| Error::Write)?;
+    fs::write("/proc/self/uid_map", format!("0 {} 1", uid).as_bytes()).map_err(|_| Error::Write)?;
+    fs::write("/proc/self/setgroups", b"deny").map_err(|_| Error::Write)?;
+    fs::write("/proc/self/gid_map", format!("0 {} 1", gid).as_bytes()).map_err(|_| Error::Write)?;
     Ok(())
 }
 
@@ -227,7 +266,9 @@ fn chroot(dir: &Path) -> Result<(), Error> {
 fn mkdirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
     unsafe {
         let ret = libc::mkdirat(fd.as_raw_fd(), name.as_ptr(), MKDIR_MODE);
-        if ret < 0 { return Err(Error::MkdirAt); }
+        if ret < 0 {
+            return Err(Error::MkdirAt);
+        }
         Ok(())
     }
 }
@@ -247,17 +288,23 @@ impl TryFrom<&u8> for ArchiveFormat1Tag {
 fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
     let (int_bytes, rest) = input.split_at(std::mem::size_of::<u32>());
     *input = rest;
-    Ok(u32::from_le_bytes(int_bytes.try_into().map_err(|_| Error::BadSize)?))
+    Ok(u32::from_le_bytes(
+        int_bytes.try_into().map_err(|_| Error::BadSize)?,
+    ))
 }
 
-fn read_cstr<'a>(input: &mut &'a[u8]) -> Result<&'a CStr, Error> {
+fn read_cstr<'a>(input: &mut &'a [u8]) -> Result<&'a CStr, Error> {
     // memchr ...
-    if input.is_empty() { return Err(Error::BadName); }
-    if input.len() == 1 && input[0] == 0 { return Err(Error::BadName); }
+    if input.is_empty() {
+        return Err(Error::BadName);
+    }
+    if input.len() == 1 && input[0] == 0 {
+        return Err(Error::BadName);
+    }
 
     for i in 1..std::cmp::min(input.len(), MAX_NAME_LEN + 1) {
         if input[i] == 0 {
-            let (l, r) = input.split_at(i+1);
+            let (l, r) = input.split_at(i + 1);
             *input = r;
             return Ok(unsafe { CStr::from_bytes_with_nul_unchecked(l) });
         }
@@ -269,25 +316,35 @@ fn file_size<Fd: AsRawFd>(fd: &Fd) -> Result<u64, Error> {
     use std::mem;
     let size = unsafe {
         let mut buf: libc::stat = mem::zeroed();
-        let ret = libc::fstat(
-            fd.as_raw_fd(),
-            &mut buf as *mut _
-        );
-        if ret < 0 { return Err(Error::Fstat); }
+        let ret = libc::fstat(fd.as_raw_fd(), &mut buf as *mut _);
+        if ret < 0 {
+            return Err(Error::Fstat);
+        }
         buf.st_size
     };
     // dude st_size is signed here and unsigned in statx
     size.try_into().map_err(|_| Error::Fstat)
 }
 
-fn sendfile_all<Fd1: AsRawFd, Fd2: AsRawFd>(fd_in: &mut Fd1, fd_out: &mut Fd2, len: u64) -> Result<(), Error> {
+fn sendfile_all<Fd1: AsRawFd, Fd2: AsRawFd>(
+    fd_in: &mut Fd1,
+    fd_out: &mut Fd2,
+    len: u64,
+) -> Result<(), Error> {
     use std::ptr;
     let mut len = len;
     while len > 0 {
         let ret = unsafe {
-            libc::sendfile(fd_out.as_raw_fd(), fd_in.as_raw_fd(), ptr::null_mut(), len as usize)
+            libc::sendfile(
+                fd_out.as_raw_fd(),
+                fd_in.as_raw_fd(),
+                ptr::null_mut(),
+                len as usize,
+            )
         };
-        if ret <= 0 { return Err(Error::SendFile(unsafe { *libc::__errno_location() })); }
+        if ret <= 0 {
+            return Err(Error::SendFile(unsafe { *libc::__errno_location() }));
+        }
         let ret = ret as u64;
         assert!(ret <= len);
         len -= ret;
@@ -308,7 +365,7 @@ fn visit_dirc_rec<V: PackFsVisitor>(curdir: &OwnedFd, v: &mut V) -> Result<(), E
                 let fd = openat(curdir, name)?;
                 let size = file_size(&fd)?;
                 v.on_file(name, size, fd)?;
-            },
+            }
             FileType::Directory => {
                 if entry.file_name() == c"." || entry.file_name() == c".." {
                     continue;
@@ -319,7 +376,7 @@ fn visit_dirc_rec<V: PackFsVisitor>(curdir: &OwnedFd, v: &mut V) -> Result<(), E
                 v.on_dir(curname).map_err(|_| Error::OnDir)?;
                 visit_dirc_rec(&newdirfd, v)?;
                 v.leave_dir().map_err(|_| Error::OnDir)?;
-            },
+            }
             _ => {}
         }
     }
@@ -351,7 +408,7 @@ pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
 /// deemed unsafe because we unpack to cwd with no path traversal protection, caller should ensure
 /// we are in a chroot or otherwise protected
 unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error> {
-    let mut stack: Vec<OwnedFd> = Vec::with_capacity(32);  // always non-empty
+    let mut stack: Vec<OwnedFd> = Vec::with_capacity(32); // always non-empty
     stack.push(starting_dir);
 
     let mut cur = data;
@@ -362,11 +419,13 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                 let parent = stack.last().unwrap();
                 let name = read_cstr(&mut cur)?;
                 let len = read_le_u32(&mut cur)? as usize;
-                if len > cur.len() { return Err(Error::ArchiveTruncated); }
+                if len > cur.len() {
+                    return Err(Error::ArchiveTruncated);
+                }
                 let mut file: File = openat_w(parent, name)?.into();
                 file.write_all(&cur[..len]).map_err(|_| Error::Write)?;
                 cur = &cur[len..];
-            },
+            }
             Some(Ok(ArchiveFormat1Tag::Dir)) => {
                 cur = &cur[1..];
                 let parent = stack.last().unwrap();
@@ -376,7 +435,7 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                     Some(Ok(ArchiveFormat1Tag::Pop)) => {
                         // fast path for empty dir, never open the dir or push it
                         cur = &cur[1..]; // advance past Pop
-                    },
+                    }
                     Some(Ok(_)) => {
                         stack.push(openpathat(parent, name)?);
                     }
@@ -384,21 +443,22 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
                         // handled in outer match next loop
                     }
                 }
-            },
+            }
             Some(Ok(ArchiveFormat1Tag::Pop)) => {
                 cur = &cur[1..];
                 stack.pop().ok_or(Error::EmptyStack)?;
-            },
+            }
             Some(Err(_)) => {
                 return Err(Error::BadTag);
-            },
+            }
             None => {
-                return (stack.len() == 1).then_some(()).ok_or(Error::ArchiveTruncated);
+                return (stack.len() == 1)
+                    .then_some(())
+                    .ok_or(Error::ArchiveTruncated);
             }
         }
     }
 }
-
 
 // duplicated but w/e
 pub fn unpack_visitor<V: UnpackVisitor>(data: &[u8], v: &mut V) -> Result<(), Error> {
@@ -411,28 +471,34 @@ pub fn unpack_visitor<V: UnpackVisitor>(data: &[u8], v: &mut V) -> Result<(), Er
                 cur = &cur[1..];
                 let name = read_cstr(&mut cur)?;
                 let len = read_le_u32(&mut cur)? as usize;
-                if len > cur.len() { return Err(Error::ArchiveTruncated); }
+                if len > cur.len() {
+                    return Err(Error::ArchiveTruncated);
+                }
                 let data = &cur[..len];
                 path.push(OsStr::from_bytes(name.to_bytes()));
-                if !v.on_file(&path, data) { return Ok(()); }
+                if !v.on_file(&path, data) {
+                    return Ok(());
+                }
                 path.pop();
                 cur = &cur[len..];
-            },
+            }
             Some(Ok(ArchiveFormat1Tag::Dir)) => {
                 cur = &cur[1..];
                 let name = read_cstr(&mut cur)?;
                 path.push(OsStr::from_bytes(name.to_bytes()));
                 depth += 1;
-            },
+            }
             Some(Ok(ArchiveFormat1Tag::Pop)) => {
                 cur = &cur[1..];
-                if depth == 0 { return Err(Error::EmptyStack); }
+                if depth == 0 {
+                    return Err(Error::EmptyStack);
+                }
                 depth -= 1;
                 path.pop();
-            },
+            }
             Some(Err(_)) => {
                 return Err(Error::BadTag);
-            },
+            }
             None => {
                 return (depth == 0).then_some(()).ok_or(Error::ArchiveTruncated);
             }
@@ -446,7 +512,9 @@ struct UnpackToHashmap {
 
 impl UnpackToHashmap {
     fn new() -> Self {
-        Self {map: HashMap::new()}
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     fn into_hashmap(self) -> HashMap<PathBuf, Vec<u8>> {
@@ -489,31 +557,40 @@ pub fn unpack_data_to_dir_with_unshare_chroot(data: &[u8], dir: &Path) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::ffi::OsString;
-    use std::os::fd::FromRawFd;
     use std::fs;
+    use std::os::fd::FromRawFd;
+    use std::path::PathBuf;
     //use std::thread;
+    use std::io::{Seek, SeekFrom};
     use std::process::Command;
-    use std::io::{Seek,SeekFrom};
 
     use rand;
     use rand::distributions::DistString;
 
-    struct TempDir { name: OsString }
+    struct TempDir {
+        name: OsString,
+    }
 
     impl TempDir {
         fn new() -> Self {
             let rng = rand::distributions::Alphanumeric.sample_string(&mut rand::thread_rng(), 8);
-            let ret = Self { name: format!("/tmp/charchive-{rng}").into() };
+            let ret = Self {
+                name: format!("/tmp/charchive-{rng}").into(),
+            };
             std::fs::create_dir(&ret.name).unwrap();
             ret
         }
 
-        fn join<O: AsRef<Path>>(&self, other: O) -> PathBuf { self.as_ref().join(other) }
+        fn join<O: AsRef<Path>>(&self, other: O) -> PathBuf {
+            self.as_ref().join(other)
+        }
 
         fn file(self, name: &str, data: &[u8]) -> Self {
-            File::create(&self.join(name)).unwrap().write_all(data).unwrap();
+            File::create(&self.join(name))
+                .unwrap()
+                .write_all(data)
+                .unwrap();
             self
         }
 
@@ -533,8 +610,16 @@ mod tests {
         }
     }
 
-    impl AsRef<Path> for TempDir { fn as_ref(&self) -> &Path { return Path::new(&self.name) } }
-    impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(self); } }
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            return Path::new(&self.name);
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self);
+        }
+    }
 
     fn tempfile() -> File {
         unsafe {
@@ -597,7 +682,10 @@ mod tests {
         assert_eq!(hm.len(), 3);
         assert_eq!(hm.get(Path::new("file1")).unwrap(), b"hello world");
         assert_eq!(hm.get(Path::new("file2")).unwrap(), b"yooo");
-        assert_eq!(hm.get(Path::new("adir/another-file")).unwrap(), b"some data");
+        assert_eq!(
+            hm.get(Path::new("adir/another-file")).unwrap(),
+            b"some data"
+        );
         // can shell out to actual program
         // but then annoyingly we have to link the tempfile
         // println!("{}", std::env::current_exe().unwrap().display());
@@ -665,6 +753,9 @@ mod tests {
         v.file("file1", b"data1").unwrap();
         let buf = v.into_vec().unwrap();
         //              F    f    i    l    e   1 \0  - u32 5  -    d   a    t   a   1
-        assert_eq!(vec![1, 102, 105, 108, 101, 49, 0, 5, 0, 0, 0, 100, 97, 116, 97, 49], buf);
+        assert_eq!(
+            vec![1, 102, 105, 108, 101, 49, 0, 5, 0, 0, 0, 100, 97, 116, 97, 49],
+            buf
+        );
     }
 }

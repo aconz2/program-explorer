@@ -1,11 +1,12 @@
-use std::io;
-use std::io::{Write,Seek, SeekFrom, Read};
 use std::fs::File;
+use std::io;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 
-use rustix::fs::{memfd_create, MemfdFlags, SealFlags, fcntl_add_seals, ftruncate, AtFlags, statat};
 use rustix::fd::AsFd;
-
+use rustix::fs::{
+    fcntl_add_seals, ftruncate, memfd_create, statat, AtFlags, MemfdFlags, SealFlags,
+};
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 
@@ -20,7 +21,10 @@ pub struct IoFileBuilder {
 impl IoFileBuilder {
     pub fn new() -> rustix::io::Result<Self> {
         // NOTE: CLOEXEC is NOT set
-        let fd = memfd_create("peiofile", MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL)?;
+        let fd = memfd_create(
+            "peiofile",
+            MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL,
+        )?;
         Ok(Self { file: fd.into() })
     }
 
@@ -78,7 +82,9 @@ impl AsRawFd for IoFile {
 }
 
 fn round_up_to<const N: u64>(x: u64) -> u64 {
-    if x == 0 { return N; }
+    if x == 0 {
+        return N;
+    }
     ((x + (N - 1)) / N) * N
 }
 
