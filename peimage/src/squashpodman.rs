@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Cursor};
 use std::os::fd::FromRawFd;
@@ -10,7 +9,7 @@ use peimage::squash::squash;
 // https://doc.rust-lang.org/rust-by-example/error/multiple_error_types/boxing_errors.html
 
 fn main() {
-    let args: Vec<_> = env::args().collect();
+    let args: Vec<_> = std::env::args().collect();
     let image = args.get(1).expect("give me an image name");
 
     let mut layers: Vec<_> = load_layers_from_podman(image)

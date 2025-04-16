@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::error;
 use std::ffi::OsStr;
-use std::fmt;
 use std::io::{Cursor, Read, Write};
 use std::process::{Command, Stdio};
 use tar::Archive;
@@ -10,30 +8,43 @@ use tempfile::NamedTempFile;
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
 #[derive(Debug)]
-enum PodmanLoadError {
+pub enum Error {
     NoManifest,
     NoIndex,
     MissingBlob,
     BadBlobPath,
     NonUtf8Path,
+    PodmanExport,
+    PodmanBuild,
+    PodmanRm,
+    PodmanCreate,
+    PodmanCreateId,
+    Tempfile,
+    OciSpec,
+    Io,
 }
-impl fmt::Display for PodmanLoadError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+
+impl From<std::io::Error> for Error {
+    fn from(_: std::io::Error) -> Self {
+        Error::Io
     }
 }
 
-impl error::Error for PodmanLoadError {}
+impl From<oci_spec::OciSpecError> for Error {
+    fn from(_: oci_spec::OciSpecError) -> Self {
+        Error::OciSpec
+    }
+}
 
-fn digest_to_string(digest: &Digest) -> Result<String, PodmanLoadError> {
+fn digest_to_string(digest: &Digest) -> Result<String, Error> {
     digest
         .to_string()
         .strip_prefix("sha256:")
         .map(|x| x.into())
-        .ok_or(PodmanLoadError::BadBlobPath)
+        .ok_or(Error::BadBlobPath)
 }
 
-pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn error::Error>> {
+pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Error> {
     let mut child = Command::new("podman")
         .arg("image")
         .arg("save")
@@ -58,7 +69,7 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn erro
             if let Ok(blob) = entry.path()?.strip_prefix("blobs/sha256/") {
                 blobs.insert(
                     blob.to_str()
-                        .ok_or(PodmanLoadError::BadBlobPath)?
+                        .ok_or(Error::BadBlobPath)?
                         .to_string(),
                     buf,
                 );
@@ -68,15 +79,15 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn erro
 
     let _ = child.wait()?;
 
-    let index = index.ok_or(PodmanLoadError::NoIndex)?;
+    let index = index.ok_or(Error::NoIndex)?;
     let manifest = index
         .manifests()
         .first()
-        .ok_or(PodmanLoadError::NoManifest)?;
+        .ok_or(Error::NoManifest)?;
     // Digest should really implement Borrow<String>
     let manifest_blob = blobs
         .get(&digest_to_string(manifest.digest())?)
-        .ok_or(PodmanLoadError::MissingBlob)?;
+        .ok_or(Error::MissingBlob)?;
     let manifest = ImageManifest::from_reader(Cursor::new(manifest_blob))?;
     manifest
         .layers()
@@ -84,7 +95,7 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Box<dyn erro
         .map(|x| {
             blobs
                 .remove(&digest_to_string(x.digest())?)
-                .ok_or(PodmanLoadError::MissingBlob)
+                .ok_or(Error::MissingBlob)
                 .map_err(|x| x.into())
         })
         .collect()
@@ -95,8 +106,8 @@ pub struct Rootfs {
     pub combined: Vec<u8>,
 }
 
-pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Box<dyn error::Error>> {
-    let mut id_file = NamedTempFile::new()?;
+pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
+    let mut id_file = NamedTempFile::new().map_err(|_| Error::Tempfile)?;
     let mut child = Command::new("podman")
         .arg("build")
         .arg("--file=-")
@@ -108,18 +119,19 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Box<dyn error::E
             id_file
                 .path()
                 .to_str()
-                .ok_or(PodmanLoadError::NonUtf8Path)?
+                .ok_or(Error::NonUtf8Path)?
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|_| Error::PodmanBuild)?;
 
     let mut stdin = child.stdin.take().expect("handle present");
-    stdin.write_all(containerfile.as_bytes())?;
+    stdin.write_all(containerfile.as_bytes()).map_err(|_| Error::Io)?;
     drop(stdin);
 
-    let _ = child.wait()?;
+    let _ = child.wait().map_err(|_| Error::PodmanBuild)?;
 
     let iid = {
         let mut buf = String::new();
@@ -130,12 +142,12 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Box<dyn error::E
     let layers = load_layers_from_podman(&iid)?;
 
     let cid = {
-        let output = Command::new("podman").arg("create").arg(&iid).output()?;
-        String::from_utf8(output.stdout)?.trim().to_string()
+        let output = Command::new("podman").arg("create").arg(&iid).output().map_err(|_| Error::PodmanCreate)?;
+        String::from_utf8(output.stdout).map_err(|_| Error::PodmanCreateId)?.trim().to_string()
     };
 
     let combined = {
-        let output = Command::new("podman").arg("export").arg(&cid).output()?;
+        let output = Command::new("podman").arg("export").arg(&cid).output().map_err(|_| Error::PodmanExport)?;
         output.stdout
     };
 
@@ -144,7 +156,8 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Box<dyn error::E
         .arg(cid)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .status()
+        .map_err(|_| Error::PodmanRm)?;
 
     let _ = Command::new("podman")
         .arg("rmi")

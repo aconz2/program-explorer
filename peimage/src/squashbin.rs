@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::File;
 use std::io::BufWriter;
 use std::os::fd::FromRawFd;
@@ -6,7 +5,7 @@ use std::os::fd::FromRawFd;
 use peimage::squash::squash;
 
 fn main() {
-    let mut layers: Vec<_> = env::args()
+    let mut layers: Vec<_> = std::env::args()
         .skip(1)
         .map(|x| File::open(x).unwrap())
         //.map(|x| Archive::new(GzDecoder::new(x)))

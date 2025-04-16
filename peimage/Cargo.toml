@@ -33,6 +33,10 @@ name = "squash-oci"
 path = "src/squashoci.rs"
 
 [[bin]]
+name = "squash-erofs"
+path = "src/squasherofs.rs"
+
+[[bin]]
 name = "tardiff"
 path = "src/tardiff.rs"
 
