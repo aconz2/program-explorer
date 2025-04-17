@@ -1250,6 +1250,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "peerofs"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "rustix 1.0.5",
+]
+
+[[package]]
 name = "peimage"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,18 @@
+[package]
+name = "peerofs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+byteorder = "1.5.0"
+rustix = { version = "1.0.5", features = ["fs"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "erofs-dump"
+path = "src/dump.rs"
+
+[lints]
+workspace = true
