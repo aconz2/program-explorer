@@ -1,5 +1,4 @@
 use std::fmt;
-use std::ffi::CStr;
 
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
@@ -23,8 +22,11 @@ pub enum Error {
     BadCStr,
     Oob,
     NotDir,
+    NotSymlink,
     NotRegDirLink,
     DirentBadSize,
+    BadFileType,
+    InodeTooBig,
 }
 
 // NOTE: we are using byteorder endian aware types so that they get decoded on demand (noop on LE
@@ -99,7 +101,7 @@ pub struct InodeExtended {
 #[repr(C)]
 pub struct ChunkInfo {
     format: U16,
-    reserved: U16,
+    _reserved: U16,
 }
 #[derive(TryFromBytes, Immutable)]
 #[repr(C)]
@@ -172,6 +174,27 @@ impl<'a> Inode<'a> {
         }
     }
 
+    pub fn uid(&self) -> u32 {
+        match self {
+            Inode::Compact((_, x)) => x.uid.into(),
+            Inode::Extended((_, x)) => x.uid.into(),
+        }
+    }
+
+    pub fn gid(&self) -> u32 {
+        match self {
+            Inode::Compact((_, x)) => x.gid.into(),
+            Inode::Extended((_, x)) => x.gid.into(),
+        }
+    }
+
+    pub fn mode(&self) -> u32 {
+        match self {
+            Inode::Compact((_, x)) => x.mode.into(),
+            Inode::Extended((_, x)) => x.mode.into(),
+        }
+    }
+
     pub fn layout(&self) -> Layout {
         let format_layout: u16 = match self {
             Inode::Compact((_, x)) => x.format_layout.into(),
@@ -180,6 +203,13 @@ impl<'a> Inode<'a> {
         ((format_layout >> 1) & 0x07)
             .try_into()
             .expect("should be validated on the way in")
+    }
+
+    pub fn raw_block_addr(&self) -> u32 {
+        match self {
+            Inode::Compact((_, x)) => unsafe { x.info.raw_blkaddr.into() },
+            Inode::Extended((_, x)) => unsafe { x.info.raw_blkaddr.into() },
+        }
     }
 
     pub fn block_addr(&self) -> Result<u64, Error> {
@@ -267,13 +297,14 @@ impl<'a> Dirents<'a> {
 
 #[derive(Debug)]
 pub struct DirentItem<'a> {
-    disk_id: u64,
-    file_type: u8,
-    name: &'a [u8],
+    pub disk_id: u64,
+    pub file_type: DirentFileType,
+    pub name: &'a [u8],
 }
 
 // TODO I think because name_offset is only a u16 and the first dirent name_offset is used as a
 // count of nodes, then there can only be 2**16 / 12 entries in a directory?
+// AHH so I think that if this limit would be exceeded it is made into another chunk
 pub struct DirentsIterator<'a> {
     dirents: &'a Dirents<'a>,
     i: u16,
@@ -298,12 +329,13 @@ impl<'a> DirentsIterator<'a> {
         } else {
             // TODO thought this was right
             //println!("final one");
+            //use std::ffi::CStr;
             //let cstr = CStr::from_bytes_until_nul(
             //    self.dirents.data
             //        .get(name_start..)
             //        .ok_or(Error::Oob)?
             //).map_err(|_| Error::BadCStr)?;
-            //cstr.count_bytes()
+            //cstr.to_bytes()
             self.dirents.data
                 .get(name_start..)
                 .ok_or(Error::Oob)?
@@ -311,7 +343,7 @@ impl<'a> DirentsIterator<'a> {
 
         Ok(DirentItem {
             disk_id: dirent.disk_id.into(),
-            file_type: dirent.file_type,
+            file_type: dirent.file_type.try_into()?,
             name,
         })
     }
@@ -326,6 +358,36 @@ impl<'a> Iterator for DirentsIterator<'a> {
         }
         self.i += 1;
         Some(self.next_impl())
+    }
+}
+
+#[derive(Debug)]
+pub enum DirentFileType {
+    Unknown = 0,
+    RegularFile = 1,
+    Directory = 2,
+    CharacterDevice = 3,
+    BlockDevice = 4,
+    Fifo = 5,
+    Socket = 6,
+    Symlink = 7,
+}
+
+impl TryFrom<u8> for DirentFileType {
+    type Error = Error;
+    fn try_from(x: u8) -> Result<DirentFileType, Error> {
+        use DirentFileType::*;
+        match x {
+            0 => Ok(Unknown),
+            1 => Ok(RegularFile),
+            2 => Ok(Directory),
+            3 => Ok(CharacterDevice),
+            4 => Ok(BlockDevice),
+            5 => Ok(Fifo),
+            6 => Ok(Socket),
+            7 => Ok(Symlink),
+            _ => Err(Error::BadFileType),
+        }
     }
 }
 
@@ -394,11 +456,7 @@ impl<'a> Erofs<'a> {
         start + inode_size as u64 + xattr_size
     }
 
-    pub fn get_root_inode(&self) -> Result<Inode<'a>, Error> {
-        self.get_inode(self.sb.root_disk_id.into())
-    }
-
-    fn get_inode(&self, disk_id: u32) -> Result<Inode<'a>, Error> {
+    pub fn get_inode(&self, disk_id: u32) -> Result<Inode<'a>, Error> {
         let offset = self.raw_inode_offset(disk_id) as usize;
         let format_layout = self.data.get(offset).ok_or(Error::Oob)?;
         match format_layout & 1 {
@@ -412,17 +470,34 @@ impl<'a> Erofs<'a> {
         }
     }
 
+    pub fn get_inode_dirent(&self, dirent: &DirentItem<'a>) -> Result<Inode<'a>, Error> {
+        // idk why the dir disk id is a u64
+        self.get_inode(dirent.disk_id.try_into().map_err(|_| Error::InodeTooBig)?)
+    }
+
+    pub fn get_root_inode(&self) -> Result<Inode<'a>, Error> {
+        self.get_inode(self.sb.root_disk_id.into())
+    }
+
     fn get_data(&self, inode: &Inode<'a>) -> Result<&'a [u8], Error> {
         match inode.layout() {
             Layout::FlatInline => {
                 let data_begin = self.inode_end(&inode) as usize;
                 let data_len = inode.data_size() as usize;
-                println!("read begin={data_begin} len={data_len}");
+                //eprintln!("read begin={data_begin} len={data_len}");
                 self.data
                     .get(data_begin..data_begin + data_len)
                     .ok_or(Error::Oob)
             }
-            _ => todo!(),
+            Layout::FlatPlain => {
+                let data_len = inode.data_size() as usize;
+                let data_begin = self.block_offset(inode.raw_block_addr()) as usize;
+                eprintln!("read begin={data_begin} len={data_len}");
+                self.data
+                    .get(data_begin..data_begin + data_len)
+                    .ok_or(Error::Oob)
+            }
+            layout => todo!("layout={:?} {:?} {:?}", layout, inode, inode.file_type()),
         }
     }
 
@@ -432,6 +507,14 @@ impl<'a> Erofs<'a> {
         }
         let data = self.get_data(inode)?;
         Dirents::new(data)
+    }
+
+    pub fn get_symlink(&self, inode: &Inode<'a>) -> Result<&'a [u8], Error> {
+        if inode.file_type() != FileType::Symlink {
+            return Err(Error::NotSymlink);
+        }
+        let data = self.get_data(inode)?;
+        Ok(data)
     }
 }
 
