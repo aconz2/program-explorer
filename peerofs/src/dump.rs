@@ -1,40 +1,25 @@
 use std::fs::File;
-use std::io::{BufReader,Read};
 
-use peerofs::superblock::Superblock;
+use memmap2::MmapOptions;
+//use rustix::fs::FileType;
 
-use rustix::fs::FileType;
+use peerofs::disk::{Erofs, Inode};
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let image = args.get(1).expect("give me an image name");
-    let mut file = BufReader::new(File::open(image).expect("file open failed"));
+    let file = File::open(image).expect("file open failed");
+    let mmap = unsafe { MmapOptions::new().map(&file).expect("mmap failed") };
 
-    let sb = Superblock::from_reader(&mut file)
-        .expect("read failed")
-        .expect("invalid superblock");
+    let erofs = Erofs::new(&mmap).expect("fail to create view");
 
-    println!("{sb}");
-
-    if let Some(inode) = sb.get_inode(&mut file, sb.root_inode()).expect("root nid lookup failed") {
-        println!("root nid");
-        println!("{inode}");
-
-        match inode.file_type() {
-            FileType::Directory => {
-                println!("yo this is a directory!");
-                // this is only valid for FLAT_INLINE
-                let mut buf = vec![0; inode.size() as usize];
-                file.read_exact(&mut buf).unwrap();
-                println!("dir data\n{:?}", buf.as_slice().escape_ascii().to_string());
-            }
-            x => {
-                println!("yo this is a {x:?}");
-            }
-        }
-        //let mut buf = [0u8; 128];
-        //file.read_exact(&mut buf);
-        //println!("{:?}", buf);
+    println!("{:?}", erofs.sb);
+    let root_dir = erofs.get_root_inode().expect("inode get failed");
+    println!("{:?}", root_dir);
+    println!("layout={:?}", root_dir.layout());
+    let dirents = erofs.get_dirents(&root_dir).expect("get_dirents failed");
+    //println!("{:?}", dirents);
+    for item in dirents.iter().expect("couldn't create iterator") {
+        println!("{:?}", item);
     }
-
 }
