@@ -4,15 +4,34 @@ use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
 use zerocopy::{Immutable, KnownLayout, TryFromBytes};
 
+
 const EROFS_SUPER_OFFSET: usize = 1024;
 const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
 
 // NOTES:
-//  - inode ino is a sequential number, but will not match the nid you look it up with; ie the
-//  root_nid from the superblock is something like 26, and you use that to compute the address of
-//  the root inode, but that inode will have field ino=1. So I'm not sure what a good name for the
-//  on-disk ino id should be.
+// - inode ino is a sequential number, but will not match the nid you look it up with; ie the
+// root_nid from the superblock is something like 26, and you use that to compute the address of
+// the root inode, but that inode will have field ino=1. So I'm not sure what a good name for the
+// on-disk ino id should be. Currently calling it disk_id; it is not really an id because it is
+// used in direct addressing calculation
 //
+// Data Storage
+// - FlatInline storage stores whole blocks worth of data starting at raw_block_addr (number) and
+// then the remainder immediately follows the inode like FlatInline.
+// - FlatPlain storage is like FlatInline but with no tail data. I was wondering why this exists
+// and why not just have FlatInline, but if you are storing 8191 bytes for example, then if you
+// always used FlatInline, you would store 1 block and 4095 bytes inline; whereas with FlatPlain
+// you just store in 2 blocks
+//
+// Directories
+// - dirents are stored in blocks of the block size. A single directory may span multiple blocks
+// - Names are stored without null terminator, except the last one in a block. (see next)
+// - The final name in a dirent block *may* have a null terminator if it ends before the block,
+// otherwise the name's last byte is the last byte in the block.
+// - dirents can be stored as either FlatInline or FlatPlain. If FlatInline and there is data
+// stored in blocks, the dirent block will end before the tail data starts (since dirent blocks are
+// max sized the block size).
+// - dirent name_offset is relative to the start of the block or start of the tail data
 
 #[derive(Debug)]
 pub enum Error {
@@ -28,6 +47,8 @@ pub enum Error {
     BadFileType,
     InodeTooBig,
     NotExpectingBlockData,
+    BlockLenShouldBeZero,
+    NotCompressed,
 }
 
 // NOTE: we are using byteorder endian aware types so that they get decoded on demand (noop on LE
@@ -48,8 +69,8 @@ pub struct Superblock {
     build_time: U64,
     build_time_nsec: U32,
     blocks: U32,
-    meta_blkaddr: U32,
-    xattr_blkaddr: U32,
+    meta_blkaddr: U32, // block number not addr
+    xattr_blkaddr: U32, // block number not addr
     uuid: [u8; 16],
     volume_name: [u8; 16],
     available_compr_algs_or_lz4_max_distance: U16,
@@ -98,19 +119,147 @@ pub struct InodeExtended {
     _reserved2: [u8; 16],
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Layout {
+    FlatPlain = 0,
+    CompressedFull = 1,
+    FlatInline = 2,
+    CompressedCompact = 3,
+    ChunkBased = 4,
+}
+
+#[derive(TryFromBytes, Immutable)]
+#[repr(C)]
+pub union InodeInfo {
+    compressed_blocks: U32,
+    raw_blkaddr: U32, // block number not addr
+    rdev: U32,
+    chunk_info: ChunkInfo,
+}
+
 #[derive(Copy, Clone, TryFromBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct ChunkInfo {
     format: U16,
     _reserved: U16,
 }
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+pub struct XattrHeader {
+    name_filter: U32,
+    shared_count: u8,
+    _reserved: [u8; 7],
+    // u32 ids[]
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+pub struct XattrEntry {
+    name_len: u8,
+    name_index: u8,
+    value_size: U16,
+    // u8 name[]
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+pub struct Dirent {
+    disk_id: U64,
+    name_offset: U16,
+    file_type: u8,
+    _reserved: u8,
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+pub struct MapHeader {
+    fragment_offset_or_data_size: FragmentOffsetOrDataSize,
+    config: U16, // see MapHeaderConfig (bitwise)
+    // bit 0-3: algorithm of head 1
+    // bit 4-7: algorithm of head 2
+    algorithm: u8,
+    // bit 0-2: logical cluster bits - 12 (0 for 4096)
+    // if bit 7 is set, then this whole 8 byte struct is interpreted as le64 with the high bit
+    // cleared as the fragment offset
+    cluster_bits: u8,
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+struct LogicalClusterIndex {
+    advise: U16, // I think this is just type
+    cluster_offset: U16,
+    block_addr_or_delta: BlockAddrOrDelta
+}
+
 #[derive(TryFromBytes, Immutable)]
 #[repr(C)]
-pub union InodeInfo {
-    compressed_blocks: U32,
-    raw_blkaddr: U32,
-    rdev: U32,
-    chunk_info: ChunkInfo,
+union BlockAddrOrDelta {
+    block_addr: U32,
+    delta: [U16; 2],
+}
+
+#[derive(TryFromBytes, Immutable)]
+#[repr(C)]
+union FragmentOffsetOrDataSize {
+    fragment_offset: U32,
+    data_size: MapDataSize,
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout, Copy, Clone)]
+struct MapDataSize {
+    _reserved: U16,
+    data_size: U16,
+}
+
+enum LogicalClusterType {
+    Plain = 0,
+    Head1 = 1,
+    NonHead = 2,
+    Head2 = 3,
+}
+
+enum MapHeaderConfig {
+    Compacted2B = 0x0001,
+    BigPcluster1 = 0x0002,
+    BigPcluster2 = 0x0004,
+    InlinePcluster = 0x0008,
+    InterlacedPcluster = 0x0010,
+    FragmentPcluster = 0x0020,
+}
+
+enum CompressionType {
+    Lz4 = 0,
+    Lzma = 1,
+    Deflate = 2,
+    Zstd = 3,
+}
+
+// I think all of these are either preceded or post-ceded by a 2 byte length field
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+struct Lz4CompressionConfig {
+    max_distance: U16,
+    max_pcluster_blocks: U16,
+    _reserved: [u8; 10],
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+struct LzmaCompressionConfig {
+    dict_size: U32,
+    format: U16,
+    _reserved: [u8; 8],
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+struct DeflateCompressionConfig {
+    window_bits: u8,
+    _reserved: [u8; 5],
+}
+
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+struct ZstdCompressionConfig {
+    format: u8,
+    window_log: u8,
+    _reserved: [u8; 4],
 }
 
 impl fmt::Debug for InodeInfo {
@@ -121,7 +270,23 @@ impl fmt::Debug for InodeInfo {
     }
 }
 
-#[derive(Debug)]
+impl fmt::Debug for BlockAddrOrDelta {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let a = unsafe { self.block_addr };
+        let (d1, d2) = unsafe { (self.delta[0], self.delta[1]) };
+        write!(f, "{} ({:x}) (delta=[{} {}])", a, a, d1, d2)
+    }
+}
+
+impl fmt::Debug for FragmentOffsetOrDataSize {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let a = unsafe { self.fragment_offset };
+        let b = unsafe { self.data_size };
+        write!(f, "offset={} ({:x}) data_size={:?}", a, a, b.data_size)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Inode<'a> {
     Compact((u32, &'a InodeCompact)),
     Extended((u32, &'a InodeExtended)),
@@ -206,6 +371,7 @@ impl<'a> Inode<'a> {
             .expect("should be validated on the way in")
     }
 
+    // TODO this is a pretty bad name since these are block numbers and not addrs
     pub fn raw_block_addr(&self) -> u32 {
         match self {
             Inode::Compact((_, x)) => unsafe { x.info.raw_blkaddr.into() },
@@ -224,47 +390,25 @@ impl<'a> Inode<'a> {
     }
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct XattrHeader {
-    name_filter: U32,
-    shared_count: u8,
-    _reserved: [u8; 7],
-    // u32 ids[]
-}
-
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct XattrEntry {
-    name_len: u8,
-    name_index: u8,
-    value_size: U16,
-    // u8 name[]
-}
-
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct Dirent {
-    disk_id: U64,
-    name_offset: U16,
-    file_type: u8,
-    _reserved: u8,
-}
-
 #[derive(Debug)]
 pub struct Dirents<'a> {
     data: (&'a [u8], &'a [u8]),
     block_size: usize,
 }
 
+
+
 impl<'a> Dirents<'a> {
     fn new(data: (&'a [u8], &'a [u8]), block_size: usize) -> Result<Self, Error> {
         Ok(Self { data, block_size })
     }
 
-    pub fn iter(&'a self) -> Result<DirentsIterator<'a>, Error> {
+    pub fn iter<'b>(&'b self) -> Result<DirentsIterator<'a>, Error> {
         DirentsIterator::new(self.data, self.block_size)
     }
+    //pub fn iter(&'a self) -> Result<DirentsIterator<'a>, Error> {
+    //    DirentsIterator::new(self.data, self.block_size)
+    //}
 }
 
 #[derive(Debug)]
@@ -409,13 +553,13 @@ impl TryFrom<u8> for DirentFileType {
     }
 }
 
-#[derive(Debug)]
-pub enum Layout {
-    FlatPlain = 0,
-    CompressedFull = 1,
-    FlatInline = 2,
-    CompressedCompact = 3,
-    ChunkBased = 4,
+impl Layout {
+    fn is_compressed(&self) -> bool {
+        match self {
+            Layout::CompressedFull | Layout::CompressedCompact => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -501,6 +645,8 @@ impl<'a> Erofs<'a> {
         compute_block_tail_len(self.block_size() as usize, size as usize)
     }
 
+    // returns a pair of slices, both of which could be empty in the extreme, that are the block
+    // and tail packed data this inode references
     fn get_data(&self, inode: &Inode<'a>) -> Result<(&'a [u8], &'a [u8]), Error> {
         match inode.layout() {
             Layout::FlatInline => {
@@ -514,6 +660,9 @@ impl<'a> Erofs<'a> {
                         .ok_or(Error::Oob)?
                 };
                 let block = if block_addr == 0xffffffff {
+                    if block_len != 0 {
+                        return Err(Error::BlockLenShouldBeZero);
+                    }
                     &[]
                 } else {
                     let data_begin = self.block_offset(inode.raw_block_addr()) as usize;
@@ -526,7 +675,6 @@ impl<'a> Erofs<'a> {
             Layout::FlatPlain => {
                 let data_len = inode.data_size() as usize;
                 let data_begin = self.block_offset(inode.raw_block_addr()) as usize;
-                eprintln!("read begin={data_begin} len={data_len}");
                 self.data
                     .get(data_begin..data_begin + data_len)
                     .ok_or(Error::Oob)
@@ -544,6 +692,24 @@ impl<'a> Erofs<'a> {
         Dirents::new(data, self.block_size() as usize)
     }
 
+    pub fn get_map_header(&self, inode: &Inode<'a>) -> Result<&'a MapHeader, Error> {
+        if !inode.layout().is_compressed() {
+            return Err(Error::NotCompressed);
+        }
+        // for non compact, it is
+        // full index_align is round_up(x, 8) + sizeof(MapHeader) + 8
+        // it is Z_EROFS_FULL_INDEX_ALIGN(self.inode_offset() + inode_size + xattr_size)
+        // //
+        //  from there you can lookup a LogicalClusterIndex by logical cluster number (lcn) (I
+        //  think)
+        // for compact I think this is right
+        let start = round_up_to::<8usize>(self.inode_end(inode) as usize);
+        eprintln!("start={} {:x} {:?}", start, start, &self.data[start..start+128]);
+        MapHeader::try_ref_from_prefix(self.data.get(start..).ok_or(Error::Oob)?)
+            .map_err(|_| Error::BadConversion)
+            .map(|(x, _)| x)
+    }
+
     pub fn get_symlink(&self, inode: &Inode<'a>) -> Result<&'a [u8], Error> {
         if inode.file_type() != FileType::Symlink {
             return Err(Error::NotSymlink);
@@ -554,7 +720,63 @@ impl<'a> Erofs<'a> {
         }
         Ok(tail)
     }
+
+    //pub fn iter(&'a self) -> Result<ErofsIterator<'a>, Error> {
+    //    ErofsIterator::new(self)
+    //}
 }
+
+// todo was running into lifetime issues here
+//enum ErofsIteratorState {
+//    AtDir,
+//    InDir,
+//}
+//
+//pub struct ErofsIterator<'a> {
+//    erofs: &'a Erofs<'a>,
+//    path: PathBuf,
+//    stack: Vec<(Inode<'a>, DirentsIterator<'a>)>,
+//    state: ErofsIteratorState,
+//}
+//
+//pub struct ErofsIteratorItem<'a> {
+//    pub path: PathBuf,
+//    pub inode: &'a Inode<'a>,
+//}
+//
+//impl<'a> ErofsIterator<'a> {
+//    fn new(erofs: &'a Erofs<'a>) -> Result<Self, Error> {
+//        let root = erofs.get_root_inode()?;
+//        let dirents = erofs.get_dirents(&root)?;
+//        let iter = dirents.iter()?;
+//        let stack = vec![(root, iter)];
+//        let path = PathBuf::from("/");
+//        let state = ErofsIteratorState::AtDir;
+//
+//        Ok(Self { erofs, path, stack, state })
+//    }
+//
+//    fn next_impl(&'a mut self) -> Result<Option<ErofsIteratorItem<'a>>, Error> {
+//        if let Some((inode, _iter)) = self.stack.last_mut() {
+//            match self.state {
+//                ErofsIteratorState::AtDir => {
+//                    Ok(Some(ErofsIteratorItem{ path: self.path.clone(), inode }))
+//                }
+//                _ => { todo!(); }
+//            }
+//        } else {
+//            Ok(None)
+//        }
+//    }
+//}
+//
+//impl<'a, 'b> Iterator for ErofsIterator<'a> {
+//    type Item = Result<ErofsIteratorItem<'b>, Error>;
+//
+//    fn next(&mut self) -> Option<Self::Item> {
+//        self.next_impl().transpose()
+//    }
+//}
 
 fn div_mod_u16(a: u16, b: u16) -> (u16, u16) {
     (a / b, a % b)
@@ -565,6 +787,13 @@ fn compute_block_tail_len(block_size: usize, size: usize) -> (usize, usize) {
     let block_len = num_blocks * block_size;
     let tail_len = size - block_len;
     (block_len, tail_len)
+}
+
+fn round_up_to<const N: usize>(x: usize) -> usize {
+    if x == 0 {
+        return N;
+    }
+    ((x + (N - 1)) / N) * N
 }
 
 // TODO:
@@ -587,8 +816,14 @@ mod tests {
         assert_eq!(12, std::mem::size_of::<Dirent>(), "Dirent");
         assert_eq!(12, std::mem::size_of::<XattrHeader>(), "XattrHeader");
         assert_eq!(4, std::mem::size_of::<XattrEntry>(), "XattrEntry");
+        assert_eq!(8, std::mem::size_of::<LogicalClusterIndex>(), "LogicalClusterIndex");
+        assert_eq!(14, std::mem::size_of::<Lz4CompressionConfig>(), "Lz4CompressionConfig");
+        assert_eq!(14, std::mem::size_of::<LzmaCompressionConfig>(), "LzmaCompressionConfig");
+        assert_eq!(6, std::mem::size_of::<DeflateCompressionConfig>(), "DeflateCompressionConfig");
+        assert_eq!(6, std::mem::size_of::<ZstdCompressionConfig>(), "ZstdCompressionConfig");
     }
 
+    #[test]
     fn test_compute_block_tail_len() {
         assert_eq!((4096, 0), compute_block_tail_len(4096, 4096));
         assert_eq!((4096, 1), compute_block_tail_len(4096, 4097));
