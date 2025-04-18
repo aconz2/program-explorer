@@ -44,11 +44,26 @@ fn main() {
     println!("{:?}", erofs.sb);
     if true {
         let node = erofs.get_root_inode().expect("inode get failed");
-        println!("{:?} {:x} {}", node.layout(), node.raw_block_addr(), node.data_size());
+        println!(
+            "{:?} {:x} {}",
+            node.layout(),
+            node.raw_block_addr(),
+            node.data_size()
+        );
         let node = erofs.get_inode(2427390).expect("inode get failed");
-        println!("{:?} {} {}", node.layout(), node.raw_block_addr(), node.data_size());
+        println!(
+            "{:?} {} {}",
+            node.layout(),
+            node.raw_block_addr(),
+            node.data_size()
+        );
         let node = erofs.get_inode(39099352).expect("inode get failed");
-        println!("{:?} {} {}", node.layout(), node.raw_block_addr(), node.data_size());
+        println!(
+            "{:?} {} {}",
+            node.layout(),
+            node.raw_block_addr(),
+            node.data_size()
+        );
     }
     //let dir = erofs.get_root_inode().expect("inode get failed");
     //println!("{:?}", root_dir);

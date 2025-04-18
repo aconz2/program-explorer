@@ -1254,6 +1254,7 @@ name = "peerofs"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "bytes",
  "memmap2",
  "rustix 1.0.5",
  "zerocopy 0.8.24",

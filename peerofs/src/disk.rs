@@ -27,6 +27,7 @@ pub enum Error {
     DirentBadSize,
     BadFileType,
     InodeTooBig,
+    NotExpectingBlockData,
 }
 
 // NOTE: we are using byteorder endian aware types so that they get decoded on demand (noop on LE
@@ -252,20 +253,18 @@ pub struct Dirent {
 
 #[derive(Debug)]
 pub struct Dirents<'a> {
-    data: &'a [u8],
+    data: (&'a [u8], &'a [u8]),
     block_size: usize,
 }
 
 impl<'a> Dirents<'a> {
-    fn new(data: &'a [u8], block_size: usize) -> Result<Self, Error> {
+    fn new(data: (&'a [u8], &'a [u8]), block_size: usize) -> Result<Self, Error> {
         Ok(Self { data, block_size })
     }
 
     pub fn iter(&'a self) -> Result<DirentsIterator<'a>, Error> {
         DirentsIterator::new(self.data, self.block_size)
     }
-
-
 }
 
 #[derive(Debug)]
@@ -275,26 +274,40 @@ pub struct DirentItem<'a> {
     pub name: &'a [u8],
 }
 
+// this will either have
+//   data: block, remaining: Some(tail)
+//   data: tail, remaining: None
 pub struct DirentsIterator<'a> {
     data: &'a [u8],
+    remaining: Option<&'a [u8]>,
     i: u16,
     count: u16,
-    block_size: usize
+    block_size: usize,
 }
 
 impl<'a> DirentsIterator<'a> {
-    fn new(data: &'a [u8], block_size: usize) -> Result<Self, Error> {
-        //eprintln!("data={:?}", data.escape_ascii().to_string());
-        let mut ret = Self { data, i: 0, count: 0, block_size };
+    fn new((block, tail): (&'a [u8], &'a [u8]), block_size: usize) -> Result<Self, Error> {
+        let mut ret = Self {
+            data: block,
+            remaining: Some(tail),
+            i: 0,
+            count: 0,
+            block_size,
+        };
         ret.reset_count()?;
         Ok(ret)
     }
 
     fn reset_count(&mut self) -> Result<(), Error> {
         if self.data.is_empty() {
-            self.i = 0;
-            self.count = 0;
-            return Ok(());
+            if let Some(next) = self.remaining.take() {
+                self.data = next;
+            }
+            if self.data.is_empty() {
+                self.i = 0;
+                self.count = 0;
+                return Ok(());
+            }
         }
         let (dirent, _) =
             Dirent::try_ref_from_prefix(&self.data).map_err(|_| Error::BadConversion)?;
@@ -322,15 +335,14 @@ impl<'a> DirentsIterator<'a> {
             self.data
                 .get(name_offset..name_offset + name_len)
                 .ok_or(Error::Oob)?
-        } else { // last dirent in block
+        } else {
+            // last dirent in block
             let block_end = std::cmp::min(self.data.len(), self.block_size);
             let slice = self.data.get(name_offset..block_end).ok_or(Error::Oob)?;
 
-             // more blocks
-            if block_end < self.data.len() {
-                self.data = &self.data[block_end..];
-                self.reset_count()?;
-            }
+            self.data = &self.data[block_end..];
+            self.reset_count()?;
+
             if let Some(i) = slice.iter().position(|&x| x == 0) {
                 &slice[..i]
             } else {
@@ -338,7 +350,13 @@ impl<'a> DirentsIterator<'a> {
             }
         };
 
-        Ok(DirentItem { disk_id, file_type, name })
+        self.i += 1;
+
+        Ok(DirentItem {
+            disk_id,
+            file_type,
+            name,
+        })
     }
 
     fn get(&'a self, i: usize) -> Result<&'a Dirent, Error> {
@@ -353,13 +371,11 @@ impl<'a> Iterator for DirentsIterator<'a> {
     type Item = Result<DirentItem<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.i >= self.count {
-            // TODO wraparound
-            return None;
+        if self.i < self.count {
+            Some(self.next_impl())
+        } else {
+            None
         }
-        let ret = self.next_impl();
-        self.i += 1;
-        Some(ret)
     }
 }
 
@@ -481,15 +497,31 @@ impl<'a> Erofs<'a> {
         self.get_inode(self.sb.root_disk_id.into())
     }
 
-    fn get_data(&self, inode: &Inode<'a>) -> Result<&'a [u8], Error> {
+    fn compute_block_tail_len(&self, size: u64) -> (usize, usize) {
+        compute_block_tail_len(self.block_size() as usize, size as usize)
+    }
+
+    fn get_data(&self, inode: &Inode<'a>) -> Result<(&'a [u8], &'a [u8]), Error> {
         match inode.layout() {
             Layout::FlatInline => {
-                let data_begin = self.inode_end(&inode) as usize;
-                let data_len = inode.data_size() as usize;
-                //eprintln!("read begin={data_begin} len={data_len}");
-                self.data
-                    .get(data_begin..data_begin + data_len)
-                    .ok_or(Error::Oob)
+                let block_addr = inode.raw_block_addr();
+                let (block_len, tail_len) = self.compute_block_tail_len(inode.data_size());
+
+                let tail = {
+                    let data_begin = self.inode_end(&inode) as usize;
+                    self.data
+                        .get(data_begin..data_begin + tail_len)
+                        .ok_or(Error::Oob)?
+                };
+                let block = if block_addr == 0xffffffff {
+                    &[]
+                } else {
+                    let data_begin = self.block_offset(inode.raw_block_addr()) as usize;
+                    self.data
+                        .get(data_begin..data_begin + block_len)
+                        .ok_or(Error::Oob)?
+                };
+                Ok((block, tail))
             }
             Layout::FlatPlain => {
                 let data_len = inode.data_size() as usize;
@@ -498,6 +530,7 @@ impl<'a> Erofs<'a> {
                 self.data
                     .get(data_begin..data_begin + data_len)
                     .ok_or(Error::Oob)
+                    .map(|x| (x, &[][..]))
             }
             layout => todo!("layout={:?} {:?} {:?}", layout, inode, inode.file_type()),
         }
@@ -515,13 +548,23 @@ impl<'a> Erofs<'a> {
         if inode.file_type() != FileType::Symlink {
             return Err(Error::NotSymlink);
         }
-        let data = self.get_data(inode)?;
-        Ok(data)
+        let (block, tail) = self.get_data(inode)?;
+        if !block.is_empty() {
+            return Err(Error::NotExpectingBlockData);
+        }
+        Ok(tail)
     }
 }
 
 fn div_mod_u16(a: u16, b: u16) -> (u16, u16) {
     (a / b, a % b)
+}
+
+fn compute_block_tail_len(block_size: usize, size: usize) -> (usize, usize) {
+    let num_blocks = size / block_size;
+    let block_len = num_blocks * block_size;
+    let tail_len = size - block_len;
+    (block_len, tail_len)
 }
 
 // TODO:
@@ -544,5 +587,11 @@ mod tests {
         assert_eq!(12, std::mem::size_of::<Dirent>(), "Dirent");
         assert_eq!(12, std::mem::size_of::<XattrHeader>(), "XattrHeader");
         assert_eq!(4, std::mem::size_of::<XattrEntry>(), "XattrEntry");
+    }
+
+    fn test_compute_block_tail_len() {
+        assert_eq!((4096, 0), compute_block_tail_len(4096, 4096));
+        assert_eq!((4096, 1), compute_block_tail_len(4096, 4097));
+        assert_eq!((0, 4095), compute_block_tail_len(4096, 4095));
     }
 }
