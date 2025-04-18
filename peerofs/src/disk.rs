@@ -116,7 +116,7 @@ impl fmt::Debug for InodeInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let a = unsafe { self.compressed_blocks };
         let b = unsafe { self.chunk_info.format };
-        write!(f, "{:x} (chunk={:x})", a, b)
+        write!(f, "{} ({:x}) (chunk={:x})", a, a, b)
     }
 }
 
@@ -253,46 +253,19 @@ pub struct Dirent {
 #[derive(Debug)]
 pub struct Dirents<'a> {
     data: &'a [u8],
+    block_size: usize,
 }
 
 impl<'a> Dirents<'a> {
-    fn new(data: &'a [u8]) -> Result<Self, Error> {
-        Ok(Self { data })
+    fn new(data: &'a [u8], block_size: usize) -> Result<Self, Error> {
+        Ok(Self { data, block_size })
     }
 
     pub fn iter(&'a self) -> Result<DirentsIterator<'a>, Error> {
-        if self.data.is_empty() {
-            return Ok(DirentsIterator {
-                dirents: self,
-                i: 0,
-                count: 0,
-            });
-        }
-        let (dirent, _) =
-            Dirent::try_ref_from_prefix(&self.data).map_err(|_| Error::BadConversion)?;
-        let offset: u16 = dirent.name_offset.into();
-        let (count, rem) = div_mod_u16(offset, std::mem::size_of::<Dirent>().try_into().unwrap());
-        if rem != 0 {
-            return Err(Error::DirentBadSize);
-        }
-        Ok(DirentsIterator {
-            dirents: self,
-            i: 0,
-            count,
-        })
+        DirentsIterator::new(self.data, self.block_size)
     }
 
-    fn offset(i: usize) -> usize {
-        i * std::mem::size_of::<Dirent>()
-    }
 
-    fn get(&'a self, i: usize) -> Result<&'a Dirent, Error> {
-        Dirent::try_ref_from_prefix(self.data.get(Self::offset(i)..)
-            .ok_or(Error::Oob)?)
-            .map_err(|_| Error::BadConversion)
-            .map(|(dirent, _)| dirent)
-
-    }
 }
 
 #[derive(Debug)]
@@ -302,50 +275,77 @@ pub struct DirentItem<'a> {
     pub name: &'a [u8],
 }
 
-// TODO I think because name_offset is only a u16 and the first dirent name_offset is used as a
-// count of nodes, then there can only be 2**16 / 12 entries in a directory?
-// AHH so I think that if this limit would be exceeded it is made into another chunk
 pub struct DirentsIterator<'a> {
-    dirents: &'a Dirents<'a>,
+    data: &'a [u8],
     i: u16,
     count: u16,
+    block_size: usize
 }
 
 impl<'a> DirentsIterator<'a> {
+    fn new(data: &'a [u8], block_size: usize) -> Result<Self, Error> {
+        //eprintln!("data={:?}", data.escape_ascii().to_string());
+        let mut ret = Self { data, i: 0, count: 0, block_size };
+        ret.reset_count()?;
+        Ok(ret)
+    }
+
+    fn reset_count(&mut self) -> Result<(), Error> {
+        if self.data.is_empty() {
+            self.i = 0;
+            self.count = 0;
+            return Ok(());
+        }
+        let (dirent, _) =
+            Dirent::try_ref_from_prefix(&self.data).map_err(|_| Error::BadConversion)?;
+        let offset: u16 = dirent.name_offset.into();
+        let (count, rem) = div_mod_u16(offset, std::mem::size_of::<Dirent>().try_into().unwrap());
+        if rem != 0 {
+            return Err(Error::DirentBadSize);
+        }
+        self.i = 0;
+        self.count = count;
+        Ok(())
+    }
+
     fn next_impl(&mut self) -> Result<DirentItem<'a>, Error> {
-        let dirent = self.dirents.get(self.i.into())?;
+        let dirent = self.get(self.i.into())?;
+        let disk_id: u64 = dirent.disk_id.into();
+        let file_type: DirentFileType = dirent.file_type.try_into()?;
         let name_offset: usize = dirent.name_offset.into();
-        //let name_start = offset + name_offset;
         // name_offset is referenced from the start of the block, not relative to the entry itself
-        let name_start = name_offset;
 
         let name = if self.i < self.count - 1 {
-            let next_dirent = self.dirents.get((self.i + 1).into())?;
+            let next_dirent = self.get((self.i + 1).into())?;
             let next_offset: usize = next_dirent.name_offset.into();
             let name_len = next_offset - name_offset;
-            self.dirents.data
-                .get(name_start..name_start + name_len)
+            self.data
+                .get(name_offset..name_offset + name_len)
                 .ok_or(Error::Oob)?
-        } else {
-            // TODO thought this was right
-            //println!("final one");
-            //use std::ffi::CStr;
-            //let cstr = CStr::from_bytes_until_nul(
-            //    self.dirents.data
-            //        .get(name_start..)
-            //        .ok_or(Error::Oob)?
-            //).map_err(|_| Error::BadCStr)?;
-            //cstr.to_bytes()
-            self.dirents.data
-                .get(name_start..)
-                .ok_or(Error::Oob)?
+        } else { // last dirent in block
+            let block_end = std::cmp::min(self.data.len(), self.block_size);
+            let slice = self.data.get(name_offset..block_end).ok_or(Error::Oob)?;
+
+             // more blocks
+            if block_end < self.data.len() {
+                self.data = &self.data[block_end..];
+                self.reset_count()?;
+            }
+            if let Some(i) = slice.iter().position(|&x| x == 0) {
+                &slice[..i]
+            } else {
+                slice
+            }
         };
 
-        Ok(DirentItem {
-            disk_id: dirent.disk_id.into(),
-            file_type: dirent.file_type.try_into()?,
-            name,
-        })
+        Ok(DirentItem { disk_id, file_type, name })
+    }
+
+    fn get(&'a self, i: usize) -> Result<&'a Dirent, Error> {
+        let offset = i * std::mem::size_of::<Dirent>();
+        Dirent::try_ref_from_prefix(self.data.get(offset..).ok_or(Error::Oob)?)
+            .map_err(|_| Error::BadConversion)
+            .map(|(dirent, _)| dirent)
     }
 }
 
@@ -353,11 +353,13 @@ impl<'a> Iterator for DirentsIterator<'a> {
     type Item = Result<DirentItem<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.i + 1 >= self.count { // TODO wraparound
+        if self.i >= self.count {
+            // TODO wraparound
             return None;
         }
+        let ret = self.next_impl();
         self.i += 1;
-        Some(self.next_impl())
+        Some(ret)
     }
 }
 
@@ -506,7 +508,7 @@ impl<'a> Erofs<'a> {
             return Err(Error::NotDir);
         }
         let data = self.get_data(inode)?;
-        Dirents::new(data)
+        Dirents::new(data, self.block_size() as usize)
     }
 
     pub fn get_symlink(&self, inode: &Inode<'a>) -> Result<&'a [u8], Error> {
