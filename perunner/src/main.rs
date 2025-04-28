@@ -61,7 +61,7 @@ fn escape_bytes(input: &[u8], output: &mut Vec<u8>) {
 
 fn write_escaped<W: Write>(r: &[u8], w: &mut W) {
     let mut cur = r;
-    let mut ebuf = vec![0; 8192];
+    let mut ebuf = Vec::with_capacity(8192);
     while !cur.is_empty() {
         let (l, r) = cur.split_at(std::cmp::min(cur.len(), 4096));
         escape_bytes(l, &mut ebuf);
