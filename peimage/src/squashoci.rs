@@ -1,10 +1,10 @@
+use std::env;
 use std::fs::File;
 use std::io::BufWriter;
 use std::os::fd::FromRawFd;
-use std::env;
 
-use peimage::squash::squash;
 use peimage::oci::load_layers_from_oci;
+use peimage::squash::squash;
 
 fn main() {
     let args: Vec<_> = env::args().collect();

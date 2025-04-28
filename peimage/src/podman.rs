@@ -67,12 +67,7 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Error> {
             let mut buf = vec![];
             entry.read_to_end(&mut buf)?;
             if let Ok(blob) = entry.path()?.strip_prefix("blobs/sha256/") {
-                blobs.insert(
-                    blob.to_str()
-                        .ok_or(Error::BadBlobPath)?
-                        .to_string(),
-                    buf,
-                );
+                blobs.insert(blob.to_str().ok_or(Error::BadBlobPath)?.to_string(), buf);
             }
         }
     }
@@ -80,10 +75,7 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Error> {
     let _ = child.wait()?;
 
     let index = index.ok_or(Error::NoIndex)?;
-    let manifest = index
-        .manifests()
-        .first()
-        .ok_or(Error::NoManifest)?;
+    let manifest = index.manifests().first().ok_or(Error::NoManifest)?;
     // Digest should really implement Borrow<String>
     let manifest_blob = blobs
         .get(&digest_to_string(manifest.digest())?)
@@ -116,10 +108,7 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
         .arg("--network=none")
         .arg(format!(
             "--iidfile={}",
-            id_file
-                .path()
-                .to_str()
-                .ok_or(Error::NonUtf8Path)?
+            id_file.path().to_str().ok_or(Error::NonUtf8Path)?
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -128,7 +117,9 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
         .map_err(|_| Error::PodmanBuild)?;
 
     let mut stdin = child.stdin.take().expect("handle present");
-    stdin.write_all(containerfile.as_bytes()).map_err(|_| Error::Io)?;
+    stdin
+        .write_all(containerfile.as_bytes())
+        .map_err(|_| Error::Io)?;
     drop(stdin);
 
     let _ = child.wait().map_err(|_| Error::PodmanBuild)?;
@@ -142,12 +133,23 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
     let layers = load_layers_from_podman(&iid)?;
 
     let cid = {
-        let output = Command::new("podman").arg("create").arg(&iid).output().map_err(|_| Error::PodmanCreate)?;
-        String::from_utf8(output.stdout).map_err(|_| Error::PodmanCreateId)?.trim().to_string()
+        let output = Command::new("podman")
+            .arg("create")
+            .arg(&iid)
+            .output()
+            .map_err(|_| Error::PodmanCreate)?;
+        String::from_utf8(output.stdout)
+            .map_err(|_| Error::PodmanCreateId)?
+            .trim()
+            .to_string()
     };
 
     let combined = {
-        let output = Command::new("podman").arg("export").arg(&cid).output().map_err(|_| Error::PodmanExport)?;
+        let output = Command::new("podman")
+            .arg("export")
+            .arg(&cid)
+            .output()
+            .map_err(|_| Error::PodmanExport)?;
         output.stdout
     };
 

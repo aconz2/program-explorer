@@ -1,12 +1,12 @@
-use std::process::Command;
-use std::io::{Read, Seek, BufWriter};
 use std::env;
+use std::fs::{remove_file, OpenOptions};
+use std::io::{BufWriter, Read, Seek};
 use std::path::{Path, PathBuf};
-use std::fs::{OpenOptions, remove_file};
+use std::process::Command;
 
-use rustix::fs::{mknodat,FileType, Mode, open, OFlags};
+use rustix::fs::{mknodat, open, FileType, Mode, OFlags};
 
-use crate::squash::{squash,SquashError,Stats};
+use crate::squash::{squash, SquashError, Stats};
 
 // TODO allow passing more args into mkfs.erofs, wait with timeout
 //
@@ -90,8 +90,11 @@ where
         .spawn()?;
 
     // Linux fifo size is 16 pages, should we match that?
-    let fifo_file = OpenOptions::new().write(true).open(&fifo).map_err(|_| SquashError::FifoOpen)?;
-    let _fifo_file_remover = UnlinkFile {path: fifo.clone()};
+    let fifo_file = OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .map_err(|_| SquashError::FifoOpen)?;
+    let _fifo_file_remover = UnlinkFile { path: fifo.clone() };
 
     let mut out = BufWriter::with_capacity(4096 * 8, fifo_file);
 

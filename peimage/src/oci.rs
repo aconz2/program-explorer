@@ -1,6 +1,6 @@
+use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 use std::fs::File;
 use std::path::Path;
-use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
 #[derive(Debug)]
 pub enum Error {
@@ -55,10 +55,6 @@ pub fn load_layers_from_oci<P: AsRef<Path>>(dir: P, image: &str) -> Result<Vec<F
     image_manifest
         .layers()
         .iter()
-        .map(|x| {
-            File::open(blobs.join(digest_path(x.digest())))
-                .map_err(Into::into)
-        })
+        .map(|x| File::open(blobs.join(digest_path(x.digest()))).map_err(Into::into))
         .collect()
 }
-
