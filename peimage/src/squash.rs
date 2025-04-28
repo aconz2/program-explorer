@@ -33,7 +33,7 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum DeletionState {
     Whiteout,
     Opaque,
@@ -279,11 +279,11 @@ fn os_str_starts_with(x: &OsStr, prefix: &OsStr) -> bool {
 impl DeletionsOsString {
     fn insert(&mut self, path: OsString, reason: DeletionState) {
         use DeletionState::*;
-        // TODO use try_insert when stable
-
-        if let Some(state) = self.map.get_mut(&path) {
+        self.map
+            .entry(path)
+            .and_modify(|state|
             //     old  ,  new
-            match (&state, reason) {
+            match (&state, reason.clone()) {
                 (Whiteout, Whiteout) | (Opaque, Opaque) | (Shadowed, Shadowed) => {
                     // kinda weird duplicate but okay
                 }
@@ -298,10 +298,8 @@ impl DeletionsOsString {
                 (Shadowed, Opaque) | (Opaque, Shadowed) => {
                     *state = Whiteout;
                 }
-            }
-        } else {
-            self.map.insert(path, reason);
-        }
+            })
+            .or_insert(reason);
     }
 }
 
@@ -482,6 +480,7 @@ mod tests {
     use flate2::write::GzEncoder;
     use tar::{Builder, Header};
 
+    use crate::podman;
     use crate::podman::build_with_podman;
 
     // sorted list of (key,value) bytes
@@ -1038,7 +1037,7 @@ mod tests {
 
     /// returns the difference (podman - squash) of podman exporting a flat image vs us squashing
     /// the layers produced when running the containerfile
-    fn podman_squash_diff(containerfile: &str) -> Result<(EList, EList), Box<dyn error::Error>> {
+    fn podman_squash_diff(containerfile: &str) -> Result<(EList, EList), podman::Error> {
         let rootfs = build_with_podman(containerfile)?;
         let mut layers: Vec<_> = rootfs.layers.into_iter().map(Cursor::new).collect();
 
