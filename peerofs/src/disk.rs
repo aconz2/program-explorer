@@ -190,7 +190,7 @@ pub struct MapHeader {
 }
 
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
-struct LogicalClusterIndex {
+pub struct LogicalClusterIndex {
     advise: U16, // I think this is just type
     cluster_offset: U16,
     block_addr_or_delta: BlockAddrOrDelta,
@@ -216,14 +216,14 @@ struct MapDataSize {
     data_size: U16,
 }
 
-enum LogicalClusterType {
+pub enum LogicalClusterType {
     Plain = 0,
     Head1 = 1,
     NonHead = 2,
     Head2 = 3,
 }
 
-enum MapHeaderConfig {
+pub enum MapHeaderConfig {
     Compacted2B = 0x0001,
     BigPcluster1 = 0x0002,
     BigPcluster2 = 0x0004,
@@ -232,7 +232,7 @@ enum MapHeaderConfig {
     FragmentPcluster = 0x0020,
 }
 
-enum CompressionType {
+pub enum CompressionType {
     Lz4 = 0,
     Lzma = 1,
     Deflate = 2,
@@ -375,7 +375,7 @@ impl<'a> Inode<'a> {
         }
     }
 
-    pub fn mode(&self) -> u32 {
+    pub fn mode(&self) -> u16 {
         match self {
             Inode::Compact((_, x)) => x.mode.into(),
             Inode::Extended((_, x)) => x.mode.into(),

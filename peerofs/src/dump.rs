@@ -6,6 +6,7 @@ use rustix::fs::FileType;
 
 use peerofs::disk::{DirentFileType, Erofs, Error, Inode, Layout};
 
+#[allow(dead_code)]
 fn find_with_xattr<'a>(erofs: &Erofs<'a>) -> Result<Option<Inode<'a>>, Error> {
     let mut seen = HashSet::new();
     let mut q = vec![erofs.get_root_inode()?.disk_id()];
@@ -69,7 +70,7 @@ fn main() {
 
     let erofs = Erofs::new(&mmap).expect("fail to create view");
 
-    println!("{:#?}", erofs.sb);
+    println!("{:?}", erofs.sb);
     //if false {
     //    let node = erofs.get_root_inode().expect("inode get failed");
     //    println!(

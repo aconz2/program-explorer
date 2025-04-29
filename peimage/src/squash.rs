@@ -473,7 +473,6 @@ mod tests {
     use super::*;
 
     use std::collections::BTreeSet;
-    use std::error;
     use std::io::{Cursor, Seek, SeekFrom};
     use std::process::{Command, Stdio};
 
@@ -632,10 +631,12 @@ mod tests {
                 let path: PathBuf = x.path().unwrap().into();
                 let ext = {
                     if let Some(ext) = x.pax_extensions().unwrap() {
-                        ext.into_iter()
+                        let mut vec: Vec<_> = ext.into_iter()
                             .map(|x| x.unwrap())
                             .map(|x| (x.key().unwrap().to_string(), Vec::from(x.value_bytes())))
-                            .collect()
+                            .collect();
+                        vec.sort();
+                        vec
                     } else {
                         vec![]
                     }
