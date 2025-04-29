@@ -20,8 +20,29 @@ use crate::disk::{Superblock, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, Inode, I
 // meta_blkaddr makes this strategy very suitable and seems "right" to me. One drawback is that if
 // we use tail packing, we have to keep the tails in memory until writing out the inodes.
 //
+// A bit more detail, currently the strategy is (logical phases, phase 2+3 are fused):
+// Phase 1:
+//  - Add files which builds up an in memory tree of dirs + files
+//  - Adding a file appends data to the output file in blocks
+//  - Tail packed data is stored in memory (worst case here is every file is tail packed and we
+//  store the sum total in memory. TODO is get the threshold right about when to use tail packing
+// Phase 2:
+//  - No more changes to the tree are allowed
+//  - Walk dirs to compute how many blocks we'll need to store the dirents data and count dirs.
+//  Also store the block addr of where the dirents will be
+//  - We now know where our meta block start is
+//  - Reserve enough space at the front of the meta block for the dir inodes. This makes sure we
+//  can fit our root disk id in u16
+// Phase 3:
+//  - Walking the tree post order, write out file inodes (including tail packing) and record their
+//  disk id
+//  - On dir exit, every child will have a disk id and we can
+//    1) write out the dirents data at the recorded data block start
+//    2) write out (buffered) the inode for this dir
+//  - Finish by writing the buffered dir inode data
+//
 // TODO a lot
-// BufWriter always flushes, which is a bit annoying since I was expecting it to keep track of
+// BufWriter always flushes on seek, which is a bit annoying since I was expecting it to keep track of
 // where we are and only flush if necessary
 
 #[derive(Debug, PartialEq)]
@@ -67,6 +88,7 @@ pub struct Builder<W: Write + Seek> {
     dirent_buf: Vec<u8>,
     dir_inode_buf: Vec<u8>,
     n_dirs: usize,
+    n_inodes: u64,
     dir_inode_id: u64,
 }
 
@@ -390,6 +412,7 @@ impl<W: Write + Seek> Builder<W> {
             dirent_buf: Vec::with_capacity(1 << block_size_bits),
             dir_inode_buf: Vec::with_capacity(1 << block_size_bits),
             n_dirs: 0,
+            n_inodes: 0,
             dir_inode_id: 0,
         };
         ret.seek_block(ret.cur_data_block)?;
@@ -528,6 +551,9 @@ impl<W: Write + Seek> Builder<W> {
             .ok_or(Error::NoRootDiskId)?
             .try_into()
             .map_err(|_| Error::RootDiskIdTooBig)?;
+        self.superblock.inos = self.n_inodes.into();
+        //self.superblock.feature_compat = 1.into();
+        // TODO checksum (and turn on feature_compat)
 
         self.writer
             .seek(SeekFrom::Start(EROFS_SUPER_OFFSET as u64))?;
@@ -536,6 +562,7 @@ impl<W: Write + Seek> Builder<W> {
     }
 
     fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>) -> Result<u32, Error> {
+        self.n_inodes += 1;
         let addr = self.seek_align(4, tail)?;
         let disk_id = self.addr_to_disk_id(addr)?;
         self.writer.write_all(data)?;
@@ -769,11 +796,11 @@ mod tests {
 
     fn erofs_to_mem(data: &[u8]) -> Result<EList, disk::Error> {
         let mut seen = HashSet::new();
-        let mut ret = vec![];
+        let mut ret = BTreeSet::new();
 
         let erofs = disk::Erofs::new(data)?;
 
-        let mut q = vec![(PathBuf::new(), erofs.get_root_inode()?.disk_id())];
+        let mut q = vec![(PathBuf::from("/"), erofs.get_root_inode()?.disk_id())];
 
         while let Some((name, cur)) = q.pop() {
             if !seen.insert(cur) {
@@ -791,9 +818,9 @@ mod tests {
                 }
                 _ => {}
             }
-            ret.push(inode_to_e(name, &inode));
+            ret.insert(inode_to_e(name, &inode));
         }
-        Ok(ret.into_iter().collect::<BTreeSet<_>>())
+        Ok(ret)
     }
 
     fn erofs_roundtrip(entries: &EList) -> EList {
@@ -801,15 +828,13 @@ mod tests {
         erofs_to_mem(&buf).unwrap()
     }
 
-    fn dump_erofs<P: AsRef<Path>>(path: P) -> Result<(), Error> {
+    fn fsck_erofs<P: AsRef<Path>>(path: P) -> Result<(), Error> {
         //eprintln!("!! len={:?}", path.as_ref().metadata()?.len());
         //Command::new("xxd").arg(path.as_ref()).status()?;
-        let output = Command::new("dump.erofs")
-            .arg("-s")
-            .arg("-S")
+        let output = Command::new("fsck.erofs")
             .arg(path.as_ref())
             .output()
-            .expect("dump.erofs failed to run");
+            .expect("fsck.erofs failed to run");
         //println!("stdout {}", String::from_utf8_lossy(&output.stdout));
         //println!("stderr {}", String::from_utf8_lossy(&output.stderr));
         if output.status.success() && output.stderr.is_empty() {
@@ -870,8 +895,8 @@ mod tests {
         }
 
         let tf = b.into_inner().expect("io fail");
-        //dump_erofs(tf.path())?;
-        dump_erofs(path)?;
+        //fsck_erofs(tf.path())?;
+        fsck_erofs(path)?;
         Ok(())
     }
 

@@ -16,7 +16,10 @@ pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
 //
 // Data Storage
 // - FlatInline storage stores whole blocks worth of data starting at raw_block_addr (number) and
-// then the remainder immediately follows the inode like FlatInline.
+// then the remainder immediately follows the inode like FlatInline. Inline (also called tail
+// packing) storage cannot cross a block boundary, so the maximum tail length is really the block
+// size minus inode size (32 or 64 + xattrs). And if you can't fit in the current block, then you
+// have to just skip to the start of the next block.
 // - FlatPlain storage is like FlatInline but with no tail data. I was wondering why this exists
 // and why not just have FlatInline, but if you are storing 8191 bytes for example, then if you
 // always used FlatInline, you would store 1 block and 4095 bytes inline; whereas with FlatPlain
@@ -31,6 +34,7 @@ pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
 // stored in blocks, the dirent block will end before the tail data starts (since dirent blocks are
 // max sized the block size).
 // - dirent name_offset is relative to the start of the block or start of the tail data
+// - dirents are sorted in name order EXCEPT for . and .. which are materialized on disk
 
 #[derive(Debug)]
 pub enum Error {
