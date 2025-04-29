@@ -1257,6 +1257,7 @@ dependencies = [
  "bytes",
  "memmap2",
  "rustix 1.0.5",
+ "tempfile",
  "zerocopy 0.8.24",
 ]
 

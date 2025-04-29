@@ -69,7 +69,7 @@ fn main() {
 
     let erofs = Erofs::new(&mmap).expect("fail to create view");
 
-    println!("{:?}", erofs.sb);
+    println!("{:#?}", erofs.sb);
     //if false {
     //    let node = erofs.get_root_inode().expect("inode get failed");
     //    println!(
@@ -130,7 +130,12 @@ fn main() {
             }
             DirentFileType::RegularFile => {
                 let inode = erofs.get_inode_dirent(&item).unwrap();
-                print!(" {} ({:?} block={:x})", inode.data_size(), inode.layout(), inode.raw_block_addr());
+                print!(
+                    " {} ({:?} block={:x})",
+                    inode.data_size(),
+                    inode.layout(),
+                    inode.raw_block_addr()
+                );
             }
             _ => {}
         }
@@ -138,9 +143,21 @@ fn main() {
     }
 
     let inodes = all_inodes(&erofs).expect("inode gather fail");
-    if let Some(inode) = inodes.iter().find(|x| x.layout() == Layout::CompressedCompact) {
-        println!("inode disk_id={:?} {:?} {:?} size={:?} {:?}", inode.disk_id(), inode.file_type(), inode.layout(), inode.data_size(), inode.raw_block_addr());
-        let map = erofs.get_map_header(&inode).expect("failed to get map header");
+    if let Some(inode) = inodes
+        .iter()
+        .find(|x| x.layout() == Layout::CompressedCompact)
+    {
+        println!(
+            "inode disk_id={:?} {:?} {:?} size={:?} {:?}",
+            inode.disk_id(),
+            inode.file_type(),
+            inode.layout(),
+            inode.data_size(),
+            inode.raw_block_addr()
+        );
+        let map = erofs
+            .get_map_header(&inode)
+            .expect("failed to get map header");
         println!("{:?}", map);
     }
 

@@ -601,6 +601,11 @@ perf stat sh -c '../target/release/squash-oci /mnt/storage/program-explorer/ocid
     3.056409000 seconds user
     2.166840000 seconds sys
 
+2.56s elapsed with --workers=0 without compression to /tmp
+3.00s elapsed with --workers=0 without compression to spinning hdd (with sync at end)
+
+perf stat sh -c '../target/release/squash-oci /mnt/storage/program-explorer/ocidir index.docker.io/silkeh/clang:17 > fifo & mkfs.erofs --tar=f --workers=0 /mnt/storage/program-explorer/tmp/clang-17.erofs fifo; sync /mnt/storage/progam-explorer/tmp/clang-17.erofs'
+
 1.96s with PathBuf for gcc:13.3.0
 1.90 with OsString
 

@@ -2,11 +2,10 @@ use std::fmt;
 
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
-use zerocopy::{Immutable, KnownLayout, TryFromBytes};
+use zerocopy::{FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
-
-const EROFS_SUPER_OFFSET: usize = 1024;
-const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
+pub const EROFS_SUPER_OFFSET: usize = 1024;
+pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
 
 // NOTES:
 // - inode ino is a sequential number, but will not match the nid you look it up with; ie the
@@ -56,32 +55,33 @@ pub enum Error {
 // gap that is placed with C alignment rules to get packed_nid to alignment 8. But when we use
 // alignment 1 types, that gap is closed and we are 4 bytes short, So _missing_4_bytes is
 // inserted as manual padding fill the gap
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+// I don't like the pub(crate) noise
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout, Default, IntoBytes)]
 #[repr(C)]
 pub struct Superblock {
-    magic: U32,
-    checksum: U32,
-    feature_compat: U32,
-    blkszbits: u8,
-    sb_extslots: u8,
-    root_disk_id: U16,
-    inos: U64,
-    build_time: U64,
-    build_time_nsec: U32,
-    blocks: U32,
-    meta_blkaddr: U32, // block number not addr
-    xattr_blkaddr: U32, // block number not addr
-    uuid: [u8; 16],
-    volume_name: [u8; 16],
-    available_compr_algs_or_lz4_max_distance: U16,
-    extra_devices: U16,
-    devt_slotoff: U16,
-    dirblkbits: u8,
-    xattr_prefix_count: u8,
-    xattr_prefix_start: U32,
+    pub(crate) magic: U32,
+    pub(crate) checksum: U32,
+    pub(crate) feature_compat: U32,
+    pub(crate) blkszbits: u8,
+    pub(crate) sb_extslots: u8,
+    pub(crate) root_disk_id: U16,
+    pub(crate) inos: U64,
+    pub(crate) build_time: U64,
+    pub(crate) build_time_nsec: U32,
+    pub(crate) blocks: U32,
+    pub(crate) meta_blkaddr: U32,  // block number not addr
+    pub(crate) xattr_blkaddr: U32, // block number not addr
+    pub(crate) uuid: [u8; 16],
+    pub(crate) volume_name: [u8; 16],
+    pub(crate) available_compr_algs_or_lz4_max_distance: U16,
+    pub(crate) extra_devices: U16,
+    pub(crate) devt_slotoff: U16,
+    pub(crate) dirblkbits: u8,
+    pub(crate) xattr_prefix_count: u8,
+    pub(crate) xattr_prefix_start: U32,
     _missing_4_bytes: U32,
-    packed_nid: U64,
-    xattr_filter_reserved: u8,
+    pub(crate) packed_nid: U64,
+    pub(crate) xattr_filter_reserved: u8,
     _reserved2: [u8; 23],
 }
 
@@ -101,21 +101,21 @@ pub struct InodeCompact {
     _reserved2: U32,
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct InodeExtended {
-    format_layout: U16,
-    xattr_count: U16,
-    mode: U16,
+    pub(crate) format_layout: U16,
+    pub(crate) xattr_count: U16,
+    pub(crate) mode: U16,
     _reserved: U16,
-    size: U64,
-    info: InodeInfo,
-    ino: U32,
-    uid: U32,
-    gid: U32,
-    mtime: U64,
-    mtime_nsec: U32,
-    nlink: U32,
+    pub(crate) size: U64,
+    pub(crate) info: InodeInfo,
+    pub(crate) ino: U32,
+    pub(crate) uid: U32,
+    pub(crate) gid: U32,
+    pub(crate) mtime: U64,
+    pub(crate) mtime_nsec: U32,
+    pub(crate) nlink: U32,
     _reserved2: [u8; 16],
 }
 
@@ -128,7 +128,12 @@ pub enum Layout {
     ChunkBased = 4,
 }
 
-#[derive(TryFromBytes, Immutable)]
+pub enum InodeType {
+    Compact,
+    Extended,
+}
+
+#[derive(Immutable, FromZeros, IntoBytes)]
 #[repr(C)]
 pub union InodeInfo {
     compressed_blocks: U32,
@@ -137,7 +142,7 @@ pub union InodeInfo {
     chunk_info: ChunkInfo,
 }
 
-#[derive(Copy, Clone, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Copy, Clone, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct ChunkInfo {
     format: U16,
@@ -162,12 +167,12 @@ pub struct XattrEntry {
     // u8 name[]
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct Dirent {
-    disk_id: U64,
-    name_offset: U16,
-    file_type: u8,
+    pub(crate) disk_id: U64,
+    pub(crate) name_offset: U16,
+    pub(crate) file_type: u8,
     _reserved: u8,
 }
 
@@ -188,7 +193,7 @@ pub struct MapHeader {
 struct LogicalClusterIndex {
     advise: U16, // I think this is just type
     cluster_offset: U16,
-    block_addr_or_delta: BlockAddrOrDelta
+    block_addr_or_delta: BlockAddrOrDelta,
 }
 
 #[derive(TryFromBytes, Immutable)]
@@ -286,6 +291,14 @@ impl fmt::Debug for FragmentOffsetOrDataSize {
     }
 }
 
+impl InodeInfo {
+    pub fn raw_block(block: u32) -> Self {
+        Self {
+            raw_blkaddr: block.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Inode<'a> {
     Compact((u32, &'a InodeCompact)),
@@ -293,6 +306,14 @@ pub enum Inode<'a> {
 }
 
 impl<'a> Inode<'a> {
+    pub fn format_layout(typ: InodeType, layout: Layout) -> u16 {
+        let format = match typ {
+            InodeType::Compact => 0u16,
+            InodeType::Extended => 1u16,
+        };
+        let layout = layout as u16;
+        format | (layout << 1)
+    }
     pub fn file_type(&self) -> FileType {
         match self {
             Inode::Compact((_, x)) => FileType::from_raw_mode(x.mode.into()),
@@ -395,8 +416,6 @@ pub struct Dirents<'a> {
     data: (&'a [u8], &'a [u8]),
     block_size: usize,
 }
-
-
 
 impl<'a> Dirents<'a> {
     fn new(data: (&'a [u8], &'a [u8]), block_size: usize) -> Result<Self, Error> {
@@ -704,7 +723,12 @@ impl<'a> Erofs<'a> {
         //  think)
         // for compact I think this is right
         let start = round_up_to::<8usize>(self.inode_end(inode) as usize);
-        eprintln!("start={} {:x} {:?}", start, start, &self.data[start..start+128]);
+        eprintln!(
+            "start={} {:x} {:?}",
+            start,
+            start,
+            &self.data[start..start + 128]
+        );
         MapHeader::try_ref_from_prefix(self.data.get(start..).ok_or(Error::Oob)?)
             .map_err(|_| Error::BadConversion)
             .map(|(x, _)| x)
@@ -816,11 +840,31 @@ mod tests {
         assert_eq!(12, std::mem::size_of::<Dirent>(), "Dirent");
         assert_eq!(12, std::mem::size_of::<XattrHeader>(), "XattrHeader");
         assert_eq!(4, std::mem::size_of::<XattrEntry>(), "XattrEntry");
-        assert_eq!(8, std::mem::size_of::<LogicalClusterIndex>(), "LogicalClusterIndex");
-        assert_eq!(14, std::mem::size_of::<Lz4CompressionConfig>(), "Lz4CompressionConfig");
-        assert_eq!(14, std::mem::size_of::<LzmaCompressionConfig>(), "LzmaCompressionConfig");
-        assert_eq!(6, std::mem::size_of::<DeflateCompressionConfig>(), "DeflateCompressionConfig");
-        assert_eq!(6, std::mem::size_of::<ZstdCompressionConfig>(), "ZstdCompressionConfig");
+        assert_eq!(
+            8,
+            std::mem::size_of::<LogicalClusterIndex>(),
+            "LogicalClusterIndex"
+        );
+        assert_eq!(
+            14,
+            std::mem::size_of::<Lz4CompressionConfig>(),
+            "Lz4CompressionConfig"
+        );
+        assert_eq!(
+            14,
+            std::mem::size_of::<LzmaCompressionConfig>(),
+            "LzmaCompressionConfig"
+        );
+        assert_eq!(
+            6,
+            std::mem::size_of::<DeflateCompressionConfig>(),
+            "DeflateCompressionConfig"
+        );
+        assert_eq!(
+            6,
+            std::mem::size_of::<ZstdCompressionConfig>(),
+            "ZstdCompressionConfig"
+        );
     }
 
     #[test]
