@@ -34,6 +34,7 @@ use crate::disk::{Superblock, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, Inode, I
 //  - Reserve enough space at the front of the meta block for the dir inodes. This makes sure we
 //  can fit our root disk id in u16
 // Phase 3:
+//  - On dir enter, grab the next dir inode for the dir
 //  - Walking the tree post order, write out file inodes (including tail packing) and record their
 //  disk id
 //  - On dir exit, every child will have a disk id and we can
@@ -125,7 +126,7 @@ pub struct File {
     disk_id: Option<u32>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct Dir {
     children: BTreeMap<OsString, Dirent>,
     meta: Meta,
@@ -138,10 +139,27 @@ struct Dir {
     //tail: bool,
 }
 
+impl Default for Dir {
+    fn default() -> Dir {
+        let mut children = BTreeMap::new();
+        children.insert(".".into(), Dirent::Dot);
+        children.insert("..".into(), Dirent::DotDot);
+        Dir {
+            children,
+            meta: Meta::default(),
+            disk_id: None,
+            start_block: None,
+            n_dirents_per_block: vec![],
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Dirent {
     File(File),
     Dir(Dir),
+    Dot,
+    DotDot,
 }
 
 impl Dirent {
@@ -149,12 +167,14 @@ impl Dirent {
         match self {
             Dirent::File(f) => f.disk_id,
             Dirent::Dir(d) => d.disk_id,
+            Dirent::Dot | Dirent::DotDot => None,
         }
     }
 
     fn file_type(&self) -> DirentFileType {
         match self {
             Dirent::File(_) => DirentFileType::RegularFile,
+            Dirent::Dot | Dirent::DotDot |
             Dirent::Dir(_) => DirentFileType::Directory,
         }
     }
@@ -183,6 +203,7 @@ fn walk_tree<V: TreeVisitor>(dir: &mut Dir, visitor: &mut V) -> Result<(), Error
             Dirent::Dir(d) => {
                 let _ = walk_tree(d, visitor)?;
             }
+            Dirent::Dot | Dirent::DotDot => {}
         }
     }
     visitor.on_dir_exit(dir)?;
@@ -205,9 +226,19 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
 
 struct BuilderTreeVisitorWriteInodes<'a, W: Write + Seek> {
     builder: &'a mut Builder<W>,
+    parents: Vec<u32>,
 }
 
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
+    fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
+        let disk_id: u32 = self.builder.dir_inode_id.try_into().map_err(|_| Error::DiskIdTooBig)?;
+        self.builder.dir_inode_id += 2; // TODO this is only valid without tail packing
+        let prev = dir.disk_id.replace(disk_id);
+        assert!(prev.is_none());
+        self.parents.push(disk_id);
+        Ok(())
+    }
+
     fn on_file(&mut self, file: &mut File) -> Result<(), Error> {
         let inode = {
             let mut i = InodeExtended::new_zeroed();
@@ -241,9 +272,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
         self.builder.seek_block(start_block)?;
 
-        let disk_id: u32 = self.builder.dir_inode_id.try_into().map_err(|_| Error::DiskIdTooBig)?;
-        self.builder.dir_inode_id += 2; // TODO this is only valid without tail packing
-
         let mut total_size = 0u64;
         let mut iter = dir.children.iter();
 
@@ -253,39 +281,15 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
 
-            // on the first block we have . and ..
-            let iter_count = if block == 0 {
-                assert!(count >= 2);
-                count - 2
-            } else {
-                count
-            };
-
-            if block == 0 {
-                let dot = {
-                    let mut d = disk::Dirent::new_zeroed();
-                    d.disk_id = (disk_id as u64).into();
-                    d.name_offset = name_offset.try_into().map_err(|_| Error::NameOffsetTooBig)?;
-                    d.file_type = DirentFileType::Directory as u8;
-                    d
-                };
-                name_offset += 1;
-                let dotdot = {
-                    let mut d = disk::Dirent::new_zeroed();
-                    d.disk_id = (disk_id as u64).into(); // TODO this has to get updated argh!
-                    d.name_offset = name_offset.try_into().map_err(|_| Error::NameOffsetTooBig)?;
-                    d.file_type = DirentFileType::Directory as u8;
-                    d
-                };
-                name_offset += 2;
-                self.builder.dirent_buf.extend(dot.as_bytes());
-                self.builder.dirent_buf.extend(dotdot.as_bytes());
-                self.builder.name_buf.extend(b"...");
-            }
-
-            for _ in 0..iter_count {
+            for _ in 0..count {
                 let (name, child) = iter.next().expect("Missing child");
-                let disk_id = child.disk_id().ok_or(Error::NoDiskId)?;
+                let disk_id = match child {
+                    Dirent::File(f) => f.disk_id,
+                    Dirent::Dir(d) => d.disk_id,
+                    Dirent::Dot => dir.disk_id,
+                    // if there is no parent, then this is the root dir and we point to ourselves
+                    Dirent::DotDot => self.parents.last().or(dir.disk_id.as_ref()).copied(),
+                }.ok_or(Error::NoDiskId)?;
 
                 let dirent = {
                     let mut d = disk::Dirent::new_zeroed();
@@ -334,9 +338,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i
         };
 
-        let prev = dir.disk_id.replace(disk_id);
-        println!("dir disk_id={}", self.builder.dir_inode_id);
-        assert!(prev.is_none());
+        self.parents.pop();
         self.builder.dir_inode_buf.extend(inode.as_bytes());
         Ok(())
     }
@@ -402,8 +404,8 @@ impl Dir {
     fn prepare_dirent_data(&mut self, block_size: u64, start_block: u64) -> u64 {
         let _ = self.start_block.insert(start_block);
         // we initialize with . and .. entries
-        let mut len = 3u64;
-        let mut count = 2u16;
+        let mut len = 0u64;
+        let mut count = 0u16;
 
         for name in self.children.keys() {
             let name_start = len + (std::mem::size_of::<disk::Dirent>() as u64);
@@ -423,7 +425,7 @@ impl Dir {
         }
         // TODO this check will change with tail packing
         let sum = self.n_dirents_per_block.iter().sum::<u16>() as usize;
-        if self.children.len() + 2 != sum {
+        if self.children.len() != sum {
             panic!("not all children accounted for expected={} got={}", self.children.len(), sum);
         }
         self.n_dirents_per_block.len() as u64
@@ -628,7 +630,7 @@ impl<W: Write + Seek> Builder<W> {
         self.writer.seek(SeekFrom::Start(self.block_addr(meta_block) + reserve_for_dirs))?;
         walk_tree(
             &mut root.root,
-            &mut BuilderTreeVisitorWriteInodes { builder: self },
+            &mut BuilderTreeVisitorWriteInodes{ builder: self, parents: vec![] },
         )?;
 
         //println!("{:#?}", root.root);
@@ -818,7 +820,6 @@ mod tests {
             match entry.typ {
                 EntryTyp::File => {
                     let data = entry.data.as_ref().expect("file should have data");
-                    let meta = entry.meta();
                     b.add_file(&entry.path, entry.meta(), data.len(), &mut Cursor::new(&data))?;
                 }
                 _ => todo!("unhandled typ")
