@@ -4,11 +4,14 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use zerocopy::{IntoBytes,FromZeros};
 use rustix::fs::FileType;
+use zerocopy::{FromZeros, IntoBytes};
 
 use crate::disk;
-use crate::disk::{Superblock, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, Inode, InodeExtended, InodeInfo, InodeType, Layout, DirentFileType};
+use crate::disk::{
+    DirentFileType, Inode, InodeExtended, InodeInfo, InodeType, Layout, Superblock,
+    EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET,
+};
 
 // NOTES:
 // Our strategy for building an erofs image is different than mkfs.erofs. From what I understand
@@ -34,12 +37,13 @@ use crate::disk::{Superblock, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, Inode, I
 //  - Reserve enough space at the front of the meta block for the dir inodes. This makes sure we
 //  can fit our root disk id in u16
 // Phase 3:
-//  - On dir enter, grab the next dir inode for the dir
+//  - On dir enter, grab the next dir inode for the dir and write it's inode data to a buffer
+//    - TODO this will have to change with tail packing since we won't know the tail packed data
+//    for the inode until the pass up
 //  - Write out file inodes (including tail packing) and record their disk id
 //  - On dir exit, every child will have a disk id and we can
 //    1) write out the dirents data at the recorded data block start
-//    2) write out (buffered) the inode for this dir
-//  - Finish by writing the buffered dir inode data
+//  - Finish by writing the buffered dir inode data at the meta block start
 //
 // TODO a lot
 // BufWriter always flushes on seek, which is a bit annoying since I was expecting it to keep track of
@@ -174,8 +178,7 @@ impl Dirent {
     fn file_type(&self) -> DirentFileType {
         match self {
             Dirent::File(_) => DirentFileType::RegularFile,
-            Dirent::Dot | Dirent::DotDot |
-            Dirent::Dir(_) => DirentFileType::Directory,
+            Dirent::Dot | Dirent::DotDot | Dirent::Dir(_) => DirentFileType::Directory,
         }
     }
 }
@@ -231,13 +234,15 @@ struct BuilderTreeVisitorWriteInodes<'a, W: Write + Seek> {
 
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
-        let disk_id: u32 = self.builder.dir_inode_id.try_into().map_err(|_| Error::DiskIdTooBig)?;
+        let disk_id: u32 = self
+            .builder
+            .dir_inode_id
+            .try_into()
+            .map_err(|_| Error::DiskIdTooBig)?;
         self.builder.dir_inode_id += 2; // TODO this is only valid without tail packing
         let prev = dir.disk_id.replace(disk_id);
         assert!(prev.is_none());
         //println!("dir disk_id={disk_id}");
-
-        let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
 
         let inode = {
             let mut i = InodeExtended::new_zeroed();
@@ -248,7 +253,8 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i.mtime = dir.meta.mtime.into();
             i.nlink = 1.into(); // TODO!
             i.info = InodeInfo::raw_block(
-                start_block
+                dir.start_block
+                    .ok_or(Error::NoStartBlock)?
                     .try_into()
                     .map_err(|_| Error::FileBlockTooBig)?,
             );
@@ -283,7 +289,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         };
 
         let disk_id = self.builder.write_inode(inode.as_bytes(), &file.tail)?;
-        println!("file disk_id={}", disk_id);
+        //println!("file disk_id={}", disk_id);
         let prev = file.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
@@ -297,7 +303,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
         let n_blocks = dir.n_dirents_per_block.len();
 
-        println!("dir disk id={:?}", dir.disk_id.unwrap());
+        //println!("dir disk id={:?}", dir.disk_id.unwrap());
         for (block, count) in dir.n_dirents_per_block.iter().enumerate() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
@@ -310,17 +316,20 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                     Dirent::Dot => dir.disk_id,
                     // if there is no parent, then this is the root dir and we point to ourselves
                     Dirent::DotDot => self.parents.last().or(dir.disk_id.as_ref()).copied(),
-                }.ok_or(Error::NoDiskId)?;
+                }
+                .ok_or(Error::NoDiskId)?;
 
                 let dirent = {
                     let mut d = disk::Dirent::new_zeroed();
                     d.disk_id = (disk_id as u64).into();
-                    d.name_offset = name_offset.try_into().map_err(|_| Error::NameOffsetTooBig)?;
+                    d.name_offset = name_offset
+                        .try_into()
+                        .map_err(|_| Error::NameOffsetTooBig)?;
                     d.file_type = child.file_type() as u8;
                     d
                 };
 
-                println!("writing entry for {:?}", name);
+                //println!("writing entry for {:?}", name);
                 self.builder.writer.write_all(dirent.as_bytes())?;
                 self.builder.name_buf.extend(name.as_bytes());
 
@@ -425,7 +434,11 @@ impl Dir {
         // TODO this check will change with tail packing
         let sum = self.n_dirents_per_block.iter().sum::<u16>() as usize;
         if self.children.len() != sum {
-            panic!("not all children accounted for expected={} got={}", self.children.len(), sum);
+            panic!(
+                "not all children accounted for expected={} got={}",
+                self.children.len(),
+                sum
+            );
         }
         self.n_dirents_per_block.len() as u64
     }
@@ -475,9 +488,7 @@ impl<W: Write + Seek> Builder<W> {
     }
 
     fn seek_block(&mut self, block: u64) -> Result<(), Error> {
-        let _ = self
-            .writer
-            .seek(SeekFrom::Start(self.block_addr(block)))?;
+        let _ = self.writer.seek(SeekFrom::Start(self.block_addr(block)))?;
         Ok(())
     }
 
@@ -519,7 +530,7 @@ impl<W: Write + Seek> Builder<W> {
         let rem = cur % self.block_size();
         if rem != 0 {
             let n = self.block_size() - rem;
-            println!("zero fill {n}");
+            //println!("zero fill {n}");
             for _ in 0..n {
                 self.writer.write_all(&[0])?;
             }
@@ -529,9 +540,11 @@ impl<W: Write + Seek> Builder<W> {
 
     fn hook_inode_extended(&self, inode: &mut InodeExtended) -> Result<(), Error> {
         if let Some(inc) = self.increment_uid_gid {
-            inode.uid = (inode.uid + inc).try_into()
+            inode.uid = (inode.uid + inc)
+                .try_into()
                 .map_err(|_| Error::UidGidTooBig)?;
-            inode.gid = (inode.gid + inc).try_into()
+            inode.gid = (inode.gid + inc)
+                .try_into()
                 .map_err(|_| Error::UidGidTooBig)?;
         }
         Ok(())
@@ -625,10 +638,15 @@ impl<W: Write + Seek> Builder<W> {
         // NOTE without tail packing for dir
         let reserve_for_dirs = (std::mem::size_of::<disk::InodeExtended>() * self.n_dirs) as u64;
         //self.cur_data_block += self.n_blocks_roundup(reserve_for_dirs as u64);
-        self.writer.seek(SeekFrom::Start(self.block_addr(meta_block) + reserve_for_dirs))?;
+        self.writer.seek(SeekFrom::Start(
+            self.block_addr(meta_block) + reserve_for_dirs,
+        ))?;
         walk_tree(
             &mut root.root,
-            &mut BuilderTreeVisitorWriteInodes{ builder: self, parents: vec![] },
+            &mut BuilderTreeVisitorWriteInodes {
+                builder: self,
+                parents: vec![],
+            },
         )?;
 
         //println!("{:#?}", root.root);
@@ -690,13 +708,13 @@ fn size_tail_len(len: usize, block_size_bits: u8) -> (usize, usize, usize) {
 mod tests {
     use super::*;
 
+    use std::collections::{BTreeSet, HashSet};
     use std::io::Cursor;
-    use std::path::{Path,PathBuf};
-    use std::collections::{BTreeSet,HashSet};
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use tempfile::NamedTempFile;
     use rustix::fs::Mode;
+    use tempfile::NamedTempFile;
 
     // sorted list of (key,value) bytes
     type Ext = Vec<(String, Vec<u8>)>;
@@ -716,7 +734,7 @@ mod tests {
             match self {
                 EntryTyp::File => FileType::RegularFile,
                 EntryTyp::Dir => FileType::Directory,
-                _ => todo!()
+                _ => todo!(),
             }
         }
     }
@@ -726,7 +744,7 @@ mod tests {
             match x {
                 FileType::RegularFile => EntryTyp::File,
                 FileType::Directory => EntryTyp::Dir,
-                _ => todo!()
+                _ => todo!(),
             }
         }
     }
@@ -816,9 +834,8 @@ mod tests {
                     Some(buf)
                 }
             }
-            _ => None
+            _ => None,
         };
-
 
         E {
             typ: inode.file_type().into(),
@@ -837,9 +854,14 @@ mod tests {
             match entry.typ {
                 EntryTyp::File => {
                     let data = entry.data.as_ref().expect("file should have data");
-                    b.add_file(&entry.path, entry.meta(), data.len(), &mut Cursor::new(&data))?;
+                    b.add_file(
+                        &entry.path,
+                        entry.meta(),
+                        data.len(),
+                        &mut Cursor::new(&data),
+                    )?;
                 }
-                _ => todo!("unhandled typ")
+                _ => todo!("unhandled typ"),
             }
         }
         b.into_inner()
@@ -852,20 +874,20 @@ mod tests {
         let erofs = disk::Erofs::new(data)?;
 
         let root_inode = erofs.get_root_inode()?.disk_id();
-        println!("root inode is {:?}", root_inode);
+        //println!("root inode is {:?}", root_inode);
         let mut q = vec![(PathBuf::from("/"), root_inode)];
         seen.insert(root_inode);
 
         while let Some((name, cur)) = q.pop() {
             let inode = erofs.get_inode(cur)?;
-            println!("processing {:?}", cur);
+            //println!("processing {:?}", cur);
             ret.insert(inode_to_e(&erofs, &inode, &name));
             match inode.file_type() {
                 FileType::Directory => {
                     let dirents = erofs.get_dirents(&inode)?;
                     for item in dirents.iter()? {
                         let item = item?;
-                        println!("item.name= {:?}", item.name);
+                        //println!("item.name= {:?}", item.name);
                         if item.name == b"." || item.name == b".." {
                             continue;
                         }
@@ -874,7 +896,6 @@ mod tests {
                             continue;
                         }
                         let name = name.join(OsStr::from_bytes(item.name));
-                        println!("name= {:?}", name);
                         q.push((name, disk_id));
                     }
                 }
@@ -885,7 +906,9 @@ mod tests {
     }
 
     fn erofs_roundtrip(entries: &EList) -> EList {
-        let buf = into_erofs(entries, Cursor::new(vec![])).unwrap().into_inner();
+        let buf = into_erofs(entries, Cursor::new(vec![]))
+            .unwrap()
+            .into_inner();
         erofs_to_elist(&buf).unwrap()
     }
 
@@ -967,10 +990,7 @@ mod tests {
             let entries = $entries.iter().cloned().collect::<EList>();
             let got = erofs_roundtrip(&entries);
             let missing = entries.difference(&got).cloned().collect::<EList>();
-            assert_eq!(
-                EList::new(),
-                missing
-            );
+            assert_eq!(EList::new(), missing);
             //assert_eq!(
             //    entries,
             //    got
@@ -980,11 +1000,9 @@ mod tests {
 
     #[test]
     fn test_builder() {
-        check_erofs_roundtrip!(
-            vec![
-                E::file("/dir/x", b"hello world"),
-                //E::file("/dir/y", b"foofoo"),
-            ]
-        );
+        check_erofs_roundtrip!(vec![
+            E::file("/dir/x", b"hello world"),
+            //E::file("/dir/y", b"foofoo"),
+        ]);
     }
 }
