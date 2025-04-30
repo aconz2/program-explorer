@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rustix::fs::FileType;
 use zerocopy::{FromZeros, IntoBytes};
@@ -97,10 +97,10 @@ pub struct Builder<W: Write + Seek> {
 
 #[derive(Debug)]
 pub struct Meta {
-    uid: u32,
-    gid: u32,
-    mtime: u64,
-    mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime: u64,
+    pub mode: u16,
 }
 
 impl Default for Meta {
@@ -120,11 +120,28 @@ struct Root {
 }
 
 #[derive(Debug)]
-pub struct File {
+struct File {
     meta: Meta,
     start_block: u64,
     len: usize,
     tail: Option<Box<[u8]>>,
+    disk_id: Option<u32>,
+}
+
+// We would almost never write the symlink data to a block but could happen
+#[derive(Debug)]
+struct Symlink {
+    meta: Meta,
+    start_block: u64,
+    len: usize,
+    tail: Option<Box<[u8]>>,
+    disk_id: Option<u32>,
+}
+
+#[derive(Debug)]
+struct Link {
+    meta: Meta,
+    target: PathBuf,
     disk_id: Option<u32>,
 }
 
@@ -162,22 +179,26 @@ impl Default for Dir {
 enum Dirent {
     File(File),
     Dir(Dir),
+    Symlink(Symlink),
+    Link(Link),
     Dot,
     DotDot,
 }
 
 impl Dirent {
-    fn disk_id(&self) -> Option<u32> {
-        match self {
-            Dirent::File(f) => f.disk_id,
-            Dirent::Dir(d) => d.disk_id,
-            Dirent::Dot | Dirent::DotDot => None,
-        }
-    }
+    //fn disk_id(&self) -> Option<u32> {
+    //    match self {
+    //        Dirent::File(f) => f.disk_id,
+    //        Dirent::Dir(d) => d.disk_id,
+    //        Dirent::Symlink(s) => s.disk_id,
+    //        Dirent::Dot | Dirent::DotDot => None,
+    //    }
+    //}
 
     fn file_type(&self) -> DirentFileType {
         match self {
-            Dirent::File(_) => DirentFileType::RegularFile,
+            Dirent::File(_) | Dirent::Link(_) => DirentFileType::RegularFile,
+            Dirent::Symlink(_) => DirentFileType::Symlink,
             Dirent::Dot | Dirent::DotDot | Dirent::Dir(_) => DirentFileType::Directory,
         }
     }
@@ -185,6 +206,12 @@ impl Dirent {
 
 trait TreeVisitor {
     fn on_file(&mut self, _file: &mut File) -> Result<(), Error> {
+        Ok(())
+    }
+    fn on_symlink(&mut self, _symlink: &mut Symlink) -> Result<(), Error> {
+        Ok(())
+    }
+    fn on_link(&mut self, _link: &mut Link) -> Result<(), Error> {
         Ok(())
     }
     fn on_dir_exit(&mut self, _dir: &mut Dir) -> Result<(), Error> {
@@ -202,6 +229,12 @@ fn walk_tree<V: TreeVisitor>(dir: &mut Dir, visitor: &mut V) -> Result<(), Error
         match child {
             Dirent::File(f) => {
                 visitor.on_file(f)?;
+            }
+            Dirent::Link(f) => {
+                visitor.on_link(f)?;
+            }
+            Dirent::Symlink(s) => {
+                visitor.on_symlink(s)?;
             }
             Dirent::Dir(d) => {
                 let _ = walk_tree(d, visitor)?;
@@ -269,6 +302,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         Ok(())
     }
 
+    // TODO use a helper for the meta
     fn on_file(&mut self, file: &mut File) -> Result<(), Error> {
         let inode = {
             let mut i = InodeExtended::new_zeroed();
@@ -288,11 +322,43 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i
         };
 
+        eprintln!("file write_inode");
         let disk_id = self.builder.write_inode(inode.as_bytes(), &file.tail)?;
         //println!("file disk_id={}", disk_id);
         let prev = file.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
+    }
+
+    fn on_symlink(&mut self, symlink: &mut Symlink) -> Result<(), Error> {
+        let inode = {
+            let mut i = InodeExtended::new_zeroed();
+            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
+            i.mode = (FileType::Symlink.as_raw_mode() as u16 | symlink.meta.mode).into();
+            i.uid = symlink.meta.uid.into();
+            i.gid = symlink.meta.gid.into();
+            i.mtime = symlink.meta.mtime.into();
+            i.nlink = 1.into(); // TODO!
+            i.info = InodeInfo::raw_block(
+                symlink.start_block
+                    .try_into()
+                    .map_err(|_| Error::FileBlockTooBig)?,
+            );
+            i.size = (symlink.len as u64).into();
+            self.builder.hook_inode_extended(&mut i)?;
+            i
+        };
+
+        eprintln!("symlink write_inode");
+        let disk_id = self.builder.write_inode(inode.as_bytes(), &symlink.tail)?;
+        //println!("file disk_id={}", disk_id);
+        let prev = symlink.disk_id.replace(disk_id);
+        assert!(prev.is_none());
+        Ok(())
+    }
+
+    fn on_link(&mut self, symlink: &mut Link) -> Result<(), Error> {
+        todo!()
     }
 
     fn on_dir_exit(&mut self, dir: &mut Dir) -> Result<(), Error> {
@@ -301,10 +367,8 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
         let mut iter = dir.children.iter();
 
-        let n_blocks = dir.n_dirents_per_block.len();
-
         //println!("dir disk id={:?}", dir.disk_id.unwrap());
-        for (block, count) in dir.n_dirents_per_block.iter().enumerate() {
+        for count in dir.n_dirents_per_block.iter() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
 
@@ -313,6 +377,8 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                 let disk_id = match child {
                     Dirent::File(f) => f.disk_id,
                     Dirent::Dir(d) => d.disk_id,
+                    Dirent::Symlink(d) => d.disk_id,
+                    Dirent::Link(l) => l.disk_id,
                     Dirent::Dot => dir.disk_id,
                     // if there is no parent, then this is the root dir and we point to ourselves
                     Dirent::DotDot => self.parents.last().or(dir.disk_id.as_ref()).copied(),
@@ -348,15 +414,45 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
 impl Root {
     fn add_file<P: AsRef<Path>>(&mut self, path: P, file: File) -> Result<(), Error> {
-        let path = path.as_ref();
+        //eprintln!("add file {:?}", path.as_ref());
         // TODO allocating here, hard to cache the vector becuase of the lifetime on borrowed OsStr
-        let (name, parents) = name_and_parents(path)?;
+        let (name, parents) = name_and_parents(path.as_ref())?;
         let dir = self.get_or_create_dir(&parents)?;
+        // TODO should this alert it if file exists?
         dir.children.insert(name.into(), Dirent::File(file));
         Ok(())
     }
 
+    fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
+        //eprintln!("upsert dir {:?}", path.as_ref());
+        let mut cur = &mut self.root;
+        for part in path.as_ref().iter() {
+            if part == "/" || part == "." { continue; }
+            cur = cur.get_or_create_dir(part)?;
+        }
+        cur.meta = meta;
+        Ok(())
+    }
+
+    fn add_symlink<P: AsRef<Path>>(&mut self, path: P, symlink: Symlink) -> Result<(), Error> {
+        //eprintln!("add symlink {:?} {:?}", path.as_ref(), symlink);
+        let (name, parents) = name_and_parents(path.as_ref())?;
+        let dir = self.get_or_create_dir(&parents)?;
+        dir.children.insert(name.into(), Dirent::Symlink(symlink));
+        Ok(())
+    }
+
+    fn add_link<P: AsRef<Path>>(&mut self, path: P, link: Link) -> Result<(), Error> {
+        //eprintln!("add link {:?} {:?}", path.as_ref(), link.target);
+        //let (name, parents) = name_and_parents(path.as_ref())?;
+        //let dir = self.get_or_create_dir(&parents)?;
+        //dir.children.insert(name.into(), Dirent::Link(link));
+        Ok(())
+    }
+
+    // TODO have this take an iter
     fn get_or_create_dir(&mut self, parts: &[&OsStr]) -> Result<&mut Dir, Error> {
+        //eprintln!("get_or_create_dir {:?}", parts);
         let mut cur = &mut self.root;
         for part in parts.iter() {
             cur = cur.get_or_create_dir(part)?;
@@ -378,7 +474,10 @@ impl Dir {
             .or_insert_with(|| Dirent::Dir(Dir::default()))
         {
             Dirent::Dir(d) => Ok(d),
-            _ => Err(Error::NotADir),
+            x => {
+                eprintln!("NotADir, but a {:?}", x);
+                Err(Error::NotADir)
+            },
         }
         // this doesn't work because of double borrow
         //if let Some(ent) = self.children.get_mut(name) {
@@ -492,8 +591,7 @@ impl<W: Write + Seek> Builder<W> {
         Ok(())
     }
 
-    fn seek_align(&mut self, size: usize, tail: &Option<Box<[u8]>>) -> Result<u64, Error> {
-        let size = size as u64;
+    fn seek_align(&mut self, size: u64, tail: &Option<Box<[u8]>>) -> Result<u64, Error> {
         let mut cur = self.writer.stream_position()?;
         let rem = cur % size;
         if rem != 0 {
@@ -515,6 +613,7 @@ impl<W: Write + Seek> Builder<W> {
 
     fn addr_to_disk_id(&self, addr: u64) -> Result<u32, Error> {
         let meta_addr = self.block_addr(self.meta_block.ok_or(Error::NoMetaBlock)?);
+        eprintln!("addr_to_disk_id addr={addr} meta_addr={meta_addr}");
         if addr < meta_addr {
             return Err(Error::AddrLessThanMetaBlock);
         }
@@ -553,7 +652,7 @@ impl<W: Write + Seek> Builder<W> {
     // we require the size up front so that we can calculate tail len
     pub fn add_file<P: AsRef<Path>, R: Read>(
         &mut self,
-        p: P,
+        path: P,
         meta: Meta,
         len: usize,
         contents: &mut R,
@@ -578,7 +677,46 @@ impl<W: Write + Seek> Builder<W> {
             tail,
             disk_id: None,
         };
-        self.root.as_mut().expect("not none").add_file(p, file)
+        self.root.as_mut().expect("not none").add_file(path, file)
+    }
+
+    pub fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
+        self.root.as_mut().expect("not none").upsert_dir(path, meta)
+    }
+
+    pub fn add_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(&mut self, path: P1, link: P2, meta: Meta) -> Result<(), Error> {
+        let data = link.as_ref().as_os_str().as_bytes();
+        let len = data.len();
+        let (n_blocks, block_len, tail_len) = size_tail_len(len, self.block_size_bits);
+
+        let start_block = self.cur_data_block;
+        self.seek_block(self.cur_data_block)?;
+        self.writer.write_all(&data[..block_len])?;
+        self.cur_data_block += n_blocks as u64;
+
+        let tail = if tail_len > 0 {
+            Some(data[block_len..].into())
+        } else {
+            None
+        };
+
+        let symlink = Symlink {
+            meta,
+            start_block,
+            len,
+            tail,
+            disk_id: None,
+        };
+        self.root.as_mut().expect("not none").add_symlink(path, symlink)
+    }
+
+    pub fn add_link<P1: AsRef<Path>, P2: AsRef<Path>>(&mut self, path: P1, link: P2, meta: Meta) -> Result<(), Error> {
+        let link = Link {
+            meta,
+            target: link.as_ref().into(),
+            disk_id: None,
+        };
+        self.root.as_mut().expect("not none").add_link(path, link)
     }
 
     fn write_superblock(&mut self) -> Result<(), Error> {
@@ -610,7 +748,9 @@ impl<W: Write + Seek> Builder<W> {
 
     fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>) -> Result<u32, Error> {
         self.n_inodes += 1;
+        eprintln!("write_inode pos before seek_align {}", self.writer.stream_position()?);
         let addr = self.seek_align(32, tail)?;
+        eprintln!("write_inode pos after seek_align {}", self.writer.stream_position()?);
         let disk_id = self.addr_to_disk_id(addr)?;
         self.writer.write_all(data)?;
         if let Some(tail) = tail {
@@ -637,7 +777,7 @@ impl<W: Write + Seek> Builder<W> {
         let meta_block = *self.meta_block.insert(self.cur_data_block);
         // NOTE without tail packing for dir
         let reserve_for_dirs = (std::mem::size_of::<disk::InodeExtended>() * self.n_dirs) as u64;
-        //self.cur_data_block += self.n_blocks_roundup(reserve_for_dirs as u64);
+
         self.writer.seek(SeekFrom::Start(
             self.block_addr(meta_block) + reserve_for_dirs,
         ))?;
@@ -651,9 +791,8 @@ impl<W: Write + Seek> Builder<W> {
 
         //println!("{:#?}", root.root);
         self.seek_block(meta_block)?;
-        if reserve_for_dirs != self.dir_inode_buf.len() as u64 {
-            panic!("size mismatch");
-        }
+        assert!(reserve_for_dirs == self.dir_inode_buf.len() as u64);
+
         self.writer.write_all(&self.dir_inode_buf)?;
         let _ = self.root.insert(root);
         Ok(())
@@ -683,7 +822,7 @@ fn name_and_parents<'a>(p: &'a Path) -> Result<(&'a OsStr, Vec<&'a OsStr>), Erro
     if path_not_file(p) {
         return Err(Error::BadFilename);
     }
-    let mut ret: Vec<_> = p.iter().filter(|x| *x != "/").collect();
+    let mut ret: Vec<_> = p.iter().filter(|x| *x != "/" && *x != ".").collect();
 
     if let Some(last) = ret.pop() {
         if last.is_empty() {
@@ -697,6 +836,8 @@ fn name_and_parents<'a>(p: &'a Path) -> Result<(&'a OsStr, Vec<&'a OsStr>), Erro
     }
 }
 
+// TODO this could create too long of a tail (tails should be roughly half a block size or smaller
+// I think
 fn size_tail_len(len: usize, block_size_bits: u8) -> (usize, usize, usize) {
     let block_size = 1usize << block_size_bits;
     let n_blocks = len / block_size;
@@ -970,8 +1111,8 @@ mod tests {
         {
             let data = b"hello world";
             b.add_file(
-                //"/foo/bar",
-                "/foo",
+                "/foo/bar",
+                //"/foo",
                 Meta::default(),
                 data.len(),
                 &mut Cursor::new(data),
@@ -1001,8 +1142,8 @@ mod tests {
     #[test]
     fn test_builder() {
         check_erofs_roundtrip!(vec![
-            E::file("/dir/x", b"hello world"),
-            //E::file("/dir/y", b"foofoo"),
+            E::file("/x", b"hi"),
+            E::file("/dir/x", b"foo"),
         ]);
     }
 }

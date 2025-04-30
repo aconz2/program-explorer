@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read, Write, Seek};
 use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,8 @@ use flate2::read::GzDecoder;
 use oci_spec::image::MediaType;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
+
+use peerofs::build::{Builder as ErofsBuilder, Meta as ErofsMeta, Error as ErofsError};
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -21,11 +23,20 @@ pub enum SquashError {
     MkfsFailed,
     Mkfifo,
     FifoOpen,
+    UidTooBig,
+    GidTooBig,
+    Erofs(ErofsError),
 }
 
 impl From<io::Error> for SquashError {
     fn from(e: io::Error) -> Self {
         SquashError::Io(e)
+    }
+}
+
+impl From<ErofsError> for SquashError {
+    fn from(e: ErofsError) -> Self {
+        SquashError::Erofs(e)
     }
 }
 
@@ -111,12 +122,12 @@ pub struct Stats {
     deletions_map_size: usize,
 }
 
-// important notes about the OCI spec
+pub trait EntryCallback {
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError>;
+}
+
+// Important notes about the OCI spec
 // "Extracting a layer with hardlink references to files outside of the layer may fail."
-//
-// GzDecoder doesn't have an option for Read+Seek,. What we really want is a trait for
-// SeekStart since we don't expect to be able to randomly seek in a compressed stream but we can
-// easily restart from the beginning. Instead take the underlying reader directly.
 //
 // Compared to sylabs https://github.com/sylabs/oci-tools/blob/main/pkg/mutate/squash.go
 // they buffer files per layer in memory to deal with hardlinks. I haven't (yet) run into or
@@ -140,21 +151,23 @@ pub struct Stats {
 // That was fixed by using ArchiveWriter.append_data which takes care of writing the path out,
 // though I thought it would be sufficient to just make sure to write any pax extensions
 //
-// GzDecoder will create a BufReader internally if it doesn't get a BufRead, so no need to pass in
-// a BufRead. TODO when handling more compression types, revisit this since if we have an
-// uncompressed thing we'll want to make sure to use a BufReader
-//
 // DeletionsOsString is slightly (~3-5%) faster on gcc:13.3.0 map size grows to 23k, this is
 // beacuse (I assume) equality and starts_with tests are directly on bytes and not iterator
 // comparisons of Components. But, I'm undecided which to go with, so leaving as a trait with both
 // impls for right now
-
-pub trait EntryCallback {
-    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError>;
-    //fn on_entry_gz(&mut self, entry: Entry<'_, GzDecoder>) -> Result<(), SquashError> {
-    //    self.on_entry(entry)
-    //}
-}
+//
+// This all got a bit ugly when we supported multiple compression types None/Gzip/Zstd and wanting
+// to support a callback version as well. Currently, we take the layers as pairs of (Compression,
+// Read) where they all have to have the same Read impl (ie all File or all Vec but not mixed).
+// The layer Read impl is NOT the decompressor Read b/c we want to support mixed types.
+// We might have been able to take a list of dyn impl Read layers, BUT with a callback API, the
+// Entry is specific to the Reader, so I don't think that works (maybe you could downcast or
+// something?). So there are two places we have to support being parametric over the reader which
+// is
+//  1) squash_layer which processes a single layer of Archive<R>
+//  2) EntryCallback which gets a callback on_entry which is generic over Entry<'_, R>
+//
+// We currently
 
 struct SquashToTar<W: Write> {
     archive: ArchiveBuilder<W>,
@@ -212,6 +225,84 @@ where
     };
     let stats = squash_cb(layer_readers, &mut helper)?;
     helper.archive.finish().map_err(|_| SquashError::Finish)?;
+
+    Ok(stats)
+}
+
+struct SquashToErofs<W: Write + Seek> {
+    builder: ErofsBuilder<W>,
+}
+
+fn header_to_meta(header: &tar::Header) -> Result<ErofsMeta, SquashError> {
+    let mut meta = ErofsMeta::default();
+    meta.uid = header.uid()?.try_into().map_err(|_| SquashError::UidTooBig)?;
+    meta.gid = header.gid()?.try_into().map_err(|_| SquashError::GidTooBig)?;
+    Ok(meta)
+}
+
+// TODO the error handling here is subpar b/c everything gets funneled into SquashError
+impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
+        //if let Some(extensions) = entry.pax_extensions()? {
+        //    let mut acc = vec![];
+        //    for extension in extensions.into_iter() {
+        //        let extension = extension?;
+        //        let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
+        //        let value = extension.value_bytes();
+        //        acc.push((key, value));
+        //    }
+        //    self.archive.append_pax_extensions(acc)?;
+        //}
+
+        // annoying we have to clone the header since we have to borrow the entry to read
+        // from. same with owning the path
+        let header = entry.header().clone();
+        let meta = header_to_meta(&header)?;
+        match entry.header().entry_type() {
+            EntryType::Regular => {
+                let path = entry.path()?.into_owned();
+                self.builder.add_file(
+                    path,
+                    meta,
+                    header.size()? as usize,
+                    entry
+                )?;
+            }
+            EntryType::Directory => {
+                let path = entry.path()?.into_owned();
+                self.builder.upsert_dir(path, meta)?;
+            }
+            EntryType::Symlink => {
+                let path = entry.path()?;
+                let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                self.builder.add_symlink(path, link, meta)?;
+            }
+            EntryType::Link => {
+                let path = entry.path()?;
+                let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                self.builder.add_link(path, link, meta)?;
+            }
+            t => {
+                todo!("unhandled entry type {:?}", t);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn squash_to_erofs<W, R>(
+    layer_readers: &mut [(Compression, R)],
+    out: &mut W,
+) -> Result<Stats, SquashError>
+where
+    W: Write + Seek,
+    R: Read,
+{
+    let mut helper = SquashToErofs {
+        builder: ErofsBuilder::new(out)?,
+    };
+    let stats = squash_cb(layer_readers, &mut helper)?;
+    let _ = helper.builder.into_inner()?;
 
     Ok(stats)
 }
