@@ -70,6 +70,11 @@ fn main() {
 
     let erofs = Erofs::new(&mmap).expect("fail to create view");
 
+    let inode: u32 = match args.get(2) {
+        Some(s) => s.parse::<u32>().expect("bad int"),
+        None => erofs.get_root_inode().expect("root inode get failed").disk_id(),
+    };
+
     println!("{:?}", erofs.sb);
     //if false {
     //    let node = erofs.get_root_inode().expect("inode get failed");
@@ -95,7 +100,7 @@ fn main() {
     //        node.data_size()
     //    );
     //}
-    let dir = erofs.get_root_inode().expect("inode get failed");
+    let dir = erofs.get_inode(inode).expect("inode get failed");
     //println!("{:?}", root_dir);
     //let dir = erofs.get_inode(2427390).expect("inode get failed"); //
     //let dir = erofs.get_inode(39099352).expect("inode get failed"); // usr/share/doc
@@ -132,7 +137,7 @@ fn main() {
             DirentFileType::RegularFile => {
                 let inode = erofs.get_inode_dirent(&item).unwrap();
                 print!(
-                    " {} ({:?} block={:x})",
+                    " size={} ({:?} block={:x})",
                     inode.data_size(),
                     inode.layout(),
                     inode.raw_block_addr()

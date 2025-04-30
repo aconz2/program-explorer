@@ -246,8 +246,20 @@ fn walk_tree<V: TreeVisitor>(dir: &mut Dir, visitor: &mut V) -> Result<(), Error
     Ok(())
 }
 
+// reserve space for dirents
 struct BuilderTreeVisitorPrepareDirents<'a, W: Write + Seek> {
     builder: &'a mut Builder<W>,
+}
+
+// write file inodes
+struct BuilderTreeVisitorWriteInodes<'a, W: Write + Seek> {
+    builder: &'a mut Builder<W>,
+}
+
+// write out dirents
+struct BuilderTreeVisitorWriteDirents<'a, W: Write + Seek> {
+    builder: &'a mut Builder<W>,
+    parents: Vec<u32>,
 }
 
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
@@ -260,12 +272,8 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
     }
 }
 
-struct BuilderTreeVisitorWriteInodes<'a, W: Write + Seek> {
-    builder: &'a mut Builder<W>,
-    parents: Vec<u32>,
-}
-
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
+    // TODO I think this can get fused with above
     fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let disk_id: u32 = self
             .builder
@@ -298,7 +306,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         };
         self.builder.dir_inode_buf.extend(inode.as_bytes());
 
-        self.parents.push(disk_id);
         Ok(())
     }
 
@@ -322,9 +329,9 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i
         };
 
-        eprintln!("file write_inode");
+        //eprintln!("file write_inode");
         let disk_id = self.builder.write_inode(inode.as_bytes(), &file.tail)?;
-        //println!("file disk_id={}", disk_id);
+        println!("file disk_id={}", disk_id);
         let prev = file.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
@@ -349,7 +356,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i
         };
 
-        eprintln!("symlink write_inode");
+        //eprintln!("symlink write_inode");
         let disk_id = self.builder.write_inode(inode.as_bytes(), &symlink.tail)?;
         //println!("file disk_id={}", disk_id);
         let prev = symlink.disk_id.replace(disk_id);
@@ -360,20 +367,30 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     fn on_link(&mut self, symlink: &mut Link) -> Result<(), Error> {
         todo!()
     }
+}
+
+impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
+    fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
+        self.parents.push(dir.disk_id.ok_or(Error::NoDiskId)?);
+        Ok(())
+    }
 
     fn on_dir_exit(&mut self, dir: &mut Dir) -> Result<(), Error> {
+        self.parents.pop();
+
         let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
         self.builder.seek_block(start_block)?;
 
         let mut iter = dir.children.iter();
 
-        //println!("dir disk id={:?}", dir.disk_id.unwrap());
+        println!("dir disk id={:?}", dir.disk_id.unwrap());
         for count in dir.n_dirents_per_block.iter() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
 
             for _ in 0..count {
                 let (name, child) = iter.next().expect("Missing child");
+                eprintln!("self.parents {:?}", self.parents);
                 let disk_id = match child {
                     Dirent::File(f) => f.disk_id,
                     Dirent::Dir(d) => d.disk_id,
@@ -384,6 +401,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                     Dirent::DotDot => self.parents.last().or(dir.disk_id.as_ref()).copied(),
                 }
                 .ok_or(Error::NoDiskId)?;
+                eprintln!("{:?} {}", name, disk_id);
 
                 let dirent = {
                     let mut d = disk::Dirent::new_zeroed();
@@ -407,7 +425,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             self.builder.name_buf.clear();
         }
 
-        self.parents.pop();
         Ok(())
     }
 }
@@ -613,7 +630,7 @@ impl<W: Write + Seek> Builder<W> {
 
     fn addr_to_disk_id(&self, addr: u64) -> Result<u32, Error> {
         let meta_addr = self.block_addr(self.meta_block.ok_or(Error::NoMetaBlock)?);
-        eprintln!("addr_to_disk_id addr={addr} meta_addr={meta_addr}");
+        //eprintln!("addr_to_disk_id addr={addr} meta_addr={meta_addr}");
         if addr < meta_addr {
             return Err(Error::AddrLessThanMetaBlock);
         }
@@ -748,9 +765,9 @@ impl<W: Write + Seek> Builder<W> {
 
     fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>) -> Result<u32, Error> {
         self.n_inodes += 1;
-        eprintln!("write_inode pos before seek_align {}", self.writer.stream_position()?);
+        //eprintln!("write_inode pos before seek_align {}", self.writer.stream_position()?);
         let addr = self.seek_align(32, tail)?;
-        eprintln!("write_inode pos after seek_align {}", self.writer.stream_position()?);
+        //eprintln!("write_inode pos after seek_align {}", self.writer.stream_position()?);
         let disk_id = self.addr_to_disk_id(addr)?;
         self.writer.write_all(data)?;
         if let Some(tail) = tail {
@@ -785,9 +802,17 @@ impl<W: Write + Seek> Builder<W> {
             &mut root.root,
             &mut BuilderTreeVisitorWriteInodes {
                 builder: self,
+            },
+        )?;
+
+        walk_tree(
+            &mut root.root,
+            &mut BuilderTreeVisitorWriteDirents {
+                builder: self,
                 parents: vec![],
             },
         )?;
+
 
         //println!("{:#?}", root.root);
         self.seek_block(meta_block)?;
@@ -992,7 +1017,7 @@ mod tests {
     fn into_erofs<W: Write + Seek>(entries: &EList, writer: W) -> Result<W, Error> {
         let mut b = Builder::new(writer)?;
         for entry in entries.iter() {
-            match entry.typ {
+            match &entry.typ {
                 EntryTyp::File => {
                     let data = entry.data.as_ref().expect("file should have data");
                     b.add_file(
@@ -1002,7 +1027,7 @@ mod tests {
                         &mut Cursor::new(&data),
                     )?;
                 }
-                _ => todo!("unhandled typ"),
+                t => todo!("unhandled typ {:?}", t),
             }
         }
         b.into_inner()
@@ -1125,6 +1150,28 @@ mod tests {
         Ok(())
     }
 
+    macro_rules! check_erofs_fsck {
+        ($entries:expr) => {{
+            let entries = $entries.iter().cloned().collect::<EList>();
+            let tf = NamedTempFile::new().expect("tf");
+            let tf = into_erofs(&entries, tf).unwrap();
+            //let path = tf.path();
+            let path = Path::new("/tmp/peerofs.test.erofs"); tf.persist(path).unwrap();
+            //assert!(false);
+            let result = fsck_erofs(path);
+            match result {
+                Err(Error::Other(ref s)) => {
+                    eprintln!("{}", s);
+                }
+                Err(ref e) => {
+                    eprintln!("{:?}", e);
+                }
+                Ok(_) => {}
+            }
+            assert!(result.is_ok());
+        }};
+    }
+
     // we check subset because adding a file /foo will also create the root dir
     macro_rules! check_erofs_roundtrip {
         ($entries:expr) => {{
@@ -1137,6 +1184,15 @@ mod tests {
             //    got
             //);
         }};
+    }
+
+    #[test]
+    fn test_fsck_simple() {
+        check_erofs_fsck!(vec![
+            E::file("/x", b"hi"),
+            E::file("/dir/x", b"foo"),
+            E::file("/a/b/c/d/e/x", b"foo"),
+        ])
     }
 
     #[test]
