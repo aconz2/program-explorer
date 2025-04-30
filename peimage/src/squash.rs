@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
+use oci_spec::image::MediaType;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 
 #[derive(Debug)]
@@ -24,6 +25,25 @@ pub enum SquashError {
 impl From<io::Error> for SquashError {
     fn from(e: io::Error) -> Self {
         SquashError::Io(e)
+    }
+}
+
+#[derive(Debug)]
+pub enum Compression {
+    None,
+    Gzip,
+    Zstd,
+}
+
+impl TryFrom<&MediaType> for Compression {
+    type Error = ();
+    fn try_from(x: &MediaType) -> Result<Compression, Self::Error> {
+        match x {
+            MediaType::ImageLayer => Ok(Compression::None),
+            MediaType::ImageLayerGzip => Ok(Compression::Gzip),
+            MediaType::ImageLayerZstd => Ok(Compression::Zstd),
+            _ => Err(()),
+        }
     }
 }
 
@@ -125,126 +145,186 @@ pub struct Stats {
 // comparisons of Components. But, I'm undecided which to go with, so leaving as a trait with both
 // impls for right now
 
-pub fn squash<W, R>(layer_readers: &mut [R], out: &mut W) -> Result<Stats, SquashError>
+pub trait EntryCallback {
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError>;
+    //fn on_entry_gz(&mut self, entry: Entry<'_, GzDecoder>) -> Result<(), SquashError> {
+    //    self.on_entry(entry)
+    //}
+}
+
+struct SquashToTar<W: Write> {
+    archive: ArchiveBuilder<W>,
+}
+
+impl<W: Write> EntryCallback for SquashToTar<W> {
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
+        // TODO should / do we need to exclude "path" and "link" extensions since
+        // the append_{link,data} calls will emit those for us
+        // and just doing the pax extension alone didn't seem to be enough to make long paths
+        // work
+        if let Some(extensions) = entry.pax_extensions()? {
+            // even though PaxExtensions implements IntoIter, it has the wrong type, first
+            // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
+            // also because the key() returns a Result<&str> because it may not be valid
+            // utf8. maybe there is a fancy way of adapting the iterator but doesn't matter
+            let mut acc = vec![];
+            for extension in extensions.into_iter() {
+                let extension = extension?;
+                let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
+                let value = extension.value_bytes();
+                acc.push((key, value));
+            }
+            self.archive.append_pax_extensions(acc)?;
+        }
+
+        // annoying we have to clone the header since we have to borrow the entry to read
+        // from. same with owning the path
+        let mut header = entry.header().clone();
+        match entry.header().entry_type() {
+            EntryType::Link | EntryType::Symlink => {
+                let path = entry.path()?;
+                let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                self.archive.append_link(&mut header, path, link)?;
+            }
+            _ => {
+                let path = entry.path()?.into_owned();
+                self.archive.append_data(&mut header, path, entry)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn squash_to_tar<W, R>(
+    layer_readers: &mut [(Compression, R)],
+    out: &mut W,
+) -> Result<Stats, SquashError>
 where
     W: Write,
-    R: Read + Seek,
+    R: Read,
+{
+    let mut helper = SquashToTar {
+        archive: ArchiveBuilder::new(out),
+    };
+    let stats = squash_cb(layer_readers, &mut helper)?;
+    helper.archive.finish().map_err(|_| SquashError::Finish)?;
+
+    Ok(stats)
+}
+
+fn squash_layer<R, D, F>(
+    cb: &mut F,
+    i: usize,
+    stats: &mut Stats,
+    deletions: &mut D,
+    mut layer: Archive<R>,
+) -> Result<(), SquashError>
+where
+    R: Read,
+    D: Deletions,
+    F: EntryCallback,
+{
+    for entry in layer.entries()? {
+        let mut entry = entry?;
+
+        match whiteout(&entry)? {
+            Some(Whiteout::Whiteout(path)) => {
+                if i != 0 {
+                    deletions.push_whiteout(path);
+                }
+                continue;
+            }
+            Some(Whiteout::Opaque(path)) => {
+                if i != 0 {
+                    deletions.push_opaque(path);
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        //if entry.header().entry_type() == EntryType::Link
+        //    && !deletions.is_deleted(&entry.path()?)
+        //{
+        //    if let Some(link) = entry.link_name()? {
+        //        hardlinks.insert(link.into());
+        //    } else {
+        //        return Err(SquashError::HardlinkNoLink);
+        //    }
+        //}
+
+        //if let Some(_) = entry.header().as_ustar() {
+        //    eprintln!("entry is ustar");
+        //} else if let Some(_) = entry.header().as_gnu() {
+        //    eprintln!("entry is gnu");
+        //}
+
+        match deletions.is_deleted(entry.path()?) {
+            Some(DeletionReason::Whiteout) => {
+                stats.deletions += 1;
+                continue;
+            }
+            Some(DeletionReason::WhiteoutDir) => {
+                stats.deletion_dirs += 1;
+                continue;
+            }
+            Some(DeletionReason::Opaque) => {
+                stats.opaques += 1;
+                continue;
+            }
+            Some(DeletionReason::Shadowed) => {
+                stats.shadowed += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        cb.on_entry(&mut entry)?;
+
+        // on the last layer there is no point storing the deletion
+        if i != 0 {
+            deletions.insert_seen(entry.path()?.as_os_str().into());
+        }
+    }
+
+    // apply whiteouts/opques except on the last layer
+    if i != 0 {
+        deletions.end_of_layer();
+    }
+    Ok(())
+}
+
+pub fn squash_cb<R, F>(
+    layer_readers: &mut [(Compression, R)],
+    cb: &mut F,
+) -> Result<Stats, SquashError>
+where
+    R: Read,
+    F: EntryCallback,
 {
     let mut deletions = DeletionsOsString::default();
     //let mut deletions = DeletionsPathBuf::default();
 
     //let mut hardlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
-    let mut aw = ArchiveBuilder::new(out);
     let mut stats = Stats::default();
 
     // we do enumerate, then rev, so i==0 is layer_readers[0] and is our last layer to be processed
     // where we can skip storing deletions
-    for (i, reader) in layer_readers.iter_mut().enumerate().rev() {
-        // TODO handle more archive types
-        let mut layer = Archive::new(GzDecoder::new(&mut *reader));
-        for entry in layer.entries()? {
-            let mut entry = entry?;
-
-            match whiteout(&entry)? {
-                Some(Whiteout::Whiteout(path)) => {
-                    if i != 0 {
-                        deletions.push_whiteout(path);
-                    }
-                    continue;
-                }
-                Some(Whiteout::Opaque(path)) => {
-                    if i != 0 {
-                        deletions.push_opaque(path);
-                    }
-                    continue;
-                }
-                _ => {}
+    for (i, (compression, reader)) in layer_readers.iter_mut().enumerate().rev() {
+        match compression {
+            Compression::Gzip => {
+                squash_layer(
+                    cb,
+                    i,
+                    &mut stats,
+                    &mut deletions,
+                    Archive::new(GzDecoder::new(&mut *reader)),
+                )?;
             }
-
-            //if entry.header().entry_type() == EntryType::Link
-            //    && !deletions.is_deleted(&entry.path()?)
-            //{
-            //    if let Some(link) = entry.link_name()? {
-            //        hardlinks.insert(link.into());
-            //    } else {
-            //        return Err(SquashError::HardlinkNoLink);
-            //    }
-            //}
-
-            //if let Some(_) = entry.header().as_ustar() {
-            //    eprintln!("entry is ustar");
-            //} else if let Some(_) = entry.header().as_gnu() {
-            //    eprintln!("entry is gnu");
-            //}
-
-            match deletions.is_deleted(entry.path()?) {
-                Some(DeletionReason::Whiteout) => {
-                    stats.deletions += 1;
-                    continue;
-                }
-                Some(DeletionReason::WhiteoutDir) => {
-                    stats.deletion_dirs += 1;
-                    continue;
-                }
-                Some(DeletionReason::Opaque) => {
-                    stats.opaques += 1;
-                    continue;
-                }
-                Some(DeletionReason::Shadowed) => {
-                    stats.shadowed += 1;
-                    continue;
-                }
-                _ => {}
-            }
-
-            // TODO should / do we need to exclude "path" and "link" extensions since
-            // the append_{link,data} calls will emit those for us
-            // and just doing the pax extension alone didn't seem to be enough to make long paths
-            // work
-            if let Some(extensions) = entry.pax_extensions()? {
-                // even though PaxExtensions implements IntoIter, it has the wrong type, first
-                // because its element type is Result<PaxExtension> and not (&str, &[u8]) but
-                // also because the key() returns a Result<&str> because it may not be valid
-                // utf8. maybe there is a fancy way of adapting the iterator but doesn't matter
-                let mut acc = vec![];
-                for extension in extensions.into_iter() {
-                    let extension = extension?;
-                    let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
-                    let value = extension.value_bytes();
-                    acc.push((key, value));
-                }
-                aw.append_pax_extensions(acc)?;
-            }
-
-            // annoying we have to clone the header since we have to borrow the entry to read
-            // from. same with owning the path
-            let mut header = entry.header().clone();
-            match entry.header().entry_type() {
-                EntryType::Link | EntryType::Symlink => {
-                    let path = entry.path()?;
-                    let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
-                    aw.append_link(&mut header, path, link)?;
-                }
-                _ => {
-                    let path = entry.path()?.into_owned();
-                    aw.append_data(&mut header, path, &mut entry)?;
-                }
-            }
-
-            // on the last layer there is no point storing the deletion
-            if i != 0 {
-                deletions.insert_seen(entry.path()?.as_os_str().into());
-            }
-        }
-
-        // apply whiteouts/opques except on the last layer
-        if i != 0 {
-            deletions.end_of_layer();
+            _ => todo!(),
         }
     }
-
-    aw.finish().map_err(|_| SquashError::Finish)?;
 
     stats.deletions_map_size = deletions.map.len();
 
@@ -631,7 +711,8 @@ mod tests {
                 let path: PathBuf = x.path().unwrap().into();
                 let ext = {
                     if let Some(ext) = x.pax_extensions().unwrap() {
-                        let mut vec: Vec<_> = ext.into_iter()
+                        let mut vec: Vec<_> = ext
+                            .into_iter()
                             .map(|x| x.unwrap())
                             .map(|x| (x.key().unwrap().to_string(), Vec::from(x.value_bytes())))
                             .collect();
@@ -807,12 +888,12 @@ mod tests {
     }
 
     fn squash_layers_vec(layers: Vec<Vec<E>>) -> Result<EList, SquashError> {
-        let mut readers: Vec<Cursor<Vec<u8>>> = layers
+        let mut readers: Vec<_> = layers
             .into_iter()
-            .map(|x| Cursor::new(serialize_gz(&x)))
+            .map(|x| (Compression::Gzip, Cursor::new(serialize_gz(&x))))
             .collect();
         let mut buf = Cursor::new(vec![]);
-        let _ = squash(&mut readers, &mut buf)?;
+        let _ = squash_to_tar(&mut readers, &mut buf)?;
         Ok(deserialize(&buf.into_inner()))
     }
 
@@ -1040,10 +1121,14 @@ mod tests {
     /// the layers produced when running the containerfile
     fn podman_squash_diff(containerfile: &str) -> Result<(EList, EList), podman::Error> {
         let rootfs = build_with_podman(containerfile)?;
-        let mut layers: Vec<_> = rootfs.layers.into_iter().map(Cursor::new).collect();
+        let mut layers: Vec<_> = rootfs
+            .layers
+            .into_iter()
+            .map(|(c, b)| (c, Cursor::new(b)))
+            .collect();
 
         let mut buf = Cursor::new(vec![]);
-        squash(&mut layers, &mut buf).unwrap();
+        squash_to_tar(&mut layers, &mut buf).unwrap();
         let our_combined = deserialize(&buf.into_inner());
         let podman_combined = deserialize(&rootfs.combined);
         Ok((our_combined, podman_combined))

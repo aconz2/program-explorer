@@ -1,12 +1,12 @@
 use std::env;
 use std::fs::{remove_file, OpenOptions};
-use std::io::{BufWriter, Read, Seek};
+use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rustix::fs::{mknodat, open, FileType, Mode, OFlags};
 
-use crate::squash::{squash, SquashError, Stats};
+use crate::squash::{squash_to_tar, Compression, SquashError, Stats};
 
 // TODO allow passing more args into mkfs.erofs, wait with timeout
 //
@@ -74,9 +74,12 @@ use crate::squash::{squash, SquashError, Stats};
 //    55014 write
 //    48811 lseek
 
-pub fn squash_erofs<R, P>(layer_readers: &mut [R], outfile: P) -> Result<Stats, SquashError>
+pub fn squash_erofs<R, P>(
+    layer_readers: &mut [(Compression, R)],
+    outfile: P,
+) -> Result<Stats, SquashError>
 where
-    R: Read + Seek,
+    R: Read,
     P: AsRef<Path>,
 {
     let fifo = mkfifo().map_err(|_| SquashError::Mkfifo)?;
@@ -98,7 +101,7 @@ where
 
     let mut out = BufWriter::with_capacity(4096 * 8, fifo_file);
 
-    let stats = squash(layer_readers, &mut out)?;
+    let stats = squash_to_tar(layer_readers, &mut out)?;
     let _ = out.into_inner(); // close fifo
     let status = child.wait()?;
 

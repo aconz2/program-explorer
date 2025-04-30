@@ -7,6 +7,8 @@ use tempfile::NamedTempFile;
 
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
+use crate::squash::Compression;
+
 #[derive(Debug)]
 pub enum Error {
     NoManifest,
@@ -44,7 +46,7 @@ fn digest_to_string(digest: &Digest) -> Result<String, Error> {
         .ok_or(Error::BadBlobPath)
 }
 
-pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Error> {
+pub fn load_layers_from_podman(image: &str) -> Result<Vec<(Compression, Vec<u8>)>, Error> {
     let mut child = Command::new("podman")
         .arg("image")
         .arg("save")
@@ -67,7 +69,8 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Error> {
             let mut buf = vec![];
             entry.read_to_end(&mut buf)?;
             if let Ok(blob) = entry.path()?.strip_prefix("blobs/sha256/") {
-                blobs.insert(blob.to_str().ok_or(Error::BadBlobPath)?.to_string(), buf);
+                let name = blob.to_str().ok_or(Error::BadBlobPath)?.to_string();
+                blobs.insert(name, buf);
             }
         }
     }
@@ -89,12 +92,13 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<Vec<u8>>, Error> {
                 .remove(&digest_to_string(x.digest())?)
                 .ok_or(Error::MissingBlob)
                 .map_err(|x| x.into())
+                .map(|b| (Compression::Gzip, b))
         })
         .collect()
 }
 
 pub struct Rootfs {
-    pub layers: Vec<Vec<u8>>,
+    pub layers: Vec<(Compression, Vec<u8>)>,
     pub combined: Vec<u8>,
 }
 

@@ -4,7 +4,7 @@ use std::io::BufWriter;
 use std::os::fd::FromRawFd;
 
 use peimage::oci::load_layers_from_oci;
-use peimage::squash::squash;
+use peimage::squash::squash_to_tar;
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -17,6 +17,6 @@ fn main() {
     // this doesn't respect the buffer at all (with or without .lock())
     //let mut out = BufWriter::new(io::stdout().lock());
     //let mut out = BufWriter::with_capacity(4096 * 8, File::create("/tmp/mytar").unwrap());
-    let stats = squash(&mut readers, &mut out).unwrap();
+    let stats = squash_to_tar(&mut readers, &mut out).unwrap();
     eprintln!("{stats:?}");
 }

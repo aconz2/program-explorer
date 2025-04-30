@@ -1,11 +1,16 @@
-use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 use std::fs::File;
 use std::path::Path;
+
+use crate::squash::Compression;
+
+use oci_spec::image::{Descriptor, Digest, ImageIndex, ImageManifest};
 
 #[derive(Debug)]
 pub enum Error {
     NoMatchingManifest,
     OciSpec,
+    NoMediaType,
+    BadMediaType,
     Io,
 }
 
@@ -26,7 +31,21 @@ fn digest_path(d: &Digest) -> String {
     d.to_string().replacen(":", "/", 1)
 }
 
-pub fn load_layers_from_oci<P: AsRef<Path>>(dir: P, image: &str) -> Result<Vec<File>, Error> {
+fn load_blob(blobs: &Path, image: &Descriptor) -> Result<(Compression, File), Error> {
+    let compression = image
+        .artifact_type()
+        .as_ref()
+        .ok_or(Error::NoMediaType)?
+        .try_into()
+        .map_err(|_| Error::BadMediaType)?;
+    let file = File::open(blobs.join(digest_path(image.digest()))).map_err(Into::<Error>::into)?;
+    Ok((compression, file))
+}
+
+pub fn load_layers_from_oci<P: AsRef<Path>>(
+    dir: P,
+    image: &str,
+) -> Result<Vec<(Compression, File)>, Error> {
     let dir = dir.as_ref();
     let blobs = dir.join("blobs");
 
@@ -55,6 +74,6 @@ pub fn load_layers_from_oci<P: AsRef<Path>>(dir: P, image: &str) -> Result<Vec<F
     image_manifest
         .layers()
         .iter()
-        .map(|x| File::open(blobs.join(digest_path(x.digest()))).map_err(Into::into))
+        .map(|x| load_blob(&blobs, x))
         .collect()
 }
