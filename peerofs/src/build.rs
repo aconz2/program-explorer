@@ -71,6 +71,9 @@ pub enum Error {
     IterFail,
     NameOffsetTooBig,
     UidGidTooBig,
+    HardlinkToDir,
+    HardlinkNotResolved,
+    HardlinkMultiNotHandled,
     Other(String),
     Io(std::io::ErrorKind),
 }
@@ -293,7 +296,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
                 dir.start_block
                     .ok_or(Error::NoStartBlock)?
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
+                    .map_err(|_| Error::FileBlockTooBig)?
             );
             i.size = dir.total_size.into();
 
@@ -320,7 +323,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i.info = InodeInfo::raw_block(
                 file.start_block
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
+                    .map_err(|_| Error::FileBlockTooBig)?
             );
             i.size = (file.len as u64).into();
             self.builder.hook_inode_extended(&mut i)?;
@@ -329,7 +332,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
         //eprintln!("file write_inode");
         let disk_id = self.builder.write_inode(inode.as_bytes(), &file.tail)?;
-        println!("file disk_id={}", disk_id);
+        //println!("file disk_id={}", disk_id);
         let prev = file.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
@@ -348,7 +351,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                 symlink
                     .start_block
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
+                    .map_err(|_| Error::FileBlockTooBig)?
             );
             i.size = (symlink.len as u64).into();
             self.builder.hook_inode_extended(&mut i)?;
@@ -357,14 +360,39 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
         //eprintln!("symlink write_inode");
         let disk_id = self.builder.write_inode(inode.as_bytes(), &symlink.tail)?;
-        //println!("file disk_id={}", disk_id);
+        //println!("symlink disk_id={}", disk_id);
         let prev = symlink.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
     }
 
-    fn on_link(&mut self, symlink: &mut Link) -> Result<(), Error> {
-        todo!()
+    fn on_link(&mut self, link: &mut Link) -> Result<(), Error> {
+        let (start_block, size) = self.builder.resolve_link(link)?;
+        let inode = {
+            let mut i = InodeExtended::new_zeroed();
+            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
+            i.mode = (FileType::Symlink.as_raw_mode() as u16 | link.meta.mode).into();
+            i.uid = link.meta.uid.into();
+            i.gid = link.meta.gid.into();
+            i.mtime = link.meta.mtime.into();
+            i.nlink = 1.into(); // TODO!
+            i.info = InodeInfo::raw_block(
+                start_block
+                    .try_into()
+                    .map_err(|_| Error::FileBlockTooBig)?
+            );
+            i.size = size.into();
+            self.builder.hook_inode_extended(&mut i)?;
+            i
+        };
+
+        //eprintln!("link write_inode");
+        // TODO wait how are hardlink tails handled!!!!
+        let disk_id = self.builder.write_inode(inode.as_bytes(), &None)?;
+        //println!("file disk_id={}", disk_id);
+        let prev = link.disk_id.replace(disk_id);
+        assert!(prev.is_none());
+        Ok(())
     }
 }
 
@@ -382,14 +410,14 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
 
         let mut iter = dir.children.iter();
 
-        println!("dir disk id={:?}", dir.disk_id.unwrap());
+        //println!("dir disk id={:?}", dir.disk_id.unwrap());
         for count in dir.n_dirents_per_block.iter() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
 
             for _ in 0..count {
                 let (name, child) = iter.next().expect("Missing child");
-                eprintln!("self.parents {:?}", self.parents);
+                //eprintln!("self.parents {:?}", self.parents);
                 let disk_id = match child {
                     Dirent::File(f) => f.disk_id,
                     Dirent::Dir(d) => d.disk_id,
@@ -400,7 +428,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
                     Dirent::DotDot => self.parents.last().or(dir.disk_id.as_ref()).copied(),
                 }
                 .ok_or(Error::NoDiskId)?;
-                eprintln!("{:?} {}", name, disk_id);
+                //eprintln!("{:?} {}", name, disk_id);
 
                 let dirent = {
                     let mut d = disk::Dirent::new_zeroed();
@@ -462,9 +490,9 @@ impl Root {
 
     fn add_link<P: AsRef<Path>>(&mut self, path: P, link: Link) -> Result<(), Error> {
         //eprintln!("add link {:?} {:?}", path.as_ref(), link.target);
-        //let (name, parents) = name_and_parents(path.as_ref())?;
-        //let dir = self.get_or_create_dir(&parents)?;
-        //dir.children.insert(name.into(), Dirent::Link(link));
+        let (name, parents) = name_and_parents(path.as_ref())?;
+        let dir = self.get_or_create_dir(&parents)?;
+        dir.children.insert(name.into(), Dirent::Link(link));
         Ok(())
     }
 
@@ -492,27 +520,24 @@ impl Dir {
             .or_insert_with(|| Dirent::Dir(Dir::default()))
         {
             Dirent::Dir(d) => Ok(d),
-            x => {
-                eprintln!("NotADir, but a {:?}", x);
+            _ => {
                 Err(Error::NotADir)
             }
         }
-        // this doesn't work because of double borrow
-        //if let Some(ent) = self.children.get_mut(name) {
-        //    match ent.as_mut() {
-        //        Dirent::Dir(d) => {
-        //            return Ok(d);
-        //        }
-        //        _ => {
-        //            return Err(Error::NotADir);
-        //        }
-        //    }
-        //}
-        //let Dirent::Dir(d) = self.children.entry(name.into()).or_insert_with(|| Box::new(Dirent::Dir(Dir::default()))).as_mut() else {
-        //    unreachable!()
-        //};
-        //Ok(d)
     }
+
+    fn get_dir(&self, name: &OsStr) -> Result<&Dir, Error> {
+        match self
+            .children
+            .get(name)
+        {
+            Some(Dirent::Dir(d)) => Ok(d),
+            _ => {
+                Err(Error::NotADir)
+            }
+        }
+    }
+
 
     // TODO not handling tail packing right now
     // fill in self.n_dirents_per_block which is the number of dirents that will be placed in the
@@ -567,7 +592,7 @@ impl<W: Write + Seek> Builder<W> {
         let mut ret = Builder {
             root: Some(Root::default()),
             increment_uid_gid: None,
-            writer: BufWriter::new(writer),
+            writer: BufWriter::with_capacity(4096 * 8, writer),
             superblock: Superblock::default(),
             cur_data_block: 1,
             block_size_bits,
@@ -847,6 +872,24 @@ impl<W: Write + Seek> Builder<W> {
             .into_inner()
             .map_err(|e| Error::Io(e.error().kind()))
     }
+
+    // OOf yeah with our weird self.root.take() thing to avoid the double mutable borrow this
+    // can't be called while we have a TreeVisitor running... very annoying!
+    fn resolve_link(&self, link: &Link) -> Result<(u64, u64), Error> {
+        // TODO rework the whole name_and_parents and lookup logic
+        let mut cur = &self.root.as_ref().expect("not none").root;
+        let (name, parents) = name_and_parents(&link.target)?;
+        for part in parents.iter() {
+            cur = cur.get_dir(part)?
+        }
+        match cur.children.get(name) {
+            Some(Dirent::File(f)) => Ok((f.start_block, f.len as u64)),
+            Some(Dirent::Symlink(s)) => Ok((s.start_block, s.len as u64)),
+            Some(Dirent::Dot) | Some(Dirent::DotDot) | Some(Dirent::Dir(_)) => Err(Error::HardlinkToDir),
+            Some(Dirent::Link(_)) => Err(Error::HardlinkMultiNotHandled),
+            None => Err(Error::HardlinkNotResolved),
+        }
+    }
 }
 
 fn path_not_file(p: &Path) -> bool {
@@ -909,8 +952,9 @@ mod tests {
     impl Into<FileType> for EntryTyp {
         fn into(self) -> FileType {
             match self {
-                EntryTyp::File => FileType::RegularFile,
+                EntryTyp::Link | EntryTyp::File => FileType::RegularFile,
                 EntryTyp::Dir => FileType::Directory,
+                EntryTyp::Symlink => FileType::Symlink,
                 _ => todo!(),
             }
         }
@@ -991,6 +1035,8 @@ mod tests {
                 uid: self.uid,
                 gid: self.gid,
                 mtime: self.mtime,
+                // TODO should we only be passing permission bits or also FMT
+                // b/c we set the FMT bits when creating the inode as well
                 mode: ft.as_raw_mode() as u16 | self.mode,
             }
         }
@@ -1036,6 +1082,20 @@ mod tests {
                         entry.meta(),
                         data.len(),
                         &mut Cursor::new(&data),
+                    )?;
+                }
+                EntryTyp::Symlink => {
+                    b.add_symlink(
+                        &entry.path,
+                        entry.link.as_ref().expect("symlink should have link"),
+                        entry.meta(),
+                    )?;
+                }
+                EntryTyp::Link => {
+                    b.add_link(
+                        &entry.path,
+                        entry.link.as_ref().expect("symlink should have link"),
+                        entry.meta(),
                     )?;
                 }
                 t => todo!("unhandled typ {:?}", t),
@@ -1204,6 +1264,8 @@ mod tests {
             E::file("/x", b"hi"),
             E::file("/dir/x", b"foo"),
             E::file("/a/b/c/d/e/x", b"foo"),
+            E::symlink("/y", "/x"),
+            E::link("/dir/link", "/x"),
         ])
     }
 
