@@ -72,7 +72,10 @@ fn main() {
 
     let inode: u32 = match args.get(2) {
         Some(s) => s.parse::<u32>().expect("bad int"),
-        None => erofs.get_root_inode().expect("root inode get failed").disk_id(),
+        None => erofs
+            .get_root_inode()
+            .expect("root inode get failed")
+            .disk_id(),
     };
 
     println!("{:?}", erofs.sb);

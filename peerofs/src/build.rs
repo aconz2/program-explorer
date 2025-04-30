@@ -41,6 +41,7 @@ use crate::disk::{
 //    - TODO this will have to change with tail packing since we won't know the tail packed data
 //    for the inode until the pass up
 //  - Write out file inodes (including tail packing) and record their disk id
+//
 //  - On dir exit, every child will have a disk id and we can
 //    1) write out the dirents data at the recorded data block start
 //  - Finish by writing the buffered dir inode data at the meta block start
@@ -266,15 +267,10 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
     fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let n_blocks =
             dir.prepare_dirent_data(self.builder.block_size(), self.builder.cur_data_block);
+
         self.builder.n_dirs += 1;
         self.builder.cur_data_block += n_blocks;
-        Ok(())
-    }
-}
 
-impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
-    // TODO I think this can get fused with above
-    fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let disk_id: u32 = self
             .builder
             .dir_inode_id
@@ -308,7 +304,9 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
         Ok(())
     }
+}
 
+impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     // TODO use a helper for the meta
     fn on_file(&mut self, file: &mut File) -> Result<(), Error> {
         let inode = {
@@ -347,7 +345,8 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i.mtime = symlink.meta.mtime.into();
             i.nlink = 1.into(); // TODO!
             i.info = InodeInfo::raw_block(
-                symlink.start_block
+                symlink
+                    .start_block
                     .try_into()
                     .map_err(|_| Error::FileBlockTooBig)?,
             );
@@ -444,7 +443,9 @@ impl Root {
         //eprintln!("upsert dir {:?}", path.as_ref());
         let mut cur = &mut self.root;
         for part in path.as_ref().iter() {
-            if part == "/" || part == "." { continue; }
+            if part == "/" || part == "." {
+                continue;
+            }
             cur = cur.get_or_create_dir(part)?;
         }
         cur.meta = meta;
@@ -494,7 +495,7 @@ impl Dir {
             x => {
                 eprintln!("NotADir, but a {:?}", x);
                 Err(Error::NotADir)
-            },
+            }
         }
         // this doesn't work because of double borrow
         //if let Some(ent) = self.children.get_mut(name) {
@@ -701,7 +702,12 @@ impl<W: Write + Seek> Builder<W> {
         self.root.as_mut().expect("not none").upsert_dir(path, meta)
     }
 
-    pub fn add_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(&mut self, path: P1, link: P2, meta: Meta) -> Result<(), Error> {
+    pub fn add_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(
+        &mut self,
+        path: P1,
+        link: P2,
+        meta: Meta,
+    ) -> Result<(), Error> {
         let data = link.as_ref().as_os_str().as_bytes();
         let len = data.len();
         let (n_blocks, block_len, tail_len) = size_tail_len(len, self.block_size_bits);
@@ -724,10 +730,18 @@ impl<W: Write + Seek> Builder<W> {
             tail,
             disk_id: None,
         };
-        self.root.as_mut().expect("not none").add_symlink(path, symlink)
+        self.root
+            .as_mut()
+            .expect("not none")
+            .add_symlink(path, symlink)
     }
 
-    pub fn add_link<P1: AsRef<Path>, P2: AsRef<Path>>(&mut self, path: P1, link: P2, meta: Meta) -> Result<(), Error> {
+    pub fn add_link<P1: AsRef<Path>, P2: AsRef<Path>>(
+        &mut self,
+        path: P1,
+        link: P2,
+        meta: Meta,
+    ) -> Result<(), Error> {
         let link = Link {
             meta,
             target: link.as_ref().into(),
@@ -800,9 +814,7 @@ impl<W: Write + Seek> Builder<W> {
         ))?;
         walk_tree(
             &mut root.root,
-            &mut BuilderTreeVisitorWriteInodes {
-                builder: self,
-            },
+            &mut BuilderTreeVisitorWriteInodes { builder: self },
         )?;
 
         walk_tree(
@@ -812,7 +824,6 @@ impl<W: Write + Seek> Builder<W> {
                 parents: vec![],
             },
         )?;
-
 
         //println!("{:#?}", root.root);
         self.seek_block(meta_block)?;
@@ -1156,7 +1167,8 @@ mod tests {
             let tf = NamedTempFile::new().expect("tf");
             let tf = into_erofs(&entries, tf).unwrap();
             //let path = tf.path();
-            let path = Path::new("/tmp/peerofs.test.erofs"); tf.persist(path).unwrap();
+            let path = Path::new("/tmp/peerofs.test.erofs");
+            tf.persist(path).unwrap();
             //assert!(false);
             let result = fsck_erofs(path);
             match result {
@@ -1197,9 +1209,6 @@ mod tests {
 
     #[test]
     fn test_builder() {
-        check_erofs_roundtrip!(vec![
-            E::file("/x", b"hi"),
-            E::file("/dir/x", b"foo"),
-        ]);
+        check_erofs_roundtrip!(vec![E::file("/x", b"hi"), E::file("/dir/x", b"foo"),]);
     }
 }
