@@ -133,6 +133,7 @@ struct Dir {
     start_block: Option<u64>,
     // number of dirents in each block
     n_dirents_per_block: Vec<u16>,
+    total_size: u64,
     // TODO  did this dirent have tail packing
     //tail: bool,
 }
@@ -148,6 +149,7 @@ impl Default for Dir {
             disk_id: None,
             start_block: None,
             n_dirents_per_block: vec![],
+            total_size: 0,
         }
     }
 }
@@ -233,7 +235,30 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         self.builder.dir_inode_id += 2; // TODO this is only valid without tail packing
         let prev = dir.disk_id.replace(disk_id);
         assert!(prev.is_none());
-        println!("dir disk_id={disk_id}");
+        //println!("dir disk_id={disk_id}");
+
+        let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
+
+        let inode = {
+            let mut i = InodeExtended::new_zeroed();
+            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatPlain).into();
+            i.mode = (FileType::Directory.as_raw_mode() as u16 | dir.meta.mode).into();
+            i.uid = dir.meta.uid.into();
+            i.gid = dir.meta.gid.into();
+            i.mtime = dir.meta.mtime.into();
+            i.nlink = 1.into(); // TODO!
+            i.info = InodeInfo::raw_block(
+                start_block
+                    .try_into()
+                    .map_err(|_| Error::FileBlockTooBig)?,
+            );
+            i.size = dir.total_size.into();
+
+            self.builder.hook_inode_extended(&mut i)?;
+            i
+        };
+        self.builder.dir_inode_buf.extend(inode.as_bytes());
+
         self.parents.push(disk_id);
         Ok(())
     }
@@ -243,7 +268,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             let mut i = InodeExtended::new_zeroed();
             i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
             i.mode = (FileType::RegularFile.as_raw_mode() as u16 | file.meta.mode).into();
-            println!("file mode={:16b}", i.mode);
             i.uid = file.meta.uid.into();
             i.gid = file.meta.gid.into();
             i.mtime = file.meta.mtime.into();
@@ -269,11 +293,11 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
         self.builder.seek_block(start_block)?;
 
-        let mut total_size = 0u64;
         let mut iter = dir.children.iter();
 
         let n_blocks = dir.n_dirents_per_block.len();
 
+        println!("dir disk id={:?}", dir.disk_id.unwrap());
         for (block, count) in dir.n_dirents_per_block.iter().enumerate() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
@@ -296,6 +320,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                     d
                 };
 
+                println!("writing entry for {:?}", name);
                 self.builder.writer.write_all(dirent.as_bytes())?;
                 self.builder.name_buf.extend(name.as_bytes());
 
@@ -304,38 +329,10 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             self.builder.writer.write_all(&self.builder.name_buf)?;
             self.builder.zero_fill_rest_of_page()?;
 
-            if block + 1 == n_blocks { // last iter
-                total_size += (count as usize * std::mem::size_of::<disk::Dirent>()) as u64;
-                total_size += self.builder.name_buf.len() as u64;
-            } else {
-                total_size += self.builder.block_size();
-            }
-
             self.builder.name_buf.clear();
         }
 
-        let inode = {
-            let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatPlain).into();
-            i.mode = (FileType::Directory.as_raw_mode() as u16 | dir.meta.mode).into();
-            println!("mode={:16b}", i.mode);
-            i.uid = dir.meta.uid.into();
-            i.gid = dir.meta.gid.into();
-            i.mtime = dir.meta.mtime.into();
-            i.nlink = 1.into(); // TODO!
-            i.info = InodeInfo::raw_block(
-                start_block
-                    .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
-            );
-            i.size = total_size.into();
-
-            self.builder.hook_inode_extended(&mut i)?;
-            i
-        };
-
         self.parents.pop();
-        self.builder.dir_inode_buf.extend(inode.as_bytes());
         Ok(())
     }
 }
@@ -416,9 +413,15 @@ impl Dir {
                 len = next_len;
             }
         }
+
+        let mut total_size = block_size * self.n_dirents_per_block.len() as u64;
+
         if count != 0 {
             self.n_dirents_per_block.push(count);
+            total_size += len;
         }
+        self.total_size = total_size;
+
         // TODO this check will change with tail packing
         let sum = self.n_dirents_per_block.iter().sum::<u16>() as usize;
         if self.children.len() != sum {
@@ -842,38 +845,48 @@ mod tests {
         b.into_inner()
     }
 
-    fn erofs_to_mem(data: &[u8]) -> Result<EList, disk::Error> {
+    fn erofs_to_elist(data: &[u8]) -> Result<EList, disk::Error> {
         let mut seen = HashSet::new();
         let mut ret = BTreeSet::new();
 
         let erofs = disk::Erofs::new(data)?;
 
-        let mut q = vec![(PathBuf::from("/"), erofs.get_root_inode()?.disk_id())];
+        let root_inode = erofs.get_root_inode()?.disk_id();
+        println!("root inode is {:?}", root_inode);
+        let mut q = vec![(PathBuf::from("/"), root_inode)];
+        seen.insert(root_inode);
 
         while let Some((name, cur)) = q.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
             let inode = erofs.get_inode(cur)?;
+            println!("processing {:?}", cur);
+            ret.insert(inode_to_e(&erofs, &inode, &name));
             match inode.file_type() {
                 FileType::Directory => {
                     let dirents = erofs.get_dirents(&inode)?;
                     for item in dirents.iter()? {
                         let item = item?;
+                        println!("item.name= {:?}", item.name);
+                        if item.name == b"." || item.name == b".." {
+                            continue;
+                        }
+                        let disk_id = item.disk_id.try_into().expect("why is this u64");
+                        if !seen.insert(disk_id) {
+                            continue;
+                        }
                         let name = name.join(OsStr::from_bytes(item.name));
-                        q.push((name, item.disk_id.try_into().expect("why is this u64")));
+                        println!("name= {:?}", name);
+                        q.push((name, disk_id));
                     }
                 }
                 _ => {}
             }
-            ret.insert(inode_to_e(&erofs, &inode, name));
         }
         Ok(ret)
     }
 
     fn erofs_roundtrip(entries: &EList) -> EList {
         let buf = into_erofs(entries, Cursor::new(vec![])).unwrap().into_inner();
-        erofs_to_mem(&buf).unwrap()
+        erofs_to_elist(&buf).unwrap()
     }
 
     fn fsck_erofs<P: AsRef<Path>>(path: P) -> Result<(), Error> {
@@ -954,11 +967,14 @@ mod tests {
             let entries = $entries.iter().cloned().collect::<EList>();
             let got = erofs_roundtrip(&entries);
             let missing = entries.difference(&got).cloned().collect::<EList>();
-            let empty = EList::new();
             assert_eq!(
-                empty,
+                EList::new(),
                 missing
             );
+            //assert_eq!(
+            //    entries,
+            //    got
+            //);
         }};
     }
 
@@ -966,7 +982,8 @@ mod tests {
     fn test_builder() {
         check_erofs_roundtrip!(
             vec![
-                E::file("/x", b"hello world")
+                E::file("/dir/x", b"hello world"),
+                //E::file("/dir/y", b"foofoo"),
             ]
         );
     }
