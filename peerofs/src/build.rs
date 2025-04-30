@@ -20,7 +20,7 @@ use crate::disk::{Superblock, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, Inode, I
 // meta_blkaddr makes this strategy very suitable and seems "right" to me. One drawback is that if
 // we use tail packing, we have to keep the tails in memory until writing out the inodes.
 //
-// A bit more detail, currently the strategy is (logical phases, phase 2+3 are fused):
+// A bit more detail, currently the strategy is
 // Phase 1:
 //  - Add files which builds up an in memory tree of dirs + files
 //  - Adding a file appends data to the output file in blocks
@@ -29,14 +29,13 @@ use crate::disk::{Superblock, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, Inode, I
 // Phase 2:
 //  - No more changes to the tree are allowed
 //  - Walk dirs to compute how many blocks we'll need to store the dirents data and count dirs.
-//  Also store the block addr of where the dirents will be
+//  Also store the block addr of where the dirents will be for each dir
 //  - We now know where our meta block start is
 //  - Reserve enough space at the front of the meta block for the dir inodes. This makes sure we
 //  can fit our root disk id in u16
 // Phase 3:
 //  - On dir enter, grab the next dir inode for the dir
-//  - Walking the tree post order, write out file inodes (including tail packing) and record their
-//  disk id
+//  - Write out file inodes (including tail packing) and record their disk id
 //  - On dir exit, every child will have a disk id and we can
 //    1) write out the dirents data at the recorded data block start
 //    2) write out (buffered) the inode for this dir
@@ -86,7 +85,6 @@ pub struct Builder<W: Write + Seek> {
     cur_data_block: u64,
     meta_block: Option<u64>,
     name_buf: Vec<u8>,
-    dirent_buf: Vec<u8>,
     dir_inode_buf: Vec<u8>,
     n_dirs: usize,
     n_inodes: u64,
@@ -235,6 +233,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         self.builder.dir_inode_id += 2; // TODO this is only valid without tail packing
         let prev = dir.disk_id.replace(disk_id);
         assert!(prev.is_none());
+        println!("dir disk_id={disk_id}");
         self.parents.push(disk_id);
         Ok(())
     }
@@ -262,9 +261,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         let disk_id = self.builder.write_inode(inode.as_bytes(), &file.tail)?;
         println!("file disk_id={}", disk_id);
         let prev = file.disk_id.replace(disk_id);
-        if prev.is_some() {
-            panic!("double insertion of file inode");
-        }
+        assert!(prev.is_none());
         Ok(())
     }
 
@@ -299,23 +296,22 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                     d
                 };
 
-                self.builder.dirent_buf.extend(dirent.as_bytes());
+                self.builder.writer.write_all(dirent.as_bytes());
                 self.builder.name_buf.extend(name.as_bytes());
 
                 name_offset += name.as_bytes().len();
             }
-            self.builder.writer.write_all(&self.builder.dirent_buf)?;
             self.builder.writer.write_all(&self.builder.name_buf)?;
-            self.builder.name_buf.clear();
-            self.builder.dirent_buf.clear();
             self.builder.zero_fill_rest_of_page()?;
 
             if block + 1 == n_blocks { // last iter
-                total_size += self.builder.dirent_buf.len() as u64;
+                total_size += (count as usize * std::mem::size_of::<disk::Dirent>()) as u64;
                 total_size += self.builder.name_buf.len() as u64;
             } else {
                 total_size += self.builder.block_size();
             }
+
+            self.builder.name_buf.clear();
         }
 
         let inode = {
@@ -402,8 +398,8 @@ impl Dir {
     //  1) name_offset is a u16 offset from the start of the block
     //  2) all names for a block must fit inside the block
     fn prepare_dirent_data(&mut self, block_size: u64, start_block: u64) -> u64 {
-        let _ = self.start_block.insert(start_block);
-        // we initialize with . and .. entries
+        let prev = self.start_block.replace(start_block);
+        assert!(prev.is_none());
         let mut len = 0u64;
         let mut count = 0u16;
 
@@ -444,7 +440,6 @@ impl<W: Write + Seek> Builder<W> {
             block_size_bits,
             meta_block: None,
             name_buf: Vec::with_capacity(1 << block_size_bits),
-            dirent_buf: Vec::with_capacity(1 << block_size_bits),
             dir_inode_buf: Vec::with_capacity(1 << block_size_bits),
             n_dirs: 0,
             n_inodes: 0,
@@ -488,7 +483,7 @@ impl<W: Write + Seek> Builder<W> {
         let mut cur = self.writer.stream_position()?;
         let rem = cur % size;
         if rem != 0 {
-            cur += rem;
+            cur += size - rem;
         }
         if let Some(tail) = tail {
             let len = tail.len() as u64;
@@ -510,7 +505,7 @@ impl<W: Write + Seek> Builder<W> {
             return Err(Error::AddrLessThanMetaBlock);
         }
         let offset = addr - meta_addr;
-        if offset % 4 != 0 {
+        if offset % 32 != 0 {
             return Err(Error::AddrNotAligned);
         }
         (offset / 32).try_into().map_err(|_| Error::DiskIdTooBig)
@@ -521,6 +516,7 @@ impl<W: Write + Seek> Builder<W> {
         let rem = cur % self.block_size();
         if rem != 0 {
             let n = self.block_size() - rem;
+            println!("zero fill {n}");
             for _ in 0..n {
                 self.writer.write_all(&[0])?;
             }
@@ -598,7 +594,7 @@ impl<W: Write + Seek> Builder<W> {
 
     fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>) -> Result<u32, Error> {
         self.n_inodes += 1;
-        let addr = self.seek_align(4, tail)?;
+        let addr = self.seek_align(32, tail)?;
         let disk_id = self.addr_to_disk_id(addr)?;
         self.writer.write_all(data)?;
         if let Some(tail) = tail {
@@ -617,7 +613,6 @@ impl<W: Write + Seek> Builder<W> {
         // as mut along with self, but then we have to put it back
         // and if we error, then we don't get to put it back...
         let mut root = self.root.take().expect("not none");
-        // TODO okay so in this pass I think we reserve meta space for all the dirs
         walk_tree(
             &mut root.root,
             &mut BuilderTreeVisitorPrepareDirents { builder: self },
