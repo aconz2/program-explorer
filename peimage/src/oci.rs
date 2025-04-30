@@ -31,14 +31,15 @@ fn digest_path(d: &Digest) -> String {
     d.to_string().replacen(":", "/", 1)
 }
 
-fn load_blob(blobs: &Path, image: &Descriptor) -> Result<(Compression, File), Error> {
-    let compression = image
+fn load_blob(blobs: &Path, layer: &Descriptor) -> Result<(Compression, File), Error> {
+    eprintln!("{:#?}", layer);
+    let compression = layer
         .artifact_type()
         .as_ref()
         .ok_or(Error::NoMediaType)?
         .try_into()
         .map_err(|_| Error::BadMediaType)?;
-    let file = File::open(blobs.join(digest_path(image.digest()))).map_err(Into::<Error>::into)?;
+    let file = File::open(blobs.join(digest_path(layer.digest()))).map_err(Into::<Error>::into)?;
     Ok((compression, file))
 }
 
@@ -68,6 +69,7 @@ pub fn load_layers_from_oci<P: AsRef<Path>>(
     .ok_or(Error::NoMatchingManifest)?;
 
     let image_manifest = ImageManifest::from_file(blobs.join(digest_path(manifest.digest())))?;
+    eprintln!("{:#?}", image_manifest);
 
     // is there a nicer way to coerce things into the right error type here??
 

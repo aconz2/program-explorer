@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 use oci_spec::image::MediaType;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
+use zstd::stream::Decoder as ZstdDecoder;
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -68,6 +69,9 @@ enum DeletionReason {
     Shadowed,
 }
 
+// Table giving the DeletionReason for each combination of DeletionState and the Match Type.
+// DeletionState is the state of a stored path in whatever impl Deletions. Match Type is whether
+// the path matches that thing exactly or is a child.
 //                        Match Type
 //               |    Exact   |    Child    |
 // DeletionState |--------------------------|
@@ -313,6 +317,15 @@ where
     // where we can skip storing deletions
     for (i, (compression, reader)) in layer_readers.iter_mut().enumerate().rev() {
         match compression {
+            Compression::None => {
+                squash_layer(
+                    cb,
+                    i,
+                    &mut stats,
+                    &mut deletions,
+                    Archive::new(BufReader::new(&mut *reader)),
+                )?;
+            }
             Compression::Gzip => {
                 squash_layer(
                     cb,
@@ -322,7 +335,15 @@ where
                     Archive::new(GzDecoder::new(&mut *reader)),
                 )?;
             }
-            _ => todo!(),
+            Compression::Zstd => {
+                squash_layer(
+                    cb,
+                    i,
+                    &mut stats,
+                    &mut deletions,
+                    Archive::new(ZstdDecoder::new(&mut *reader)?),
+                )?;
+            }
         }
     }
 
@@ -558,6 +579,7 @@ mod tests {
 
     use flate2::write::GzEncoder;
     use tar::{Builder, Header};
+    use zstd::stream::Encoder as ZstdEncoder;
 
     use crate::podman;
     use crate::podman::build_with_podman;
@@ -1230,5 +1252,35 @@ RUN chmod 444 x
         vec![busybox_root_dir()], // ours minus podman
         vec![]  // podman minus ours
         );
+    }
+
+    #[test]
+    fn test_mixed_compression() {
+        let f1 = E::file("none", b"none");
+        let f2 = E::file("gz", b"gz");
+        let f3 = E::file("zstd", b"zstd");
+
+        let layer1 = {
+            let mut encoder = Cursor::new(vec![]);
+            serialize_to_writer(&[f1.clone()], &mut encoder);
+            (Compression::None, Cursor::new(encoder.into_inner()))
+        };
+        // GzEncoder takes the vec directly whereas
+        let layer2 = {
+            let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+            serialize_to_writer(&[f2.clone()], &mut encoder);
+            (Compression::Gzip, Cursor::new(encoder.finish().unwrap()))
+        };
+        let layer3 = {
+            let mut encoder = ZstdEncoder::new(Vec::new(), 3).unwrap();
+            serialize_to_writer(&[f3.clone()], &mut encoder);
+            (Compression::Zstd, Cursor::new(encoder.finish().unwrap()))
+        };
+        let mut layers = vec![layer1, layer2, layer3];
+
+        let mut buf = Cursor::new(vec![]);
+        let _ = squash_to_tar(&mut layers, &mut buf).unwrap();
+        let output = deserialize(&buf.into_inner());
+        assert_eq!(vec![f1, f2, f3].into_iter().collect::<EList>(), output,)
     }
 }

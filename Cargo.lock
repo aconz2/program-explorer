@@ -1277,6 +1277,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]
