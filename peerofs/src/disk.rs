@@ -670,7 +670,7 @@ impl<'a> Erofs<'a> {
 
     // returns a pair of slices, both of which could be empty in the extreme, that are the block
     // and tail packed data this inode references
-    fn get_data(&self, inode: &Inode<'a>) -> Result<(&'a [u8], &'a [u8]), Error> {
+    pub fn get_data(&self, inode: &Inode<'a>) -> Result<(&'a [u8], &'a [u8]), Error> {
         match inode.layout() {
             Layout::FlatInline => {
                 let block_addr = inode.raw_block_addr();

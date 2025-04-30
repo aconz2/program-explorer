@@ -296,7 +296,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                     d
                 };
 
-                self.builder.writer.write_all(dirent.as_bytes());
+                self.builder.writer.write_all(dirent.as_bytes())?;
                 self.builder.name_buf.extend(name.as_bytes());
 
                 name_offset += name.as_bytes().len();
@@ -691,7 +691,9 @@ mod tests {
     use std::path::{Path,PathBuf};
     use std::collections::{BTreeSet,HashSet};
     use std::process::Command;
+
     use tempfile::NamedTempFile;
+    use rustix::fs::Mode;
 
     // sorted list of (key,value) bytes
     type Ext = Vec<(String, Vec<u8>)>;
@@ -798,13 +800,30 @@ mod tests {
 
     type EList = BTreeSet<E>;
 
-    fn inode_to_e<'a, P: AsRef<Path>>(name: P, inode: &Inode<'a>) -> E {
+    fn inode_to_e<'a, P: AsRef<Path>>(erofs: &'a disk::Erofs, inode: &Inode<'a>, name: P) -> E {
+        let data = match inode.file_type() {
+            FileType::RegularFile => {
+                let (l, r) = erofs.get_data(inode).unwrap();
+                if l.is_empty() && r.is_empty() {
+                    None
+                } else {
+                    let mut buf = vec![];
+                    buf.extend(l);
+                    buf.extend(r);
+                    Some(buf)
+                }
+            }
+            _ => None
+        };
+
+
         E {
             typ: inode.file_type().into(),
             path: name.as_ref().into(),
             uid: inode.uid(),
             gid: inode.gid(),
-            mode: inode.mode(),
+            mode: Mode::from_raw_mode(inode.mode() as u32).as_raw_mode() as u16, // mask out the S_IFMT
+            data: data,
             ..Default::default()
         }
     }
@@ -847,7 +866,7 @@ mod tests {
                 }
                 _ => {}
             }
-            ret.insert(inode_to_e(name, &inode));
+            ret.insert(inode_to_e(&erofs, &inode, name));
         }
         Ok(ret)
     }
@@ -929,12 +948,16 @@ mod tests {
         Ok(())
     }
 
+    // we check subset because adding a file /foo will also create the root dir
     macro_rules! check_erofs_roundtrip {
         ($entries:expr) => {{
-            let entries = $entries.into_iter().collect::<EList>();
+            let entries = $entries.iter().cloned().collect::<EList>();
+            let got = erofs_roundtrip(&entries);
+            let missing = entries.difference(&got).cloned().collect::<EList>();
+            let empty = EList::new();
             assert_eq!(
-                entries,
-                erofs_roundtrip(&entries)
+                empty,
+                missing
             );
         }};
     }
