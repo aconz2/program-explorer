@@ -46,9 +46,25 @@ use crate::disk::{
 //    1) write out the dirents data at the recorded data block start
 //  - Finish by writing the buffered dir inode data at the meta block start
 //
-// TODO a lot
-// BufWriter always flushes on seek, which is a bit annoying since I was expecting it to keep track of
+// I'm not sure if the right thing to do is create dirs as necessary. For one, we probably want to
+// create the root by default but that of course means assuming the uid/gid perms etc. But a lot of
+// layers I've seen don't have an entry for the root dir. Many (most?) tar files do have a dir
+// entry first for non-root dirs, like [DIR bin, FILE bin/bash], but I don't think that is
+// guaranteed so I've gone for creating dirs when inserting files and then any DIR entry would get
+// upsert'ed  with the metadata it has.
+//
+// Overall, paths are tricky (as always) and the rules for what paths we accept are:
+// - `.` `./` `/` can be used for upsert_dir of the root
+// - leading `/` or `./` can be used for files
+// - trailing `/` is forbidden except for the root dir
+// - things with `.` in the middle are skipped by Path::components internally
+// - things with `..` are forbidden
+// - the empty path is forbidden
+//
+// TODO
+// - BufWriter always flushes on seek, which is a bit annoying since I was expecting it to keep track of
 // where we are and only flush if necessary
+// - xattrs
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -74,6 +90,12 @@ pub enum Error {
     HardlinkToDir,
     HardlinkNotResolved,
     HardlinkMultiNotHandled,
+    UnhandledPrefixComponent,
+    PathWithDotDot,
+    WeirdPath,
+    PathTrailingSlash,
+    InsertFailed,
+    UpsertFailed,
     Other(String),
     Io(std::io::ErrorKind),
 }
@@ -97,6 +119,7 @@ pub struct Builder<W: Write + Seek> {
     n_dirs: usize,
     n_inodes: u64,
     dir_inode_id: u64,
+    links: Vec<(PathBuf, PathBuf, Meta)>,
 }
 
 #[derive(Debug)]
@@ -123,7 +146,7 @@ struct Root {
     root: Dir,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct File {
     meta: Meta,
     start_block: u64,
@@ -145,7 +168,11 @@ struct Symlink {
 #[derive(Debug)]
 struct Link {
     meta: Meta,
-    target: PathBuf,
+    start_block: u64,
+    len: usize,
+    // I think links have to duplicate the tail of the thing they point to
+    // if we have a lot of links, maybe we want to use a Rc<[u8]>
+    tail: Option<Box<[u8]>>,
     disk_id: Option<u32>,
 }
 
@@ -367,7 +394,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     }
 
     fn on_link(&mut self, link: &mut Link) -> Result<(), Error> {
-        let (start_block, size) = self.builder.resolve_link(link)?;
         let inode = {
             let mut i = InodeExtended::new_zeroed();
             i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
@@ -377,18 +403,18 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i.mtime = link.meta.mtime.into();
             i.nlink = 1.into(); // TODO!
             i.info = InodeInfo::raw_block(
-                start_block
+                link.start_block
                     .try_into()
                     .map_err(|_| Error::FileBlockTooBig)?
             );
-            i.size = size.into();
+            i.size = (link.len as u64).into();
             self.builder.hook_inode_extended(&mut i)?;
             i
         };
 
         //eprintln!("link write_inode");
         // TODO wait how are hardlink tails handled!!!!
-        let disk_id = self.builder.write_inode(inode.as_bytes(), &None)?;
+        let disk_id = self.builder.write_inode(inode.as_bytes(), &link.tail)?;
         //println!("file disk_id={}", disk_id);
         let prev = link.disk_id.replace(disk_id);
         assert!(prev.is_none());
@@ -459,52 +485,112 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
 impl Root {
     fn add_file<P: AsRef<Path>>(&mut self, path: P, file: File) -> Result<(), Error> {
         //eprintln!("add file {:?}", path.as_ref());
-        // TODO allocating here, hard to cache the vector becuase of the lifetime on borrowed OsStr
-        let (name, parents) = name_and_parents(path.as_ref())?;
-        let dir = self.get_or_create_dir(&parents)?;
-        // TODO should this alert it if file exists?
-        dir.children.insert(name.into(), Dirent::File(file));
-        Ok(())
-    }
-
-    fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
-        //eprintln!("upsert dir {:?}", path.as_ref());
-        let mut cur = &mut self.root;
-        for part in path.as_ref().iter() {
-            if part == "/" || part == "." {
-                continue;
-            }
-            cur = cur.get_or_create_dir(part)?;
-        }
-        cur.meta = meta;
-        Ok(())
+        self.insert(path, Dirent::File(file))
     }
 
     fn add_symlink<P: AsRef<Path>>(&mut self, path: P, symlink: Symlink) -> Result<(), Error> {
         //eprintln!("add symlink {:?} {:?}", path.as_ref(), symlink);
-        let (name, parents) = name_and_parents(path.as_ref())?;
-        let dir = self.get_or_create_dir(&parents)?;
-        dir.children.insert(name.into(), Dirent::Symlink(symlink));
-        Ok(())
+        self.insert(path, Dirent::Symlink(symlink))
     }
 
     fn add_link<P: AsRef<Path>>(&mut self, path: P, link: Link) -> Result<(), Error> {
         //eprintln!("add link {:?} {:?}", path.as_ref(), link.target);
-        let (name, parents) = name_and_parents(path.as_ref())?;
-        let dir = self.get_or_create_dir(&parents)?;
-        dir.children.insert(name.into(), Dirent::Link(link));
-        Ok(())
+        self.insert(path, Dirent::Link(link))
     }
 
-    // TODO have this take an iter
-    fn get_or_create_dir(&mut self, parts: &[&OsStr]) -> Result<&mut Dir, Error> {
-        //eprintln!("get_or_create_dir {:?}", parts);
-        let mut cur = &mut self.root;
-        for part in parts.iter() {
-            cur = cur.get_or_create_dir(part)?;
+    fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
+        //eprintln!("upsert dir {:?}", path.as_ref());
+        match self.lookup_create(path.as_ref())? {
+            (dir, None) =>  { // root
+                dir.meta = meta;
+                Ok(())
+            }
+            (dir, Some(name)) =>  {
+                let dir = dir.get_or_create_dir(name)?;
+                dir.meta = meta;
+                Ok(())
+            }
         }
-        Ok(cur)
     }
+
+    fn insert<P: AsRef<Path>>(&mut self, path: P, entry: Dirent) -> Result<(), Error> {
+        if let (dir, Some(name)) = self.lookup_create(path.as_ref())? {
+            dir.children.insert(name.into(), entry);
+            Ok(())
+        } else {
+            // this can only happen if trying to insert at the root like . ./ or /
+            // for which the only valid thing to do is upsert_dir
+            Err(Error::InsertFailed)
+        }
+    }
+
+    // cannot lookup the root dir since we couldn't move it into a Dirent::Dir
+    // but this is only used for resolving links and can't link to dir so okay
+    fn get<P: AsRef<Path>>(&mut self, path: P) -> Result<Option<&Dirent>, Error> {
+        let path = path.as_ref();
+        if let (dir, Some(name)) = self.lookup(path)? {
+            Ok(dir.children.get(name))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn lookup_create<'a>(&mut self, path: &'a Path) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
+        self.lookup_impl(path, true)
+    }
+
+    fn lookup<'a>(&mut self, path: &'a Path) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
+        self.lookup_impl(path, false)
+    }
+
+    // ugly but idk
+    // returns the dir and optionally the final name component (since the root dir has no name).
+    // takes/returns &mut to cover both cases of creating the dirs on the way or not
+    fn lookup_impl<'a>(&mut self, path: &'a Path, create: bool) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
+        use std::path::Component::*;
+
+        match path.as_os_str().as_bytes() {
+            b"" => { return Err(Error::EmptyPath); }
+            b"." | b"./" | b"/" => { return Ok((&mut self.root, None)); }
+            b if b.ends_with(b"/") => { return Err(Error::PathTrailingSlash); }
+            _ => {}
+        }
+
+        let mut cur = &mut self.root;
+        let mut iter = path.components().peekable();
+
+        let name = {
+            loop {
+                if let Some(part) = iter.next() {
+                    if iter.peek().is_none() {
+                        match part {
+                            Normal(part) => { break Some(part); },
+                            CurDir => { break None; },
+                            _ =>  { return Err(Error::WeirdPath); }
+                        }
+                    }
+                    match part {
+                        // CurDir/RootDir can only come at the beginning and we ignore it
+                        CurDir | RootDir => { continue; },
+                        Prefix(_) => { return Err(Error::UnhandledPrefixComponent); }
+                        ParentDir => { return Err(Error::PathWithDotDot); }
+                        Normal(part) => {
+                            if create {
+                                cur = cur.get_or_create_dir(part)?;
+                            } else {
+                                cur = cur.get_dir(part)?;
+                            }
+
+                        }
+                    }
+                } else {
+                    break None;
+                }
+            }
+        };
+        Ok((cur, name))
+    }
+
 }
 
 impl Dir {
@@ -526,10 +612,10 @@ impl Dir {
         }
     }
 
-    fn get_dir(&self, name: &OsStr) -> Result<&Dir, Error> {
+    fn get_dir(&mut self, name: &OsStr) -> Result<&mut Dir, Error> {
         match self
             .children
-            .get(name)
+            .get_mut(name)
         {
             Some(Dirent::Dir(d)) => Ok(d),
             _ => {
@@ -537,7 +623,6 @@ impl Dir {
             }
         }
     }
-
 
     // TODO not handling tail packing right now
     // fill in self.n_dirents_per_block which is the number of dirents that will be placed in the
@@ -602,6 +687,7 @@ impl<W: Write + Seek> Builder<W> {
             n_dirs: 0,
             n_inodes: 0,
             dir_inode_id: 0,
+            links: vec![],
         };
         ret.seek_block(ret.cur_data_block)?;
         Ok(ret)
@@ -764,15 +850,11 @@ impl<W: Write + Seek> Builder<W> {
     pub fn add_link<P1: AsRef<Path>, P2: AsRef<Path>>(
         &mut self,
         path: P1,
-        link: P2,
+        target: P2,
         meta: Meta,
     ) -> Result<(), Error> {
-        let link = Link {
-            meta,
-            target: link.as_ref().into(),
-            disk_id: None,
-        };
-        self.root.as_mut().expect("not none").add_link(path, link)
+        self.links.push((path.as_ref().into(), target.as_ref().into(), meta));
+        Ok(())
     }
 
     fn write_superblock(&mut self) -> Result<(), Error> {
@@ -859,7 +941,31 @@ impl<W: Write + Seek> Builder<W> {
         Ok(())
     }
 
+    fn resolve_links(&mut self) -> Result<(), Error> {
+        let mut root = self.root.as_mut().expect("not none");
+        for (path, target, meta) in std::mem::take(&mut self.links).into_iter() {
+            let (start_block, len, tail) = {
+                match root.get(&target)?.ok_or(Error::HardlinkNotResolved)? {
+                    Dirent::File(f) => Ok((f.start_block, f.len, f.tail.clone())),
+                    Dirent::Symlink(s) => Ok((s.start_block, s.len, s.tail.clone())),
+                    Dirent::Dot | Dirent::DotDot | Dirent::Dir(_) => Err(Error::HardlinkToDir),
+                    Dirent::Link(_) => Err(Error::HardlinkMultiNotHandled),
+                }?
+            };
+            let _ = root.insert(path, Dirent::Link(Link {
+                meta,
+                start_block,
+                len,
+                tail,
+                disk_id: None,
+            }));
+            //root.as_mut().expect("not none").add_link(path, link)
+        }
+        Ok(())
+    }
+
     fn finalize(&mut self) -> Result<(), Error> {
+        //self.resolve_links()?;
         self.write_inodes()?;
         self.write_superblock()?;
         self.writer.flush()?;
@@ -873,46 +979,6 @@ impl<W: Write + Seek> Builder<W> {
             .map_err(|e| Error::Io(e.error().kind()))
     }
 
-    // OOf yeah with our weird self.root.take() thing to avoid the double mutable borrow this
-    // can't be called while we have a TreeVisitor running... very annoying!
-    fn resolve_link(&self, link: &Link) -> Result<(u64, u64), Error> {
-        // TODO rework the whole name_and_parents and lookup logic
-        let mut cur = &self.root.as_ref().expect("not none").root;
-        let (name, parents) = name_and_parents(&link.target)?;
-        for part in parents.iter() {
-            cur = cur.get_dir(part)?
-        }
-        match cur.children.get(name) {
-            Some(Dirent::File(f)) => Ok((f.start_block, f.len as u64)),
-            Some(Dirent::Symlink(s)) => Ok((s.start_block, s.len as u64)),
-            Some(Dirent::Dot) | Some(Dirent::DotDot) | Some(Dirent::Dir(_)) => Err(Error::HardlinkToDir),
-            Some(Dirent::Link(_)) => Err(Error::HardlinkMultiNotHandled),
-            None => Err(Error::HardlinkNotResolved),
-        }
-    }
-}
-
-fn path_not_file(p: &Path) -> bool {
-    let b = p.as_os_str().as_bytes();
-    b.ends_with(b"/") || b.ends_with(b"/.") || b.ends_with(b"/..")
-}
-
-fn name_and_parents<'a>(p: &'a Path) -> Result<(&'a OsStr, Vec<&'a OsStr>), Error> {
-    if path_not_file(p) {
-        return Err(Error::BadFilename);
-    }
-    let mut ret: Vec<_> = p.iter().filter(|x| *x != "/" && *x != ".").collect();
-
-    if let Some(last) = ret.pop() {
-        if last.is_empty() {
-            // should be unreachable
-            Err(Error::EmptyFilename)
-        } else {
-            Ok((last, ret))
-        }
-    } else {
-        Err(Error::EmptyPath)
-    }
 }
 
 // TODO this could create too long of a tail (tails should be roughly half a block size or smaller
@@ -1166,37 +1232,43 @@ mod tests {
     }
 
     #[test]
-    fn test_name_and_parents() {
-        {
-            let p = Path::new("/a/b");
-            assert_eq!(
-                name_and_parents(p).unwrap(),
-                (OsStr::new("b"), vec![OsStr::new("a")])
-            );
+    fn test_tree_operations() {
+        // add "a/b" then "/a/b" and lookup with both "a/b" and "/a/b" and should give the same positive result
+        for prefix in ["", "/", "./"]{
+            let mut tree = Root { root: Dir::default() };
+            tree.add_file(format!("{}{}", prefix, "a/b"), File { start_block: 42, ..File::default() }).unwrap();
+            assert!(tree.get("foo").unwrap().is_none());
+            for prefix2 in ["", "/", "./"]{
+                if let Dirent::File(f) = tree.get(format!("{}{}", prefix2, "a/b")).unwrap().unwrap() {
+                    assert_eq!(f.start_block, 42);
+                } else {
+                    assert!(false);
+                }
+            }
         }
+
         {
-            let p = Path::new("a/b");
-            assert_eq!(
-                name_and_parents(p).unwrap(),
-                (OsStr::new("b"), vec![OsStr::new("a")])
-            );
+            let mut tree = Root { root: Dir::default() };
+            tree.add_file("/a/b", File { start_block: 42, ..File::default() }).unwrap();
+            assert!(tree.get("/a/../a/b").is_err());
+            assert!(tree.get("a/b/").is_err());
+            assert!(tree.get("").is_err());
+            assert!(tree.lookup(Path::new(".")).unwrap().1.is_none());
+            assert!(tree.lookup(Path::new("/")).unwrap().1.is_none());
         }
+
         {
-            let p = Path::new("/a");
-            assert_eq!(name_and_parents(p).unwrap(), (OsStr::new("a"), vec![]));
+            let mut tree = Root { root: Dir::default() };
+            tree.add_file("/a/b", File { start_block: 42, ..File::default() }).unwrap();
+            tree.upsert_dir("a", Meta { uid: 42, ..Meta::default() }).unwrap();
+            assert!(tree.upsert_dir("a/b", Meta::default()).is_err());
+            tree.upsert_dir("/", Meta { uid: 42, ..Meta::default() }).unwrap();
+            assert_eq!(tree.root.meta.uid, 42);
+            tree.upsert_dir(".", Meta { uid: 43, ..Meta::default() }).unwrap();
+            assert_eq!(tree.root.meta.uid, 43);
+            tree.upsert_dir("./", Meta { uid: 44, ..Meta::default() }).unwrap();
+            assert_eq!(tree.root.meta.uid, 44);
         }
-        {
-            let p = Path::new("a");
-            assert_eq!(name_and_parents(p).unwrap(), (OsStr::new("a"), vec![]));
-        }
-        assert_eq!(
-            name_and_parents(Path::new("/a/")).unwrap_err(),
-            Error::BadFilename
-        );
-        assert_eq!(
-            name_and_parents(Path::new("/")).unwrap_err(),
-            Error::BadFilename
-        );
     }
 
     #[test]
