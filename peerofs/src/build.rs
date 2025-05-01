@@ -170,17 +170,6 @@ struct Symlink {
 }
 
 #[derive(Debug)]
-struct Link {
-    meta: Meta,
-    start_block: u64,
-    len: usize,
-    // I think links have to duplicate the tail of the thing they point to
-    // if we have a lot of links, maybe we want to use a Rc<[u8]>
-    tail: Option<Box<[u8]>>,
-    disk_id: Option<u32>,
-}
-
-#[derive(Debug)]
 struct Dir {
     children: BTreeMap<OsString, Dirent>,
     meta: Meta,
@@ -215,7 +204,6 @@ enum Dirent {
     File(File),
     Dir(Dir),
     Symlink(Symlink),
-    Link(Link),
     Dot,
     DotDot,
 }
@@ -232,7 +220,7 @@ impl Dirent {
 
     fn file_type(&self) -> DirentFileType {
         match self {
-            Dirent::File(_) | Dirent::Link(_) => DirentFileType::RegularFile,
+            Dirent::File(_) => DirentFileType::RegularFile,
             Dirent::Symlink(_) => DirentFileType::Symlink,
             Dirent::Dot | Dirent::DotDot | Dirent::Dir(_) => DirentFileType::Directory,
         }
@@ -244,9 +232,6 @@ trait TreeVisitor {
         Ok(())
     }
     fn on_symlink(&mut self, _symlink: &mut Symlink) -> Result<(), Error> {
-        Ok(())
-    }
-    fn on_link(&mut self, _link: &mut Link) -> Result<(), Error> {
         Ok(())
     }
     fn on_dir_exit(&mut self, _dir: &mut Dir) -> Result<(), Error> {
@@ -264,9 +249,6 @@ fn walk_tree<V: TreeVisitor>(dir: &mut Dir, visitor: &mut V) -> Result<(), Error
         match child {
             Dirent::File(f) => {
                 visitor.on_file(f)?;
-            }
-            Dirent::Link(f) => {
-                visitor.on_link(f)?;
             }
             Dirent::Symlink(s) => {
                 visitor.on_symlink(s)?;
@@ -343,9 +325,14 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     // TODO use a helper for the meta
     fn on_file(&mut self, file: &mut File) -> Result<(), Error> {
+        let layout = if file.tail.is_some() {
+            Layout::FlatInline
+        } else {
+            Layout::FlatPlain
+        };
         let inode = {
             let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
+            i.format_layout = Inode::format_layout(InodeType::Extended, layout).into();
             i.mode = (FileType::RegularFile.as_raw_mode() as u16 | file.meta.mode).into();
             i.uid = file.meta.uid.into();
             i.gid = file.meta.gid.into();
@@ -370,9 +357,14 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     }
 
     fn on_symlink(&mut self, symlink: &mut Symlink) -> Result<(), Error> {
+        let layout = if symlink.tail.is_some() {
+            Layout::FlatInline
+        } else {
+            Layout::FlatPlain
+        };
         let inode = {
             let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
+            i.format_layout = Inode::format_layout(InodeType::Extended, layout).into();
             i.mode = (FileType::Symlink.as_raw_mode() as u16 | symlink.meta.mode).into();
             i.uid = symlink.meta.uid.into();
             i.gid = symlink.meta.gid.into();
@@ -393,33 +385,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         let disk_id = self.builder.write_inode(inode.as_bytes(), &symlink.tail)?;
         //println!("symlink disk_id={}", disk_id);
         let prev = symlink.disk_id.replace(disk_id);
-        assert!(prev.is_none());
-        Ok(())
-    }
-
-    fn on_link(&mut self, link: &mut Link) -> Result<(), Error> {
-        let inode = {
-            let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatInline).into();
-            i.mode = (FileType::Symlink.as_raw_mode() as u16 | link.meta.mode).into();
-            i.uid = link.meta.uid.into();
-            i.gid = link.meta.gid.into();
-            i.mtime = link.meta.mtime.into();
-            i.nlink = 1.into(); // TODO!
-            i.info = InodeInfo::raw_block(
-                link.start_block
-                    .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
-            );
-            i.size = (link.len as u64).into();
-            self.builder.hook_inode_extended(&mut i)?;
-            i
-        };
-
-        //eprintln!("link write_inode");
-        let disk_id = self.builder.write_inode(inode.as_bytes(), &link.tail)?;
-        //println!("file disk_id={}", disk_id);
-        let prev = link.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
     }
@@ -446,7 +411,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
                     Dirent::File(f) => f.disk_id,
                     Dirent::Dir(d) => d.disk_id,
                     Dirent::Symlink(d) => d.disk_id,
-                    Dirent::Link(l) => l.disk_id,
                     Dirent::Dot => dir.disk_id,
                     // if there is no parent, then this is the root dir and we point to ourselves
                     Dirent::DotDot => self.parents.last().or(dir.disk_id.as_ref()).copied(),
@@ -505,14 +469,6 @@ impl Root {
         }
         //eprintln!("add symlink {:?} {:?}", path.as_ref(), symlink);
         self.insert(path, Dirent::Symlink(symlink))
-    }
-
-    fn add_link<P: AsRef<Path>>(&mut self, path: P, link: Link) -> Result<(), Error> {
-        if path.as_ref().as_os_str().as_bytes().ends_with(b"/") {
-            return Err(Error::PathTrailingSlash);
-        }
-        //eprintln!("add link {:?} {:?}", path.as_ref(), link.target);
-        self.insert(path, Dirent::Link(link))
     }
 
     fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
@@ -928,7 +884,8 @@ impl<W: Write + Seek> Builder<W> {
 
     // NOTE: precondition is that our output stream is aligned to 32 bytes, this keeps us from
     // having to flush the BufWriter constantly
-    // we also manually maintain the self.inode_addr which
+    // we also manually maintain the self.inode_addr
+    // postcondition is that we are aligned to 32 bytes
     fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>) -> Result<u32, Error> {
         self.n_inodes += 1;
 
@@ -942,28 +899,41 @@ impl<W: Write + Seek> Builder<W> {
             }
         }
 
-        let mut written = 0;
+        let total_len = data.len() + tail.as_ref().map(|x| x.len()).unwrap_or(0);
+
+        if total_len as u64 > self.block_size() {
+            eprintln!("yo got tail too big {} {}", data.len(), total_len);
+            return Err(Error::TailTooBig);
+        }
+
+        // we have to check that our inode + tail will fit within a block, if not, advance to the
+        // next block
+        let block_no1 = self.block_no(self.inode_addr);
+        let block_no2 = self.block_no(self.inode_addr + total_len as u64);
+        if block_no1 != block_no2 {
+            let padding = self.zero_fill_block(self.inode_addr as usize)?;
+            if cfg!(debug_assertions) {
+                assert!(self.block_addr(block_no2) == self.inode_addr + padding);
+            }
+            self.inode_addr = self.block_addr(block_no2);
+        }
+
+        debug_assert!(
+            self.block_no(self.inode_addr) == self.block_no(self.inode_addr + total_len as u64)
+        );
+
         //eprintln!("write_inode pos after seek_align {}", self.writer.stream_position()?);
         let disk_id = self.addr_to_disk_id(self.inode_addr)?;
         self.writer.write_all(data)?;
-        written += data.len();
 
         if let Some(tail) = tail {
             self.writer.write_all(tail)?;
-            written += tail.len();
         }
 
-        let padding = self.zero_fill(written, INODE_ALIGNMENT)?;
-        self.inode_addr += written as u64 + padding;
+        let padding = self.zero_fill(total_len, INODE_ALIGNMENT)?;
+        self.inode_addr += total_len as u64 + padding;
 
-        if cfg!(debug_assertions) {
-            if self.inode_addr % INODE_ALIGNMENT != 0 {
-                eprintln!(
-                    "inode not aligned afterwards written={} padding={}",
-                    written, padding
-                );
-            }
-        }
+        debug_assert!(self.inode_addr % INODE_ALIGNMENT == 0);
 
         Ok(disk_id)
     }
@@ -1026,23 +996,29 @@ impl<W: Write + Seek> Builder<W> {
         let root = self.root.as_mut().expect("not none");
         for (path, target, meta) in std::mem::take(&mut self.links).into_iter() {
             let (start_block, len, tail) = {
+                // TODO we're not handling the case of multiple hardlinks that try to get resolved
+                // in the wrong order like:
+                // FILE /x
+                // LINK /y -> /z
+                // LINK /z -> /x
+                // is valid but we would try to resolve in the order they come and not in graph
+                // order
                 match root.get(&target)?.ok_or(Error::HardlinkNotResolved)? {
                     Dirent::File(f) => Ok((f.start_block, f.len, f.tail.clone())),
                     Dirent::Symlink(s) => Ok((s.start_block, s.len, s.tail.clone())),
                     Dirent::Dot | Dirent::DotDot | Dirent::Dir(_) => Err(Error::HardlinkToDir),
-                    Dirent::Link(_) => Err(Error::HardlinkMultiNotHandled),
                 }?
             };
-            let _ = root.insert(
+            root.add_file(
                 path,
-                Dirent::Link(Link {
+                File {
                     meta,
                     start_block,
                     len,
                     tail,
                     disk_id: None,
-                }),
-            );
+                },
+            )?;
         }
         Ok(())
     }
@@ -1063,13 +1039,15 @@ impl<W: Write + Seek> Builder<W> {
     }
 }
 
-// TODO this could create too long of a tail (tails should be roughly half a block size or smaller
-// I think
 fn size_tail_len(len: usize, block_size_bits: u8) -> (usize, usize, usize) {
     let block_size = 1usize << block_size_bits;
     let n_blocks = len / block_size;
     let tail_len = len % block_size;
-    (n_blocks, n_blocks * block_size, tail_len)
+    if tail_len > block_size / 2 {
+        (n_blocks + 1, len, 0)
+    } else {
+        (n_blocks, n_blocks * block_size, tail_len)
+    }
 }
 
 #[cfg(test)]
@@ -1489,7 +1467,37 @@ mod tests {
             E::file("/a/b/c/d/e/x", b"foo"),
             E::symlink("/y", "/x"),
             E::link("/dir/link", "/x"),
-        ])
+        ]);
+    }
+
+    #[test]
+    fn test_fsck_tails() {
+        check_erofs_fsck!(vec![
+            E::file("/x", &vec![0; 4095]),
+            E::file("/y", &vec![0; 4097]),
+            E::file("/z", &vec![0; 4096 + 2047]),
+            E::file("/a", &vec![0; 4096 + 2048]),
+            E::file("/b", &vec![0; 4096 + 2049]),
+        ]);
+    }
+
+    #[test]
+    fn test_fsck_big_dir() {
+        // a dirent is 8 bytes, to evenly fill a whole (4096) block we can have
+        // 128 entries with name length of 24
+        {
+            let mut entries = vec![];
+            // start counting at 1000, this gives us names from 1000 to 1127 and then we append 20
+            // 0's to the end to get total length 24
+            let start = 1000;
+            let suffix = String::from_utf8(vec![30u8; 20]).unwrap();
+            for i in start..(start + 128) {
+                let name = format!("{}{}", i, suffix);
+                assert!(name.len() == 24);
+                entries.push(E::file(name, b"data"));
+            }
+            check_erofs_fsck!(entries);
+        }
     }
 
     #[test]
