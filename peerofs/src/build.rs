@@ -68,6 +68,7 @@ use crate::disk::{
 // - BufWriter always flushes on seek, which is a bit annoying since I was expecting it to keep track of
 // where we are and only flush if necessary
 // - xattrs
+// - track stats and return them
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -902,7 +903,6 @@ impl<W: Write + Seek> Builder<W> {
         let total_len = data.len() + tail.as_ref().map(|x| x.len()).unwrap_or(0);
 
         if total_len as u64 > self.block_size() {
-            eprintln!("yo got tail too big {} {}", data.len(), total_len);
             return Err(Error::TailTooBig);
         }
 
@@ -912,9 +912,7 @@ impl<W: Write + Seek> Builder<W> {
         let block_no2 = self.block_no(self.inode_addr + total_len as u64);
         if block_no1 != block_no2 {
             let padding = self.zero_fill_block(self.inode_addr as usize)?;
-            if cfg!(debug_assertions) {
-                assert!(self.block_addr(block_no2) == self.inode_addr + padding);
-            }
+            debug_assert!(self.block_addr(block_no2) == self.inode_addr + padding);
             self.inode_addr = self.block_addr(block_no2);
         }
 
@@ -922,7 +920,6 @@ impl<W: Write + Seek> Builder<W> {
             self.block_no(self.inode_addr) == self.block_no(self.inode_addr + total_len as u64)
         );
 
-        //eprintln!("write_inode pos after seek_align {}", self.writer.stream_position()?);
         let disk_id = self.addr_to_disk_id(self.inode_addr)?;
         self.writer.write_all(data)?;
 
