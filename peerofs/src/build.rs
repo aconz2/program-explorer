@@ -10,7 +10,7 @@ use zerocopy::{FromZeros, IntoBytes};
 use crate::disk;
 use crate::disk::{
     DirentFileType, Inode, InodeExtended, InodeInfo, InodeType, Layout, Superblock,
-    EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET,
+    EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, INODE_ALIGNMENT,
 };
 
 // NOTES:
@@ -24,6 +24,9 @@ use crate::disk::{
 // we use tail packing, we have to keep the tails in memory until writing out the inodes.
 //
 // A bit more detail, currently the strategy is
+// Phase 0:
+//  - Resolve all hardlinks. If a hardlink resolves to a FlatInline node, we have to copy
+//  the tail storage
 // Phase 1:
 //  - Add files which builds up an in memory tree of dirs + files
 //  - Adding a file appends data to the output file in blocks
@@ -56,7 +59,7 @@ use crate::disk::{
 // Overall, paths are tricky (as always) and the rules for what paths we accept are:
 // - `.` `./` `/` can be used for upsert_dir of the root
 // - leading `/` or `./` can be used for files
-// - trailing `/` is forbidden except for the root dir
+// - trailing `/` is only allowed on dirs
 // - things with `.` in the middle are skipped by Path::components internally
 // - things with `..` are forbidden
 // - the empty path is forbidden
@@ -120,6 +123,7 @@ pub struct Builder<W: Write + Seek> {
     n_inodes: u64,
     dir_inode_id: u64,
     links: Vec<(PathBuf, PathBuf, Meta)>,
+    inode_addr: u64,
 }
 
 #[derive(Debug)]
@@ -323,7 +327,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
                 dir.start_block
                     .ok_or(Error::NoStartBlock)?
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?
+                    .map_err(|_| Error::FileBlockTooBig)?,
             );
             i.size = dir.total_size.into();
 
@@ -350,7 +354,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i.info = InodeInfo::raw_block(
                 file.start_block
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?
+                    .map_err(|_| Error::FileBlockTooBig)?,
             );
             i.size = (file.len as u64).into();
             self.builder.hook_inode_extended(&mut i)?;
@@ -378,7 +382,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
                 symlink
                     .start_block
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?
+                    .map_err(|_| Error::FileBlockTooBig)?,
             );
             i.size = (symlink.len as u64).into();
             self.builder.hook_inode_extended(&mut i)?;
@@ -405,7 +409,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             i.info = InodeInfo::raw_block(
                 link.start_block
                     .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?
+                    .map_err(|_| Error::FileBlockTooBig)?,
             );
             i.size = (link.len as u64).into();
             self.builder.hook_inode_extended(&mut i)?;
@@ -413,7 +417,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         };
 
         //eprintln!("link write_inode");
-        // TODO wait how are hardlink tails handled!!!!
         let disk_id = self.builder.write_inode(inode.as_bytes(), &link.tail)?;
         //println!("file disk_id={}", disk_id);
         let prev = link.disk_id.replace(disk_id);
@@ -423,14 +426,8 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 }
 
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
+    // write dirents in same order as we reserved their blocks so that writes are contiguous
     fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
-        self.parents.push(dir.disk_id.ok_or(Error::NoDiskId)?);
-        Ok(())
-    }
-
-    fn on_dir_exit(&mut self, dir: &mut Dir) -> Result<(), Error> {
-        self.parents.pop();
-
         let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
         self.builder.seek_block(start_block)?;
 
@@ -440,6 +437,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
         for count in dir.n_dirents_per_block.iter() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
+            let mut written = 0;
 
             for _ in 0..count {
                 let (name, child) = iter.next().expect("Missing child");
@@ -467,33 +465,52 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
                 };
 
                 //println!("writing entry for {:?}", name);
+                written += dirent.as_bytes().len();
+                written += name.as_bytes().len();
                 self.builder.writer.write_all(dirent.as_bytes())?;
                 self.builder.name_buf.extend(name.as_bytes());
 
                 name_offset += name.as_bytes().len();
             }
+
             self.builder.writer.write_all(&self.builder.name_buf)?;
-            self.builder.zero_fill_rest_of_page()?;
+            self.builder.zero_fill_block(written)?;
+            self.builder.cur_data_block += 1;
 
             self.builder.name_buf.clear();
         }
 
+        self.parents.push(dir.disk_id.ok_or(Error::NoDiskId)?);
+        Ok(())
+    }
+
+    fn on_dir_exit(&mut self, _dir: &mut Dir) -> Result<(), Error> {
+        self.parents.pop();
         Ok(())
     }
 }
 
 impl Root {
     fn add_file<P: AsRef<Path>>(&mut self, path: P, file: File) -> Result<(), Error> {
+        if path.as_ref().as_os_str().as_bytes().ends_with(b"/") {
+            return Err(Error::PathTrailingSlash);
+        }
         //eprintln!("add file {:?}", path.as_ref());
         self.insert(path, Dirent::File(file))
     }
 
     fn add_symlink<P: AsRef<Path>>(&mut self, path: P, symlink: Symlink) -> Result<(), Error> {
+        if path.as_ref().as_os_str().as_bytes().ends_with(b"/") {
+            return Err(Error::PathTrailingSlash);
+        }
         //eprintln!("add symlink {:?} {:?}", path.as_ref(), symlink);
         self.insert(path, Dirent::Symlink(symlink))
     }
 
     fn add_link<P: AsRef<Path>>(&mut self, path: P, link: Link) -> Result<(), Error> {
+        if path.as_ref().as_os_str().as_bytes().ends_with(b"/") {
+            return Err(Error::PathTrailingSlash);
+        }
         //eprintln!("add link {:?} {:?}", path.as_ref(), link.target);
         self.insert(path, Dirent::Link(link))
     }
@@ -501,11 +518,12 @@ impl Root {
     fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
         //eprintln!("upsert dir {:?}", path.as_ref());
         match self.lookup_create(path.as_ref())? {
-            (dir, None) =>  { // root
+            (dir, None) => {
+                // root
                 dir.meta = meta;
                 Ok(())
             }
-            (dir, Some(name)) =>  {
+            (dir, Some(name)) => {
                 let dir = dir.get_or_create_dir(name)?;
                 dir.meta = meta;
                 Ok(())
@@ -535,7 +553,10 @@ impl Root {
         }
     }
 
-    fn lookup_create<'a>(&mut self, path: &'a Path) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
+    fn lookup_create<'a>(
+        &mut self,
+        path: &'a Path,
+    ) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
         self.lookup_impl(path, true)
     }
 
@@ -546,13 +567,21 @@ impl Root {
     // ugly but idk
     // returns the dir and optionally the final name component (since the root dir has no name).
     // takes/returns &mut to cover both cases of creating the dirs on the way or not
-    fn lookup_impl<'a>(&mut self, path: &'a Path, create: bool) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
+    // trailing slash should be handled by caller since it is okay for dirs but not for files
+    fn lookup_impl<'a>(
+        &mut self,
+        path: &'a Path,
+        create: bool,
+    ) -> Result<(&mut Dir, Option<&'a OsStr>), Error> {
         use std::path::Component::*;
 
         match path.as_os_str().as_bytes() {
-            b"" => { return Err(Error::EmptyPath); }
-            b"." | b"./" | b"/" => { return Ok((&mut self.root, None)); }
-            b if b.ends_with(b"/") => { return Err(Error::PathTrailingSlash); }
+            b"" => {
+                return Err(Error::EmptyPath);
+            }
+            b"." | b"./" | b"/" => {
+                return Ok((&mut self.root, None));
+            }
             _ => {}
         }
 
@@ -564,23 +593,34 @@ impl Root {
                 if let Some(part) = iter.next() {
                     if iter.peek().is_none() {
                         match part {
-                            Normal(part) => { break Some(part); },
-                            CurDir => { break None; },
-                            _ =>  { return Err(Error::WeirdPath); }
+                            Normal(part) => {
+                                break Some(part);
+                            }
+                            CurDir => {
+                                break None;
+                            }
+                            _ => {
+                                return Err(Error::WeirdPath);
+                            }
                         }
                     }
                     match part {
                         // CurDir/RootDir can only come at the beginning and we ignore it
-                        CurDir | RootDir => { continue; },
-                        Prefix(_) => { return Err(Error::UnhandledPrefixComponent); }
-                        ParentDir => { return Err(Error::PathWithDotDot); }
+                        CurDir | RootDir => {
+                            continue;
+                        }
+                        Prefix(_) => {
+                            return Err(Error::UnhandledPrefixComponent);
+                        }
+                        ParentDir => {
+                            return Err(Error::PathWithDotDot);
+                        }
                         Normal(part) => {
                             if create {
                                 cur = cur.get_or_create_dir(part)?;
                             } else {
                                 cur = cur.get_dir(part)?;
                             }
-
                         }
                     }
                 } else {
@@ -590,7 +630,6 @@ impl Root {
         };
         Ok((cur, name))
     }
-
 }
 
 impl Dir {
@@ -606,21 +645,14 @@ impl Dir {
             .or_insert_with(|| Dirent::Dir(Dir::default()))
         {
             Dirent::Dir(d) => Ok(d),
-            _ => {
-                Err(Error::NotADir)
-            }
+            _ => Err(Error::NotADir),
         }
     }
 
     fn get_dir(&mut self, name: &OsStr) -> Result<&mut Dir, Error> {
-        match self
-            .children
-            .get_mut(name)
-        {
+        match self.children.get_mut(name) {
             Some(Dirent::Dir(d)) => Ok(d),
-            _ => {
-                Err(Error::NotADir)
-            }
+            _ => Err(Error::NotADir),
         }
     }
 
@@ -688,8 +720,11 @@ impl<W: Write + Seek> Builder<W> {
             n_inodes: 0,
             dir_inode_id: 0,
             links: vec![],
+            inode_addr: 0,
         };
-        ret.seek_block(ret.cur_data_block)?;
+        // manually advance to first block
+        ret.writer
+            .seek(SeekFrom::Start(ret.block_addr(ret.cur_data_block)))?;
         Ok(ret)
     }
 
@@ -705,39 +740,31 @@ impl<W: Write + Seek> Builder<W> {
         block * self.block_size()
     }
 
-    fn n_blocks_roundup(&self, len: u64) -> u64 {
-        let n = len / self.block_size();
-        let l = n * self.block_size();
-        if l < len {
-            n + 1
-        } else {
-            n
-        }
-    }
-
     fn seek_block(&mut self, block: u64) -> Result<(), Error> {
-        let _ = self.writer.seek(SeekFrom::Start(self.block_addr(block)))?;
+        if self.cur_data_block != block {
+            let _ = self.writer.seek(SeekFrom::Start(self.block_addr(block)))?;
+            self.cur_data_block = block;
+        }
         Ok(())
     }
 
-    fn seek_align(&mut self, size: u64, tail: &Option<Box<[u8]>>) -> Result<u64, Error> {
-        let mut cur = self.writer.stream_position()?;
-        let rem = cur % size;
+    fn zero_fill_block(&mut self, written: usize) -> Result<u64, Error> {
+        self.zero_fill(written, self.block_size())
+    }
+
+    fn zero_fill(&mut self, written: usize, alignment: u64) -> Result<u64, Error> {
+        let written = written as u64;
+        let rem = written % alignment;
         if rem != 0 {
-            cur += size - rem;
-        }
-        if let Some(tail) = tail {
-            let len = tail.len() as u64;
-            if len > self.block_size() {
-                return Err(Error::TailTooBig);
+            let n = alignment - rem;
+            // TODO is there something better for bufwriter to zero fill like this?
+            for _ in 0..n {
+                self.writer.write_all(&[0])?;
             }
-            let block_no1 = self.block_no(cur);
-            let block_no2 = self.block_no(cur + len);
-            if block_no1 != block_no2 {
-                cur = self.block_addr(block_no2);
-            }
+            Ok(n)
+        } else {
+            Ok(0)
         }
-        Ok(self.writer.seek(SeekFrom::Start(cur))?)
     }
 
     fn addr_to_disk_id(&self, addr: u64) -> Result<u32, Error> {
@@ -747,23 +774,10 @@ impl<W: Write + Seek> Builder<W> {
             return Err(Error::AddrLessThanMetaBlock);
         }
         let offset = addr - meta_addr;
-        if offset % 32 != 0 {
+        if offset % INODE_ALIGNMENT != 0 {
             return Err(Error::AddrNotAligned);
         }
         (offset / 32).try_into().map_err(|_| Error::DiskIdTooBig)
-    }
-
-    fn zero_fill_rest_of_page(&mut self) -> Result<(), Error> {
-        let cur = self.writer.stream_position()?;
-        let rem = cur % self.block_size();
-        if rem != 0 {
-            let n = self.block_size() - rem;
-            //println!("zero fill {n}");
-            for _ in 0..n {
-                self.writer.write_all(&[0])?;
-            }
-        }
-        Ok(())
     }
 
     fn hook_inode_extended(&self, inode: &mut InodeExtended) -> Result<(), Error> {
@@ -779,6 +793,7 @@ impl<W: Write + Seek> Builder<W> {
     }
 
     // we require the size up front so that we can calculate tail len
+    // also precondition is that writer is aligned to block size
     pub fn add_file<P: AsRef<Path>, R: Read>(
         &mut self,
         path: P,
@@ -787,12 +802,38 @@ impl<W: Write + Seek> Builder<W> {
         contents: &mut R,
     ) -> Result<(), Error> {
         let (n_blocks, block_len, tail_len) = size_tail_len(len, self.block_size_bits);
-        // TODO if tail_len > block_size/2, skip tail packing
+        // TODO maybe only store start_block if we use it, there's nothing bad that would happen
+        // but seems a bit cleaner
+        if cfg!(debug_assertions) {
+            let cur = self.writer.stream_position()?;
+            if cur % self.block_size() != 0 {
+                panic!(
+                    "writer not aligned to block size {}, at {}",
+                    self.block_size(),
+                    cur
+                );
+            }
+            if cur / self.block_size() != self.cur_data_block {
+                panic!(
+                    "writer not at cur={} cur_data_block={}, at {}",
+                    cur,
+                    self.cur_data_block,
+                    cur / self.block_size()
+                );
+            }
+        }
         let start_block = self.cur_data_block;
-        self.seek_block(self.cur_data_block)?;
-        std::io::copy(&mut contents.take(block_len as u64), &mut self.writer)?;
-        self.cur_data_block += n_blocks as u64;
+        if block_len > 0 {
+            //self.seek_block(self.cur_data_block)?;
+            std::io::copy(&mut contents.take(block_len as u64), &mut self.writer)?;
+            self.cur_data_block += n_blocks as u64;
+
+            // block_len is not necessarily a multiple of blocks, so zero fill the rest
+            // we could also seek but that causes a buffer flush and seek
+            self.zero_fill_block(block_len)?;
+        }
         let tail = if tail_len > 0 {
+            // TODO could we ever figure out how to read into uninit vector?
             let mut buf = vec![0; tail_len];
             contents.read_exact(&mut buf)?;
             Some(buf.into_boxed_slice())
@@ -853,7 +894,8 @@ impl<W: Write + Seek> Builder<W> {
         target: P2,
         meta: Meta,
     ) -> Result<(), Error> {
-        self.links.push((path.as_ref().into(), target.as_ref().into(), meta));
+        self.links
+            .push((path.as_ref().into(), target.as_ref().into(), meta));
         Ok(())
     }
 
@@ -884,16 +926,45 @@ impl<W: Write + Seek> Builder<W> {
         Ok(())
     }
 
+    // NOTE: precondition is that our output stream is aligned to 32 bytes, this keeps us from
+    // having to flush the BufWriter constantly
+    // we also manually maintain the self.inode_addr which
     fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>) -> Result<u32, Error> {
         self.n_inodes += 1;
-        //eprintln!("write_inode pos before seek_align {}", self.writer.stream_position()?);
-        let addr = self.seek_align(32, tail)?;
+
+        if cfg!(debug_assertions) {
+            let cur = self.writer.stream_position()?;
+            if cur % INODE_ALIGNMENT != 0 {
+                panic!(
+                    "writer not aligned to inode alignment {}, at {}",
+                    INODE_ALIGNMENT, cur
+                );
+            }
+        }
+
+        let mut written = 0;
         //eprintln!("write_inode pos after seek_align {}", self.writer.stream_position()?);
-        let disk_id = self.addr_to_disk_id(addr)?;
+        let disk_id = self.addr_to_disk_id(self.inode_addr)?;
         self.writer.write_all(data)?;
+        written += data.len();
+
         if let Some(tail) = tail {
             self.writer.write_all(tail)?;
+            written += tail.len();
         }
+
+        let padding = self.zero_fill(written, INODE_ALIGNMENT)?;
+        self.inode_addr += written as u64 + padding;
+
+        if cfg!(debug_assertions) {
+            if self.inode_addr % INODE_ALIGNMENT != 0 {
+                eprintln!(
+                    "inode not aligned afterwards written={} padding={}",
+                    written, padding
+                );
+            }
+        }
+
         Ok(disk_id)
     }
 
@@ -916,9 +987,19 @@ impl<W: Write + Seek> Builder<W> {
         // NOTE without tail packing for dir
         let reserve_for_dirs = (std::mem::size_of::<disk::InodeExtended>() * self.n_dirs) as u64;
 
-        self.writer.seek(SeekFrom::Start(
-            self.block_addr(meta_block) + reserve_for_dirs,
-        ))?;
+        self.inode_addr = self.block_addr(meta_block) + reserve_for_dirs;
+        self.writer.seek(SeekFrom::Start(self.inode_addr))?;
+
+        if cfg!(debug_assertions) {
+            // this is currently guaranteed without dirent tail packing but could change
+            if self.inode_addr % INODE_ALIGNMENT != 0 {
+                panic!(
+                    "before writing inodes we must be aligned, at {}",
+                    self.inode_addr
+                );
+            }
+        }
+
         walk_tree(
             &mut root.root,
             &mut BuilderTreeVisitorWriteInodes { builder: self },
@@ -942,7 +1023,7 @@ impl<W: Write + Seek> Builder<W> {
     }
 
     fn resolve_links(&mut self) -> Result<(), Error> {
-        let mut root = self.root.as_mut().expect("not none");
+        let root = self.root.as_mut().expect("not none");
         for (path, target, meta) in std::mem::take(&mut self.links).into_iter() {
             let (start_block, len, tail) = {
                 match root.get(&target)?.ok_or(Error::HardlinkNotResolved)? {
@@ -952,13 +1033,16 @@ impl<W: Write + Seek> Builder<W> {
                     Dirent::Link(_) => Err(Error::HardlinkMultiNotHandled),
                 }?
             };
-            let _ = root.insert(path, Dirent::Link(Link {
-                meta,
-                start_block,
-                len,
-                tail,
-                disk_id: None,
-            }));
+            let _ = root.insert(
+                path,
+                Dirent::Link(Link {
+                    meta,
+                    start_block,
+                    len,
+                    tail,
+                    disk_id: None,
+                }),
+            );
         }
         Ok(())
     }
@@ -977,7 +1061,6 @@ impl<W: Write + Seek> Builder<W> {
             .into_inner()
             .map_err(|e| Error::Io(e.error().kind()))
     }
-
 }
 
 // TODO this could create too long of a tail (tails should be roughly half a block size or smaller
@@ -1030,7 +1113,11 @@ mod tests {
             match x {
                 FileType::RegularFile => EntryTyp::File,
                 FileType::Directory => EntryTyp::Dir,
-                _ => todo!(),
+                FileType::Symlink => EntryTyp::Symlink,
+                FileType::Unknown => {
+                    panic!("Tried to convert FileType::Unknown");
+                }
+                _ => todo!("file type conversion {:?}", x),
             }
         }
     }
@@ -1233,12 +1320,22 @@ mod tests {
     #[test]
     fn test_tree_operations() {
         // add "a/b" then "/a/b" and lookup with both "a/b" and "/a/b" and should give the same positive result
-        for prefix in ["", "/", "./"]{
-            let mut tree = Root { root: Dir::default() };
-            tree.add_file(format!("{}{}", prefix, "a/b"), File { start_block: 42, ..File::default() }).unwrap();
+        for prefix in ["", "/", "./"] {
+            let mut tree = Root {
+                root: Dir::default(),
+            };
+            tree.add_file(
+                format!("{}{}", prefix, "a/b"),
+                File {
+                    start_block: 42,
+                    ..File::default()
+                },
+            )
+            .unwrap();
             assert!(tree.get("foo").unwrap().is_none());
-            for prefix2 in ["", "/", "./"]{
-                if let Dirent::File(f) = tree.get(format!("{}{}", prefix2, "a/b")).unwrap().unwrap() {
+            for prefix2 in ["", "/", "./"] {
+                if let Dirent::File(f) = tree.get(format!("{}{}", prefix2, "a/b")).unwrap().unwrap()
+                {
                     assert_eq!(f.start_block, 42);
                 } else {
                     assert!(false);
@@ -1247,25 +1344,80 @@ mod tests {
         }
 
         {
-            let mut tree = Root { root: Dir::default() };
-            tree.add_file("/a/b", File { start_block: 42, ..File::default() }).unwrap();
+            let mut tree = Root {
+                root: Dir::default(),
+            };
+            tree.add_file(
+                "/a/b",
+                File {
+                    start_block: 42,
+                    ..File::default()
+                },
+            )
+            .unwrap();
             assert!(tree.get("/a/../a/b").is_err());
-            assert!(tree.get("a/b/").is_err());
             assert!(tree.get("").is_err());
             assert!(tree.lookup(Path::new(".")).unwrap().1.is_none());
             assert!(tree.lookup(Path::new("/")).unwrap().1.is_none());
         }
 
         {
-            let mut tree = Root { root: Dir::default() };
-            tree.add_file("/a/b", File { start_block: 42, ..File::default() }).unwrap();
-            tree.upsert_dir("a", Meta { uid: 42, ..Meta::default() }).unwrap();
+            let mut tree = Root {
+                root: Dir::default(),
+            };
+            tree.add_file(
+                "/a/b",
+                File {
+                    start_block: 42,
+                    ..File::default()
+                },
+            )
+            .unwrap();
+            tree.upsert_dir(
+                "a",
+                Meta {
+                    uid: 42,
+                    ..Meta::default()
+                },
+            )
+            .unwrap();
+            tree.upsert_dir(
+                "a/",
+                Meta {
+                    uid: 42,
+                    ..Meta::default()
+                },
+            )
+            .unwrap();
+
             assert!(tree.upsert_dir("a/b", Meta::default()).is_err());
-            tree.upsert_dir("/", Meta { uid: 42, ..Meta::default() }).unwrap();
+
+            tree.upsert_dir(
+                "/",
+                Meta {
+                    uid: 42,
+                    ..Meta::default()
+                },
+            )
+            .unwrap();
             assert_eq!(tree.root.meta.uid, 42);
-            tree.upsert_dir(".", Meta { uid: 43, ..Meta::default() }).unwrap();
+            tree.upsert_dir(
+                ".",
+                Meta {
+                    uid: 43,
+                    ..Meta::default()
+                },
+            )
+            .unwrap();
             assert_eq!(tree.root.meta.uid, 43);
-            tree.upsert_dir("./", Meta { uid: 44, ..Meta::default() }).unwrap();
+            tree.upsert_dir(
+                "./",
+                Meta {
+                    uid: 44,
+                    ..Meta::default()
+                },
+            )
+            .unwrap();
             assert_eq!(tree.root.meta.uid, 44);
         }
     }

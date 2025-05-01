@@ -6,6 +6,7 @@ use zerocopy::{FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 pub const EROFS_SUPER_OFFSET: usize = 1024;
 pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
+pub const INODE_ALIGNMENT: u64 = 32;
 
 // NOTES:
 // - inode ino is a sequential number, but will not match the nid you look it up with; ie the
