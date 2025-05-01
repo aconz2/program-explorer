@@ -959,13 +959,12 @@ impl<W: Write + Seek> Builder<W> {
                 tail,
                 disk_id: None,
             }));
-            //root.as_mut().expect("not none").add_link(path, link)
         }
         Ok(())
     }
 
     fn finalize(&mut self) -> Result<(), Error> {
-        //self.resolve_links()?;
+        self.resolve_links()?;
         self.write_inodes()?;
         self.write_superblock()?;
         self.writer.flush()?;
