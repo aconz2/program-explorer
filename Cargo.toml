@@ -4,3 +4,7 @@ members = ["pearchive", "peerofs", "peimage", "peinit", "perunner", "peserver", 
 
 [workspace.lints.clippy]
 redundant_field_names = "allow"
+
+# reminder on how to do this
+# [patch.crates-io]
+# libz-ng-sys = { path = '../libz-sys' }

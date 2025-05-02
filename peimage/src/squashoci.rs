@@ -4,7 +4,7 @@ use std::io::BufWriter;
 use std::os::fd::FromRawFd;
 
 use peimage::oci::load_layers_from_oci;
-use peimage::squash::{squash_to_tar, squash_to_erofs};
+use peimage::squash::{squash_to_erofs, squash_to_tar};
 
 fn main() {
     let args: Vec<_> = env::args().collect();

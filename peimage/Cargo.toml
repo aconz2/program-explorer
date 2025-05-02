@@ -19,6 +19,10 @@ rustix = "1.0.5"
 zstd = "0.13.3"
 peerofs = { version = "0.1.0", path = "../peerofs" }
 
+[features]
+# skip CRC32 calculation when reading from gzip files, not sure this is a good idea or not
+nocrc = []
+
 [lib]
 path = "src/lib.rs"
 

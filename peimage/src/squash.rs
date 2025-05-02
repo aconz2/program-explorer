@@ -1,17 +1,19 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::io::{BufReader, Read, Write, Seek};
+use std::io::{BufReader, Read, Seek, Write};
 use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
+#[cfg(feature="nocrc")]
+use flate2::bufread::DeflateDecoder;
 use oci_spec::image::MediaType;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
 
-use peerofs::build::{Builder as ErofsBuilder, Meta as ErofsMeta, Error as ErofsError};
+use peerofs::build::{Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta};
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -235,8 +237,14 @@ struct SquashToErofs<W: Write + Seek> {
 
 fn header_to_meta(header: &tar::Header) -> Result<ErofsMeta, SquashError> {
     let mut meta = ErofsMeta::default();
-    meta.uid = header.uid()?.try_into().map_err(|_| SquashError::UidTooBig)?;
-    meta.gid = header.gid()?.try_into().map_err(|_| SquashError::GidTooBig)?;
+    meta.uid = header
+        .uid()?
+        .try_into()
+        .map_err(|_| SquashError::UidTooBig)?;
+    meta.gid = header
+        .gid()?
+        .try_into()
+        .map_err(|_| SquashError::GidTooBig)?;
     Ok(meta)
 }
 
@@ -261,12 +269,8 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
         match entry.header().entry_type() {
             EntryType::Regular => {
                 let path = entry.path()?.into_owned();
-                self.builder.add_file(
-                    path,
-                    meta,
-                    header.size()? as usize,
-                    entry
-                )?;
+                self.builder
+                    .add_file(path, meta, header.size()? as usize, entry)?;
             }
             EntryType::Directory => {
                 let path = entry.path()?.into_owned();
@@ -414,16 +418,26 @@ where
                     i,
                     &mut stats,
                     &mut deletions,
-                    Archive::new(BufReader::new(&mut *reader)),
+                    Archive::new(BufReader::with_capacity(32 * 1024, &mut *reader)),
                 )?;
             }
             Compression::Gzip => {
+                #[cfg(feature = "nocrc")]
+                let reader = {
+                    let reader = GzDecoder::new(BufReader::new(&mut *reader));
+                    let _ = reader
+                        .header()
+                        .expect("only way this can be none is if reader EWOULDBLOCK");
+                    Archive::new(DeflateDecoder::new(reader.into_inner()))
+                };
+                #[cfg(not(feature="nocrc"))]
+                let reader = Archive::new(GzDecoder::new(BufReader::with_capacity(32 * 1024, &mut *reader)));
                 squash_layer(
                     cb,
                     i,
                     &mut stats,
                     &mut deletions,
-                    Archive::new(GzDecoder::new(&mut *reader)),
+                    reader,
                 )?;
             }
             Compression::Zstd => {

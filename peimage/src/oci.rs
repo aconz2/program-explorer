@@ -38,20 +38,23 @@ fn load_blob(blobs: &Path, layer: &Descriptor) -> Result<(Compression, File), Er
     let compression = match layer.media_type() {
         // is this a thing? I don't think so
         //MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar" => Compression::None,
-        MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar.gzip" => Compression::Gzip,
+        MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
+            Compression::Gzip
+        }
         // I don't think this ever made its way into the wild?
         //MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar.zstd" => Compression::Zstd,
-        MediaType::ImageManifest => {
-            layer
+        MediaType::ImageManifest => layer
             .artifact_type()
             .as_ref()
             .ok_or(Error::NoMediaType)?
             .try_into()
-            .map_err(|_| Error::BadMediaType)?
+            .map_err(|_| Error::BadMediaType)?,
+        _ => {
+            return Err(Error::BadMediaType);
         }
-        _ => { return Err(Error::BadMediaType); }
     };
     let file = File::open(blobs.join(digest_path(layer.digest()))).map_err(Into::<Error>::into)?;
+    eprintln!("file size {:?}", file.metadata()?.len());
     Ok((compression, file))
 }
 
