@@ -54,7 +54,6 @@ fn load_blob(blobs: &Path, layer: &Descriptor) -> Result<(Compression, File), Er
         }
     };
     let file = File::open(blobs.join(digest_path(layer.digest()))).map_err(Into::<Error>::into)?;
-    eprintln!("file size {:?}", file.metadata()?.len());
     Ok((compression, file))
 }
 

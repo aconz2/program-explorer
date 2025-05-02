@@ -65,10 +65,8 @@ use crate::disk::{
 // - the empty path is forbidden
 //
 // TODO
-// - BufWriter always flushes on seek, which is a bit annoying since I was expecting it to keep track of
-// where we are and only flush if necessary
 // - xattrs
-// - track stats and return them
+// - link count, do they actually matter?
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -110,6 +108,16 @@ impl From<std::io::Error> for Error {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Stats {
+    files: usize,
+    symlinks: usize,
+    dirs: usize,
+    tails: usize,
+    tail_size: usize,
+    block_end_padding: usize,
+}
+
 pub struct Builder<W: Write + Seek> {
     root: Option<Root>,
     increment_uid_gid: Option<u32>,
@@ -125,6 +133,7 @@ pub struct Builder<W: Write + Seek> {
     dir_inode_id: u64,
     links: Vec<(PathBuf, PathBuf, Meta)>,
     inode_addr: u64,
+    stats: Stats,
 }
 
 #[derive(Debug)]
@@ -286,6 +295,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
             dir.prepare_dirent_data(self.builder.block_size(), self.builder.cur_data_block);
 
         self.builder.n_dirs += 1;
+        self.builder.stats.dirs += 1;
         self.builder.cur_data_block += n_blocks;
 
         let disk_id: u32 = self
@@ -326,6 +336,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     // TODO use a helper for the meta
     fn on_file(&mut self, file: &mut File) -> Result<(), Error> {
+        self.builder.stats.files += 1;
         let layout = if file.tail.is_some() {
             Layout::FlatInline
         } else {
@@ -358,6 +369,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     }
 
     fn on_symlink(&mut self, symlink: &mut Symlink) -> Result<(), Error> {
+        self.builder.stats.symlinks += 1;
         let layout = if symlink.tail.is_some() {
             Layout::FlatInline
         } else {
@@ -678,6 +690,7 @@ impl<W: Write + Seek> Builder<W> {
             dir_inode_id: 0,
             links: vec![],
             inode_addr: 0,
+            stats: Stats::default(),
         };
         // manually advance to first block
         ret.writer
@@ -714,6 +727,7 @@ impl<W: Write + Seek> Builder<W> {
         let rem = written % alignment;
         if rem != 0 {
             let n = alignment - rem;
+            self.stats.block_end_padding += n as usize;
             // TODO is there something better for bufwriter to zero fill like this?
             for _ in 0..n {
                 self.writer.write_all(&[0])?;
@@ -924,6 +938,8 @@ impl<W: Write + Seek> Builder<W> {
         self.writer.write_all(data)?;
 
         if let Some(tail) = tail {
+            self.stats.tails += 1;
+            self.stats.tail_size += tail.len();
             self.writer.write_all(tail)?;
         }
 
@@ -1028,11 +1044,12 @@ impl<W: Write + Seek> Builder<W> {
         Ok(())
     }
 
-    pub fn into_inner(mut self) -> Result<W, Error> {
+    pub fn into_inner(mut self) -> Result<(Stats, W), Error> {
         self.finalize()?;
         self.writer
             .into_inner()
             .map_err(|e| Error::Io(e.error().kind()))
+            .map(|w| (self.stats, w))
     }
 }
 

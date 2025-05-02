@@ -25,7 +25,8 @@ fn main() {
         eprintln!("{stats:?}");
     } else if output.ends_with(".erofs") {
         let mut out = File::create(output).unwrap();
-        let stats = squash_to_erofs(&mut readers, &mut out).unwrap();
-        eprintln!("{stats:?}");
+        let (squash_stats, erofs_stats) = squash_to_erofs(&mut readers, &mut out).unwrap();
+        eprintln!("{squash_stats:?}");
+        eprintln!("{erofs_stats:?}");
     }
 }

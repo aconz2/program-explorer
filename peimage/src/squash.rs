@@ -13,7 +13,7 @@ use oci_spec::image::MediaType;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
 
-use peerofs::build::{Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta};
+use peerofs::build::{Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats};
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -297,7 +297,7 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
 pub fn squash_to_erofs<W, R>(
     layer_readers: &mut [(Compression, R)],
     out: &mut W,
-) -> Result<Stats, SquashError>
+) -> Result<(Stats, ErofsStats), SquashError>
 where
     W: Write + Seek,
     R: Read,
@@ -305,10 +305,10 @@ where
     let mut helper = SquashToErofs {
         builder: ErofsBuilder::new(out)?,
     };
-    let stats = squash_cb(layer_readers, &mut helper)?;
-    let _ = helper.builder.into_inner()?;
+    let squash_stats = squash_cb(layer_readers, &mut helper)?;
+    let (erofs_stats, _) = helper.builder.into_inner()?;
 
-    Ok(stats)
+    Ok((squash_stats, erofs_stats))
 }
 
 fn squash_layer<R, D, F>(
