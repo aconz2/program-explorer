@@ -27,6 +27,7 @@ pub enum SquashError {
     FifoOpen,
     UidTooBig,
     GidTooBig,
+    UnhandledEntryType(EntryType},
     Erofs(ErofsError),
 }
 
@@ -251,6 +252,7 @@ fn header_to_meta(header: &tar::Header) -> Result<ErofsMeta, SquashError> {
 // TODO the error handling here is subpar b/c everything gets funneled into SquashError
 impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
     fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
+        // TODO xattrs
         //if let Some(extensions) = entry.pax_extensions()? {
         //    let mut acc = vec![];
         //    for extension in extensions.into_iter() {
@@ -287,7 +289,7 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
                 self.builder.add_link(path, link, meta)?;
             }
             t => {
-                todo!("unhandled entry type {:?}", t);
+                return Err(Error::UnhandledEntryType(t));
             }
         }
         Ok(())

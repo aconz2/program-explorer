@@ -13,6 +13,8 @@ use crate::disk::{
     EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, INODE_ALIGNMENT,
 };
 
+const MAX_DEPTH: usize = 32; // TODO could be configurable
+
 // NOTES:
 // Our strategy for building an erofs image is different than mkfs.erofs. From what I understand
 // (when building from a tar stream), their approach first writes all file contents to something
@@ -67,6 +69,7 @@ use crate::disk::{
 // TODO
 // - xattrs
 // - link count, do they actually matter?
+// - tail pack dirents
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -98,6 +101,8 @@ pub enum Error {
     PathTrailingSlash,
     InsertFailed,
     UpsertFailed,
+    MaxDepthExceeded,
+    Foo,
     Other(String),
     Io(std::io::ErrorKind),
 }
@@ -134,6 +139,7 @@ pub struct Builder<W: Write + Seek> {
     links: Vec<(PathBuf, PathBuf, Meta)>,
     inode_addr: u64,
     stats: Stats,
+    max_depth: usize,
 }
 
 #[derive(Debug)]
@@ -252,25 +258,45 @@ trait TreeVisitor {
     }
 }
 
-// TODO maybe do this with an iter to not use stack
-fn walk_tree<V: TreeVisitor>(dir: &mut Dir, visitor: &mut V) -> Result<(), Error> {
-    visitor.on_dir_enter(dir)?;
-    for child in dir.children.values_mut() {
-        match child {
-            Dirent::File(f) => {
-                visitor.on_file(f)?;
-            }
-            Dirent::Symlink(s) => {
-                visitor.on_symlink(s)?;
-            }
-            Dirent::Dir(d) => {
-                let _ = walk_tree(d, visitor)?;
-            }
-            Dirent::Dot | Dirent::DotDot => {}
+// Doing this with an iterator would be ideal to not blow the stack, but I'm not sure how/whether
+// it is possible. As an Iterator it doesn't work since we need a lifetime. As a non-Iterator while
+// let Some(event) = iter.next() thing it is hard to store the stack since we need to store an &mut
+// Dir and also store the in progress iterator of children which requires a mutable borrow. Here
+// they are nicely sequential so not a problem.
+fn walk_tree<V: TreeVisitor>(
+    dir: &mut Dir,
+    visitor: &mut V,
+    max_depth: usize,
+) -> Result<(), Error> {
+    fn recur<V: TreeVisitor>(
+        dir: &mut Dir,
+        visitor: &mut V,
+        depth: usize,
+        max_depth: usize,
+    ) -> Result<(), Error> {
+        if depth == max_depth {
+            return Err(Error::MaxDepthExceeded);
         }
+        visitor.on_dir_enter(dir)?;
+        for child in dir.children.values_mut() {
+            match child {
+                Dirent::File(f) => {
+                    visitor.on_file(f)?;
+                }
+                Dirent::Symlink(s) => {
+                    visitor.on_symlink(s)?;
+                }
+                Dirent::Dir(d) => {
+                    let _ = recur(d, visitor, depth + 1, max_depth)?;
+                }
+                Dirent::Dot | Dirent::DotDot => {}
+            }
+        }
+        visitor.on_dir_exit(dir)?;
+        Ok(())
     }
-    visitor.on_dir_exit(dir)?;
-    Ok(())
+
+    recur(dir, visitor, 0, max_depth)
 }
 
 // reserve space for dirents
@@ -691,6 +717,7 @@ impl<W: Write + Seek> Builder<W> {
             links: vec![],
             inode_addr: 0,
             stats: Stats::default(),
+            max_depth: MAX_DEPTH,
         };
         // manually advance to first block
         ret.writer
@@ -961,9 +988,11 @@ impl<W: Write + Seek> Builder<W> {
         // as mut along with self, but then we have to put it back
         // and if we error, then we don't get to put it back...
         let mut root = self.root.take().expect("not none");
+        let max_depth = self.max_depth;
         walk_tree(
             &mut root.root,
             &mut BuilderTreeVisitorPrepareDirents { builder: self },
+            max_depth,
         )?;
         // we are now done writing data, so we record the meta block number
         let meta_block = *self.meta_block.insert(self.cur_data_block);
@@ -986,6 +1015,7 @@ impl<W: Write + Seek> Builder<W> {
         walk_tree(
             &mut root.root,
             &mut BuilderTreeVisitorWriteInodes { builder: self },
+            max_depth,
         )?;
 
         walk_tree(
@@ -994,6 +1024,7 @@ impl<W: Write + Seek> Builder<W> {
                 builder: self,
                 parents: vec![],
             },
+            max_depth,
         )?;
 
         //println!("{:#?}", root.root);
@@ -1245,7 +1276,7 @@ mod tests {
                 t => todo!("unhandled typ {:?}", t),
             }
         }
-        b.into_inner()
+        b.into_inner().map(|(_stats, w)| w)
     }
 
     fn erofs_to_elist(data: &[u8]) -> Result<EList, disk::Error> {
@@ -1311,7 +1342,7 @@ mod tests {
 
     #[test]
     fn test_tree_operations() {
-        // add "a/b" then "/a/b" and lookup with both "a/b" and "/a/b" and should give the same positive result
+        // add "a/b" then "/a/b" and lookup with both "a/b" and "/a/b" and "./a/b" and should give the same positive result
         for prefix in ["", "/", "./"] {
             let mut tree = Root {
                 root: Dir::default(),
@@ -1441,10 +1472,14 @@ mod tests {
             let entries = $entries.iter().cloned().collect::<EList>();
             let tf = NamedTempFile::new().expect("tf");
             let tf = into_erofs(&entries, tf).unwrap();
-            //let path = tf.path();
-            let path = Path::new("/tmp/peerofs.test.erofs");
-            tf.persist(path).unwrap();
-            //assert!(false);
+            let persist = false;
+            let path = if persist {
+                let p = Path::new("/tmp/peerofs.test.erofs");
+                tf.persist(p).unwrap();
+                p
+            } else {
+                tf.path()
+            };
             let result = fsck_erofs(path);
             match result {
                 Err(Error::Other(ref s)) => {
@@ -1498,7 +1533,8 @@ mod tests {
     #[test]
     fn test_fsck_big_dir() {
         // a dirent is 8 bytes, to evenly fill a whole (4096) block we can have
-        // 128 entries with name length of 24
+        // 128 entries with name length of 24 since
+        // (128 * (24 + 8) == 4096)
         {
             let mut entries = vec![];
             // start counting at 1000, this gives us names from 1000 to 1127 and then we append 20
@@ -1517,5 +1553,21 @@ mod tests {
     #[test]
     fn test_builder() {
         check_erofs_roundtrip!(vec![E::file("/x", b"hi"), E::file("/dir/x", b"foo"),]);
+    }
+
+    #[test]
+    fn test_max_depth() {
+        let mut b = Builder::new(Cursor::new(vec![])).unwrap();
+        let depth = MAX_DEPTH;
+        let mut very_deep_file = String::with_capacity(2 * depth);
+        for _ in 0..depth {
+            very_deep_file.push_str("d/");
+        }
+        very_deep_file.push_str("f");
+        b.add_file(very_deep_file, Meta::default(), 0, &mut Cursor::new(b""))
+            .unwrap();
+        let Err(Error::MaxDepthExceeded) = b.into_inner() else {
+            panic!("should have been MaxDepthExceeded");
+        };
     }
 }
