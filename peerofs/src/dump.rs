@@ -6,36 +6,6 @@ use rustix::fs::FileType;
 
 use peerofs::disk::{DirentFileType, Erofs, Error, Inode, Layout};
 
-#[allow(dead_code)]
-fn find_with_xattr<'a>(erofs: &Erofs<'a>) -> Result<Option<Inode<'a>>, Error> {
-    let mut seen = HashSet::new();
-    let mut q = vec![erofs.get_root_inode()?.disk_id()];
-
-    while let Some(cur) = q.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        let inode = erofs.get_inode(cur)?;
-        if inode.xattr_size() > 0 {
-            return Ok(Some(inode));
-        }
-        match inode.file_type() {
-            //FileType::RegularFile => {
-            //}
-            FileType::Directory => {
-                let dirents = erofs.get_dirents(&inode)?;
-                //eprintln!("iterating dirent id {:?}", inode.disk_id());
-                for item in dirents.iter()? {
-                    let item = item?;
-                    q.push(item.disk_id.try_into().expect("why is this u64"));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(None)
-}
-
 fn all_inodes<'a>(erofs: &Erofs<'a>) -> Result<Vec<Inode<'a>>, Error> {
     let mut seen = HashSet::new();
     let mut ret = vec![];
@@ -86,9 +56,13 @@ fn main() {
     //let dir = erofs.get_inode(39099352).expect("inode get failed"); // usr/share/doc
     println!("{:?}", dir);
     println!("layout={:?}", dir.layout());
-    if let Some(header) = erofs.get_xattr_header(&dir).expect("xattr header") {
-        println!("xattr_header: {:?}", header);
-    }
+    //if let Some(xattrs) = erofs.get_xattrs(&dir).unwrap() {
+    //    for xattr in xattrs.iter() {
+    //        if let Ok(xattr) = xattr {
+    //            println!("xattr key={} value={}", xattr.name.escape_ascii().to_string(), xattr.value.escape_ascii().to_string())
+    //        }
+    //    }
+    //}
     let dirents = erofs.get_dirents(&dir).expect("get_dirents failed");
 
     for item in dirents.iter().expect("couldn't create iterator") {
@@ -103,6 +77,25 @@ fn main() {
             inode.gid(),
             inode.mode()
         );
+        if let Some(xattrs) = erofs.get_xattrs(&inode).unwrap() {
+            print!(" {{");
+            for xattr in xattrs.iter() {
+                if let Ok(xattr) = xattr {
+                    let prefix = erofs
+                        .get_xattr_prefix(&xattr)
+                        .unwrap()
+                        .escape_ascii()
+                        .to_string();
+                    print!(
+                        "{}{}={}, ",
+                        prefix,
+                        xattr.name.escape_ascii().to_string(),
+                        xattr.value.escape_ascii().to_string()
+                    );
+                }
+            }
+            print!("}}");
+        }
         //println!("{:?}", inode);
         match item.file_type {
             //DirentFileType::Directory => {

@@ -38,15 +38,14 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // - dirents are sorted in name order EXCEPT for . and .. which are materialized on disk
 //
 // Xattrs
-// - there is a built in list of prefixes user. system.posix_acl_access systm.posix_acl_default
-// trusted. security. (where is lustre?) and then an additional dynamic table of
-// sb.xattr_prefix_count
+// - there is a built in list of prefixes and then an additional dynamic table of sb.xattr_prefix_count
 // - in an inode, the xattr_count is NOT the number of xattrs. it is the total size of all the
 // xattrs laid out divided by 4 and then +1 (why the +1??).
-// - xattrs are laid out after the map header as
-// XattryEntry name \0 value
+// - xattrs are laid out after the map header as (XattryEntry name value)+
 // - not sure yet whether xattr data is allowed to span multiple blocks
 // - xattr data is immediately after an inode and before the tail data
+// - TODO don't know what name_filter does (okay looks like part of a bloom filter)
+// - FYI security.selinux xattr values have a null terminator
 
 #[derive(Debug)]
 pub enum Error {
@@ -64,6 +63,8 @@ pub enum Error {
     NotExpectingBlockData,
     BlockLenShouldBeZero,
     NotCompressed,
+    InvalidXattrPrefix,
+    BuiltinPrefixTooBig,
 }
 
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout, Default, IntoBytes)]
@@ -177,6 +178,7 @@ pub struct XattrEntry {
     // u8 name[]
 }
 
+#[allow(dead_code)]
 enum XattrBuiltinPrefix {
     User = 1,
     PosixAclAccess = 2,
@@ -184,17 +186,17 @@ enum XattrBuiltinPrefix {
     Trusted = 4,
     Lustre = 5, // I think this is unused
     Security = 6,
+    MAX = 7,
 }
 
-const XattrBuiltinPrefixTable: [&'static str; 6] = [
-    "user.",
-    "system.posix_acl_access",
-    "system.posix_acl_default",
-    "trusted",
-    "",
-    "security."
+const XATTR_BUILTIN_PREFIX_TABLE: [&'static [u8]; 6] = [
+    b"user.",
+    b"system.posix_acl_access",
+    b"system.posix_acl_default",
+    b"trusted",
+    b"",
+    b"security.",
 ];
-
 
 #[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
@@ -343,6 +345,7 @@ impl<'a> Inode<'a> {
         let layout = layout as u16;
         format | (layout << 1)
     }
+
     pub fn file_type(&self) -> FileType {
         match self {
             Inode::Compact((_, x)) => FileType::from_raw_mode(x.mode.into()),
@@ -378,14 +381,16 @@ impl<'a> Inode<'a> {
         }
     }
 
-    pub fn xattr_size(&self) -> usize {
+    pub fn xattr_size(&self) -> Option<usize> {
         let count: usize = self.xattr_count().into();
         if count == 0 {
-            0
+            None
         } else {
             // TODO why is this count-1 ??
             // doesn't this also have to include sizeof(u32) * header->shared_count??
-            std::mem::size_of::<XattrHeader>() + (count - 1) * std::mem::size_of::<XattrEntry>()
+            let size = std::mem::size_of::<XattrHeader>()
+                + (count - 1) * std::mem::size_of::<XattrEntry>();
+            Some(size)
         }
     }
 
@@ -460,9 +465,6 @@ impl<'a> Dirents<'a> {
     pub fn iter<'b>(&'b self) -> Result<DirentsIterator<'a>, Error> {
         DirentsIterator::new(self.data, self.block_size)
     }
-    //pub fn iter(&'a self) -> Result<DirentsIterator<'a>, Error> {
-    //    DirentsIterator::new(self.data, self.block_size)
-    //}
 }
 
 #[derive(Debug)]
@@ -498,13 +500,10 @@ impl<'a> DirentsIterator<'a> {
 
     fn reset_count(&mut self) -> Result<(), Error> {
         if self.data.is_empty() {
-            println!("data is empty");
             if let Some(next) = self.remaining.take() {
-                println!("taking remaining");
                 self.data = next;
             }
             if self.data.is_empty() {
-                println!("data still empty");
                 self.i = 0;
                 self.count = 0;
                 return Ok(());
@@ -518,8 +517,6 @@ impl<'a> DirentsIterator<'a> {
         if rem != 0 {
             return Err(Error::DirentBadSize);
         }
-        println!("dirent0 {:?}", dirent);
-        println!("count {:?}", count);
         self.i = 0;
         self.count = count;
         Ok(())
@@ -579,6 +576,92 @@ impl<'a> Iterator for DirentsIterator<'a> {
             Some(self.next_impl())
         } else {
             None
+        }
+    }
+}
+
+pub enum XattrPrefix {
+    Builtin(u8), // nonzero && (bit 7 was clear)
+    Table(u8),   // possibly zero (bit 7 was set)
+}
+
+impl XattrPrefix {
+    fn try_from(x: u8) -> Result<Option<XattrPrefix>, Error> {
+        if x == 0 {
+            Ok(None)
+        } else if x & 0x80 != 0 {
+            Ok(Some(XattrPrefix::Table(x & 0x7f)))
+        }
+        // TODO should we use try_from since here the x could be too big?
+        // right now just checking in get_xattr_prefix
+        else if x < XattrBuiltinPrefix::MAX as u8 {
+            Ok(Some(XattrPrefix::Builtin(x)))
+        } else {
+            Err(Error::InvalidXattrPrefix)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Xattrs<'a> {
+    header: &'a XattrHeader,
+    data: &'a [u8],
+}
+
+impl<'a> Xattrs<'a> {
+    pub fn iter(&self) -> XattrsIterator<'a> {
+        XattrsIterator { data: self.data }
+    }
+}
+
+pub struct XattrItem<'a> {
+    prefix: Option<XattrPrefix>,
+    pub name: &'a [u8],
+    pub value: &'a [u8],
+}
+
+pub struct XattrsIterator<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> XattrsIterator<'a> {
+    fn next_impl(&mut self) -> Result<XattrItem<'a>, Error> {
+        let (entry, data) =
+            XattrEntry::try_ref_from_prefix(self.data).map_err(|_| Error::BadConversion)?;
+        let name_len = usize::from(entry.name_len);
+        let value_len = usize::from(entry.value_size);
+
+        let name = data.get(..name_len).ok_or(Error::Oob)?;
+        let mut offset = name_len;
+        let value = data.get(offset..offset + value_len).ok_or(Error::Oob)?;
+
+        offset += value_len;
+        offset = round_up_to::<{ std::mem::size_of::<XattrEntry>() }>(offset);
+
+        self.data = data.get(offset..).ok_or(Error::Oob)?;
+        if self.data.len() < std::mem::size_of::<XattrEntry>() {
+            self.data = &[];
+        }
+
+        // NOTE: we try to convert the prefix here so that we have already advanced self.data,
+        // otherwise on error, we leave it for an infinite loop
+        let prefix = XattrPrefix::try_from(entry.name_index)?;
+        Ok(XattrItem {
+            prefix,
+            name,
+            value,
+        })
+    }
+}
+
+impl<'a> Iterator for XattrsIterator<'a> {
+    type Item = Result<XattrItem<'a>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.data.is_empty() {
+            None
+        } else {
+            Some(self.next_impl())
         }
     }
 }
@@ -675,7 +758,7 @@ impl<'a> Erofs<'a> {
         let start = self.inode_offset(inode);
         let inode_size = inode.size();
         //let xattr_count = inode.xattr_count();
-        let xattr_size = 0;
+        let xattr_size = inode.xattr_size().unwrap_or(0) as u64;
         // if xattr header has shared_count, then also include that!
         //let xattr_size = if xattr_count == 0 {
         //    0
@@ -759,6 +842,32 @@ impl<'a> Erofs<'a> {
         Dirents::new(data, self.block_size() as usize)
     }
 
+    pub fn get_xattrs(&self, inode: &Inode<'a>) -> Result<Option<Xattrs<'a>>, Error> {
+        if let Some(size) = inode.xattr_size() {
+            let offset = (self.inode_offset(inode) + inode.size() as u64) as usize;
+            let data = self.data.get(offset..offset + size).ok_or(Error::Oob)?;
+            let (header, data) =
+                XattrHeader::try_ref_from_prefix(data).map_err(|_| Error::BadConversion)?;
+            Ok(Some(Xattrs { header, data }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_xattr_prefix(&self, item: &XattrItem<'a>) -> Result<&'a [u8], Error> {
+        match item.prefix {
+            None => Ok(&[]),
+            Some(XattrPrefix::Builtin(i)) => {
+                assert!(i > 0); // guaranteed by constructor
+                XATTR_BUILTIN_PREFIX_TABLE
+                    .get((i - 1) as usize)
+                    .ok_or(Error::BuiltinPrefixTooBig)
+                    .copied()
+            }
+            _ => todo!("handle xattr prefix from table"),
+        }
+    }
+
     pub fn get_map_header(&self, inode: &Inode<'a>) -> Result<&'a MapHeader, Error> {
         if !inode.layout().is_compressed() {
             return Err(Error::NotCompressed);
@@ -791,35 +900,6 @@ impl<'a> Erofs<'a> {
             return Err(Error::NotExpectingBlockData);
         }
         Ok(tail)
-    }
-
-    pub fn get_xattr_header(&self, inode: &Inode<'a>) -> Result<Option<&'a XattrHeader>, Error> {
-        if inode.xattr_count() == 0 {
-            Ok(None)
-        } else {
-            let offset = (self.inode_offset(inode) + inode.size() as u64) as usize;
-            if true {
-                let mut offset = offset;
-                offset += std::mem::size_of::<XattrHeader>();
-                for i in 0..(inode.xattr_count() - 1) {
-                    let (e, _) = XattrEntry::try_ref_from_prefix(&self.data[offset..]).unwrap();
-                    println!("entry {} at offset {} after header is {:?}", i, offset, e);
-                    offset += std::mem::size_of::<XattrEntry>();
-                    let name = &self.data[offset..offset + usize::from(e.name_len)];
-                    offset += usize::from(e.name_len) + 1; // null terminator
-                    let value = &self.data[offset..offset + usize::from(e.value_size)];
-                    offset += usize::from(e.value_size);
-                    println!(
-                        "name {} value {}",
-                        name.escape_ascii().to_string(),
-                        value.escape_ascii().to_string()
-                    );
-                }
-            }
-            XattrHeader::try_ref_from_prefix(&self.data[offset..])
-                .map_err(|_| Error::BadConversion)
-                .map(|(header, _)| Some(header))
-        }
     }
 
     //pub fn iter(&'a self) -> Result<ErofsIterator<'a>, Error> {
@@ -889,6 +969,11 @@ fn compute_block_tail_len(block_size: usize, size: usize) -> (usize, usize) {
     let tail_len = size - block_len;
     (block_len, tail_len)
 }
+
+// wish this could work
+//fn round_up_for<T>(x: usize) -> usize {
+//    round_up_to<{std::mem::size_of::<T>}>(x)
+//}
 
 fn round_up_to<const N: usize>(x: usize) -> usize {
     if x == 0 {
