@@ -36,6 +36,17 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // max sized the block size).
 // - dirent name_offset is relative to the start of the block or start of the tail data
 // - dirents are sorted in name order EXCEPT for . and .. which are materialized on disk
+//
+// Xattrs
+// - there is a built in list of prefixes user. system.posix_acl_access systm.posix_acl_default
+// trusted. security. (where is lustre?) and then an additional dynamic table of
+// sb.xattr_prefix_count
+// - in an inode, the xattr_count is NOT the number of xattrs. it is the total size of all the
+// xattrs laid out divided by 4 and then +1 (why the +1??).
+// - xattrs are laid out after the map header as
+// XattryEntry name \0 value
+// - not sure yet whether xattr data is allowed to span multiple blocks
+// - xattr data is immediately after an inode and before the tail data
 
 #[derive(Debug)]
 pub enum Error {
@@ -55,12 +66,6 @@ pub enum Error {
     NotCompressed,
 }
 
-// NOTE: we are using byteorder endian aware types so that they get decoded on demand (noop on LE
-// architectures, but they are all alignment 1. So after xattr_prefix_start, there is a 4 byte
-// gap that is placed with C alignment rules to get packed_nid to alignment 8. But when we use
-// alignment 1 types, that gap is closed and we are 4 bytes short, So _missing_4_bytes is
-// inserted as manual padding fill the gap
-// I don't like the pub(crate) noise
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout, Default, IntoBytes)]
 #[repr(C)]
 pub struct Superblock {
@@ -78,13 +83,13 @@ pub struct Superblock {
     pub(crate) xattr_blkaddr: U32, // block number not addr
     pub(crate) uuid: [u8; 16],
     pub(crate) volume_name: [u8; 16],
+    pub(crate) feature_incompat: U32,
     pub(crate) available_compr_algs_or_lz4_max_distance: U16,
     pub(crate) extra_devices: U16,
     pub(crate) devt_slotoff: U16,
     pub(crate) dirblkbits: u8,
     pub(crate) xattr_prefix_count: u8,
     pub(crate) xattr_prefix_start: U32,
-    _missing_4_bytes: U32,
     pub(crate) packed_nid: U64,
     pub(crate) xattr_filter_reserved: u8,
     _reserved2: [u8; 23],
@@ -93,16 +98,16 @@ pub struct Superblock {
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct InodeCompact {
-    format_layout: U16,
-    xattr_count: U16,
-    mode: U16,
-    nlink: U16,
-    size: U32,
+    pub(crate) format_layout: U16,
+    pub(crate) xattr_count: U16,
+    pub(crate) mode: U16,
+    pub(crate) nlink: U16,
+    pub(crate) size: U32,
     _reserved: U32,
-    info: InodeInfo,
-    ino: U32,
-    uid: U16,
-    gid: U16,
+    pub(crate) info: InodeInfo,
+    pub(crate) ino: U32,
+    pub(crate) uid: U16,
+    pub(crate) gid: U16,
     _reserved2: U32,
 }
 
@@ -160,7 +165,7 @@ pub struct XattrHeader {
     name_filter: U32,
     shared_count: u8,
     _reserved: [u8; 7],
-    // u32 ids[]
+    // u32 shared_xattrs[]
 }
 
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
@@ -171,6 +176,25 @@ pub struct XattrEntry {
     value_size: U16,
     // u8 name[]
 }
+
+enum XattrBuiltinPrefix {
+    User = 1,
+    PosixAclAccess = 2,
+    PosixAclDefault = 3,
+    Trusted = 4,
+    Lustre = 5, // I think this is unused
+    Security = 6,
+}
+
+const XattrBuiltinPrefixTable: [&'static str; 6] = [
+    "user.",
+    "system.posix_acl_access",
+    "system.posix_acl_default",
+    "trusted",
+    "",
+    "security."
+];
+
 
 #[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
@@ -347,15 +371,21 @@ impl<'a> Inode<'a> {
         }
     }
 
-    pub fn xattr_size(&self) -> usize {
-        let count: usize = match self {
+    pub fn xattr_count(&self) -> u16 {
+        match self {
             Inode::Compact((_, x)) => x.xattr_count.into(),
             Inode::Extended((_, x)) => x.xattr_count.into(),
-        };
+        }
+    }
+
+    pub fn xattr_size(&self) -> usize {
+        let count: usize = self.xattr_count().into();
         if count == 0 {
             0
         } else {
-            std::mem::size_of::<XattrHeader>() + (count - 1) * std::mem::size_of::<u32>()
+            // TODO why is this count-1 ??
+            // doesn't this also have to include sizeof(u32) * header->shared_count??
+            std::mem::size_of::<XattrHeader>() + (count - 1) * std::mem::size_of::<XattrEntry>()
         }
     }
 
@@ -468,15 +498,19 @@ impl<'a> DirentsIterator<'a> {
 
     fn reset_count(&mut self) -> Result<(), Error> {
         if self.data.is_empty() {
+            println!("data is empty");
             if let Some(next) = self.remaining.take() {
+                println!("taking remaining");
                 self.data = next;
             }
             if self.data.is_empty() {
+                println!("data still empty");
                 self.i = 0;
                 self.count = 0;
                 return Ok(());
             }
         }
+        debug_assert!(!self.data.is_empty());
         let (dirent, _) =
             Dirent::try_ref_from_prefix(&self.data).map_err(|_| Error::BadConversion)?;
         let offset: u16 = dirent.name_offset.into();
@@ -484,6 +518,8 @@ impl<'a> DirentsIterator<'a> {
         if rem != 0 {
             return Err(Error::DirentBadSize);
         }
+        println!("dirent0 {:?}", dirent);
+        println!("count {:?}", count);
         self.i = 0;
         self.count = count;
         Ok(())
@@ -638,7 +674,14 @@ impl<'a> Erofs<'a> {
     fn inode_end(&self, inode: &Inode<'a>) -> u64 {
         let start = self.inode_offset(inode);
         let inode_size = inode.size();
-        let xattr_size = 0; // TODO
+        //let xattr_count = inode.xattr_count();
+        let xattr_size = 0;
+        // if xattr header has shared_count, then also include that!
+        //let xattr_size = if xattr_count == 0 {
+        //    0
+        //} else {
+        //    std::mem::size_of::<XattrHeader> + xattr_count * std::mem::size_of<XattrEntry>
+        //}
         start + inode_size as u64 + xattr_size
     }
 
@@ -656,7 +699,7 @@ impl<'a> Erofs<'a> {
         }
     }
 
-    pub fn get_inode_dirent(&self, dirent: &DirentItem<'a>) -> Result<Inode<'a>, Error> {
+    pub fn get_inode_from_dirent(&self, dirent: &DirentItem<'a>) -> Result<Inode<'a>, Error> {
         // idk why the dir disk id is a u64
         self.get_inode(dirent.disk_id.try_into().map_err(|_| Error::InodeTooBig)?)
     }
@@ -748,6 +791,35 @@ impl<'a> Erofs<'a> {
             return Err(Error::NotExpectingBlockData);
         }
         Ok(tail)
+    }
+
+    pub fn get_xattr_header(&self, inode: &Inode<'a>) -> Result<Option<&'a XattrHeader>, Error> {
+        if inode.xattr_count() == 0 {
+            Ok(None)
+        } else {
+            let offset = (self.inode_offset(inode) + inode.size() as u64) as usize;
+            if true {
+                let mut offset = offset;
+                offset += std::mem::size_of::<XattrHeader>();
+                for i in 0..(inode.xattr_count() - 1) {
+                    let (e, _) = XattrEntry::try_ref_from_prefix(&self.data[offset..]).unwrap();
+                    println!("entry {} at offset {} after header is {:?}", i, offset, e);
+                    offset += std::mem::size_of::<XattrEntry>();
+                    let name = &self.data[offset..offset + usize::from(e.name_len)];
+                    offset += usize::from(e.name_len) + 1; // null terminator
+                    let value = &self.data[offset..offset + usize::from(e.value_size)];
+                    offset += usize::from(e.value_size);
+                    println!(
+                        "name {} value {}",
+                        name.escape_ascii().to_string(),
+                        value.escape_ascii().to_string()
+                    );
+                }
+            }
+            XattrHeader::try_ref_from_prefix(&self.data[offset..])
+                .map_err(|_| Error::BadConversion)
+                .map(|(header, _)| Some(header))
+        }
     }
 
     //pub fn iter(&'a self) -> Result<ErofsIterator<'a>, Error> {

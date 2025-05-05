@@ -620,3 +620,8 @@ which is pretty good! And only uses a single core, no compression of course.
 in perf record, 77% is in inflate_fast_avx2 and 5% is in crc32fast::specialized::pclmulqdq::calculate
 libz-ng has the ability to do the crc32 while it is copying the bytes out, but flate2 bypasses that because it first reads the gz header, so it never sees it. Put some info at https://github.com/rust-lang/flate2-rs/issues/117#issuecomment-2848248615 and added the feature nocrc to peimage but essentially no difference in real speed.
 Unfortunately there isn't much to do to make the squash process go faster as inflate is the bottleneck. TODO whether it is worthwhile to inflate once on download and store either uncompressed or as zstd or lz4. Really depends on how often layers get reused.
+
+xattrs:
+dnf install -y attr
+setfattr -n user.MYATTR -v value filename
+getfattr -m '.+' -d filename
