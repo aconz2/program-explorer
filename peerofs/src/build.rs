@@ -4,13 +4,12 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{FileType,Mode};
+use rustix::fs::{FileType, Mode};
 use zerocopy::{FromZeros, IntoBytes};
 
 use crate::disk;
 use crate::disk::{
-    DirentFileType, Inode, InodeExtended, InodeInfo, InodeType, Layout, Superblock,
-    XattrEntry, XattrHeader,
+    DirentFileType, InodeInfo, InodeType, Layout, Superblock, XattrEntry, XattrHeader,
     EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, INODE_ALIGNMENT,
 };
 
@@ -69,6 +68,7 @@ const MAX_DEPTH: usize = 32; // TODO could be configurable
 //
 // Xattrs
 // - we don't build shared xattrs right now
+// - TODO check shared prefix
 //
 // TODO
 // - link count, do they actually matter?
@@ -83,7 +83,7 @@ pub enum Error {
     NotADir,
     MetaBlockTooBig,
     FileBlockTooBig,
-    TailTooBig,
+    InodeTooBig,
     NoMetaBlock,
     AddrLessThanMetaBlock,
     AddrNotAligned,
@@ -109,6 +109,7 @@ pub enum Error {
     XattrValueTooLong,
     TooManyXattrs,
     ModeShouldFitInU16,
+    DirDiskIdMismatch { expected: Option<u32>, got: u32 },
     Other(String),
     Io(std::io::ErrorKind),
 }
@@ -138,16 +139,13 @@ pub struct Builder<W: Write + Seek> {
     cur_data_block: u64,
     meta_block: Option<u64>,
     name_buf: Vec<u8>,
-    dir_inode_buf: Vec<u8>,
     n_dirs: usize,
     n_inodes: u64,
-    dir_inode_id: u64,
     links: Vec<(PathBuf, PathBuf, Meta)>,
     inode_addr: u64,
     stats: Stats,
     max_depth: usize,
 }
-
 
 type XattrMap = BTreeMap<Box<[u8]>, Box<[u8]>>;
 
@@ -235,6 +233,12 @@ enum Dirent {
     DotDot,
 }
 
+enum Inode {
+    #[allow(dead_code)]
+    Compact(disk::InodeCompact),
+    Extended(disk::InodeExtended),
+}
+
 impl Dirent {
     //fn disk_id(&self) -> Option<u32> {
     //    match self {
@@ -310,17 +314,22 @@ fn walk_tree<V: TreeVisitor>(
     recur(dir, visitor, 0, max_depth)
 }
 
-// reserve space for dirents
+// reserve space for dirents in data section
 struct BuilderTreeVisitorPrepareDirents<'a, W: Write + Seek> {
     builder: &'a mut Builder<W>,
 }
 
-// write file inodes
+// write dir inodes so they fill the start of meta section
+struct BuilderTreeVisitorWriteDirInodes<'a, W: Write + Seek> {
+    builder: &'a mut Builder<W>,
+}
+
+// write non dir inodes
 struct BuilderTreeVisitorWriteInodes<'a, W: Write + Seek> {
     builder: &'a mut Builder<W>,
 }
 
-// write out dirents
+// write out dirents into data section
 struct BuilderTreeVisitorWriteDirents<'a, W: Write + Seek> {
     builder: &'a mut Builder<W>,
     parents: Vec<u32>,
@@ -335,57 +344,54 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
         self.builder.stats.dirs += 1;
         self.builder.cur_data_block += n_blocks;
 
-        let disk_id: u32 = self
-            .builder
-            .dir_inode_id
+        Ok(())
+    }
+}
+
+fn make_inode(
+    file_type: FileType,
+    size: u64,
+    start_block: Option<u64>,
+    meta: &Meta,
+    tail: &Option<Box<[u8]>>,
+) -> Result<disk::InodeExtended, Error> {
+    let layout = if tail.is_some() {
+        Layout::FlatInline
+    } else {
+        Layout::FlatPlain
+    };
+    let mut i = disk::InodeExtended::new_zeroed();
+    i.format_layout = disk::Inode::format_layout(InodeType::Extended, layout).into();
+    i.mode = make_mode(file_type, meta.mode)?.into();
+    i.uid = meta.uid.into();
+    i.gid = meta.gid.into();
+    i.mtime = meta.mtime.into();
+    i.nlink = 1.into(); // TODO!
+    i.info = InodeInfo::raw_block(
+        start_block
+            .ok_or(Error::NoStartBlock)?
             .try_into()
-            .map_err(|_| Error::DiskIdTooBig)?;
-        self.builder.dir_inode_id += 2; // TODO this is only valid without tail packing
+            .map_err(|_| Error::FileBlockTooBig)?,
+    );
+    i.size = size.into();
+
+    Ok(i)
+}
+
+impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirInodes<'_, W> {
+    fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
+        let inode = Inode::Extended(make_inode(
+            FileType::Directory,
+            dir.total_size,
+            dir.start_block,
+            &dir.meta,
+            &None,
+        )?);
+
+        let disk_id = self.builder.write_inode(inode, &None, &dir.meta.xattrs)?;
+
         let prev = dir.disk_id.replace(disk_id);
         assert!(prev.is_none());
-        //println!("dir disk_id={disk_id}");
-
-        let inode = {
-            let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, Layout::FlatPlain).into();
-            i.mode = make_mode(FileType::Directory, dir.meta.mode)?.into();
-            i.uid = dir.meta.uid.into();
-            i.gid = dir.meta.gid.into();
-            i.mtime = dir.meta.mtime.into();
-            i.nlink = 1.into(); // TODO!
-            i.info = InodeInfo::raw_block(
-                dir.start_block
-                    .ok_or(Error::NoStartBlock)?
-                    .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
-            );
-            i.size = dir.total_size.into();
-            i.xattr_count = disk::xattr_count(dir.meta.xattrs.len()).try_into().map_err(|_| Error::TooManyXattrs)?;
-
-            self.builder.hook_inode_extended(&mut i)?;
-            i
-        };
-        self.builder.dir_inode_buf.extend(inode.as_bytes());
-
-        { // xattrs
-            let xattr_len = std::mem::size_of::<XattrHeader>() + dir.meta.xattrs.iter().map(|(key, value)|
-                std::mem::size_of::<XattrEntry>() + key.len() + value.len()
-                ).sum::<usize>();
-            let header = XattrHeader::new_zeroed();
-            self.builder.dir_inode_buf.extend(header.as_bytes());
-            for (key, value) in dir.meta.xattrs.iter() {
-                let mut entry = XattrEntry::new_zeroed();
-                entry.name_len = key.len().try_into().map_err(|_| Error::XattrKeyTooLong)?;
-                entry.value_size = value.len().try_into().map_err(|_| Error::XattrValueTooLong)?;
-                self.builder.dir_inode_buf.extend(entry.as_bytes());
-                self.builder.dir_inode_buf.extend(key);
-                self.builder.dir_inode_buf.extend(value);
-            }
-            let padding = disk::round_up_to::<4>(xattr_len) - xattr_len;
-            for _ in 0..padding {
-                self.builder.dir_inode_buf.push(0);
-            }
-        }
 
         Ok(())
     }
@@ -395,33 +401,17 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
     // TODO use a helper for the meta
     fn on_file(&mut self, file: &mut File) -> Result<(), Error> {
         self.builder.stats.files += 1;
-        let layout = if file.tail.is_some() {
-            Layout::FlatInline
-        } else {
-            Layout::FlatPlain
-        };
-        let inode = {
-            let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, layout).into();
-            i.mode = make_mode(FileType::RegularFile, file.meta.mode)?.into();
-            i.uid = file.meta.uid.into();
-            i.gid = file.meta.gid.into();
-            i.mtime = file.meta.mtime.into();
-            i.nlink = 1.into(); // TODO!
-            i.info = InodeInfo::raw_block(
-                file.start_block
-                    .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
-            );
-            i.size = (file.len as u64).into();
-            i.xattr_count = disk::xattr_count(file.meta.xattrs.len()).try_into().map_err(|_| Error::TooManyXattrs)?;
-            self.builder.hook_inode_extended(&mut i)?;
-            i
-        };
+        let inode = Inode::Extended(make_inode(
+            FileType::RegularFile,
+            file.len as u64,
+            Some(file.start_block),
+            &file.meta,
+            &file.tail,
+        )?);
 
-        //eprintln!("file write_inode");
-        let disk_id = self.builder.write_inode(inode.as_bytes(), &file.tail, &file.meta.xattrs)?;
-        //println!("file disk_id={}", disk_id);
+        let disk_id = self
+            .builder
+            .write_inode(inode, &file.tail, &file.meta.xattrs)?;
         let prev = file.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
@@ -429,34 +419,17 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 
     fn on_symlink(&mut self, symlink: &mut Symlink) -> Result<(), Error> {
         self.builder.stats.symlinks += 1;
-        let layout = if symlink.tail.is_some() {
-            Layout::FlatInline
-        } else {
-            Layout::FlatPlain
-        };
-        let inode = {
-            let mut i = InodeExtended::new_zeroed();
-            i.format_layout = Inode::format_layout(InodeType::Extended, layout).into();
-            i.mode = make_mode(FileType::Symlink, symlink.meta.mode)?.into();
-            i.uid = symlink.meta.uid.into();
-            i.gid = symlink.meta.gid.into();
-            i.mtime = symlink.meta.mtime.into();
-            i.nlink = 1.into(); // TODO!
-            i.info = InodeInfo::raw_block(
-                symlink
-                    .start_block
-                    .try_into()
-                    .map_err(|_| Error::FileBlockTooBig)?,
-            );
-            i.size = (symlink.len as u64).into();
-            i.xattr_count = disk::xattr_count(symlink.meta.xattrs.len()).try_into().map_err(|_| Error::TooManyXattrs)?;
-            self.builder.hook_inode_extended(&mut i)?;
-            i
-        };
+        let inode = Inode::Extended(make_inode(
+            FileType::Symlink,
+            symlink.len as u64,
+            Some(symlink.start_block),
+            &symlink.meta,
+            &symlink.tail,
+        )?);
 
-        //eprintln!("symlink write_inode");
-        let disk_id = self.builder.write_inode(inode.as_bytes(), &symlink.tail, &symlink.meta.xattrs)?;
-        //println!("symlink disk_id={}", disk_id);
+        let disk_id = self
+            .builder
+            .write_inode(inode, &symlink.tail, &symlink.meta.xattrs)?;
         let prev = symlink.disk_id.replace(disk_id);
         assert!(prev.is_none());
         Ok(())
@@ -720,7 +693,11 @@ impl Dir {
         self.total_size = total_size;
 
         // TODO this check will change with tail packing
-        let sum = self.n_dirents_per_block.iter().sum::<u16>() as usize;
+        let sum = self
+            .n_dirents_per_block
+            .iter()
+            .map(|x| *x as usize)
+            .sum::<usize>();
         if self.children.len() != sum {
             panic!(
                 "not all children accounted for expected={} got={}",
@@ -738,16 +715,14 @@ impl<W: Write + Seek> Builder<W> {
         let mut ret = Builder {
             root: Some(Root::default()),
             increment_uid_gid: None,
-            writer: BufWriter::with_capacity(4096 * 8, writer),
+            writer: BufWriter::with_capacity(32 * 1024, writer),
             superblock: Superblock::default(),
             cur_data_block: 1,
             block_size_bits,
             meta_block: None,
             name_buf: Vec::with_capacity(1 << block_size_bits),
-            dir_inode_buf: Vec::with_capacity(1 << block_size_bits),
             n_dirs: 0,
             n_inodes: 0,
-            dir_inode_id: 0,
             links: vec![],
             inode_addr: 0,
             stats: Stats::default(),
@@ -809,19 +784,9 @@ impl<W: Write + Seek> Builder<W> {
         if offset % INODE_ALIGNMENT != 0 {
             return Err(Error::AddrNotAligned);
         }
-        (offset / 32).try_into().map_err(|_| Error::DiskIdTooBig)
-    }
-
-    fn hook_inode_extended(&self, inode: &mut InodeExtended) -> Result<(), Error> {
-        if let Some(inc) = self.increment_uid_gid {
-            inode.uid = (inode.uid + inc)
-                .try_into()
-                .map_err(|_| Error::UidGidTooBig)?;
-            inode.gid = (inode.gid + inc)
-                .try_into()
-                .map_err(|_| Error::UidGidTooBig)?;
-        }
-        Ok(())
+        (offset / INODE_ALIGNMENT)
+            .try_into()
+            .map_err(|_| Error::DiskIdTooBig)
     }
 
     // we require the size up front so that we can calculate tail len
@@ -873,7 +838,7 @@ impl<W: Write + Seek> Builder<W> {
             None
         };
         let file = File {
-            meta,
+            meta: self.hook_meta(meta)?,
             start_block,
             len,
             tail,
@@ -882,7 +847,16 @@ impl<W: Write + Seek> Builder<W> {
         self.root.as_mut().expect("not none").add_file(path, file)
     }
 
+    fn hook_meta(&self, mut meta: Meta) -> Result<Meta, Error> {
+        if let Some(inc) = self.increment_uid_gid {
+            meta.uid = meta.uid.checked_add(inc).ok_or(Error::UidGidTooBig)?;
+            meta.gid = meta.gid.checked_add(inc).ok_or(Error::UidGidTooBig)?;
+        }
+        Ok(meta)
+    }
+
     pub fn upsert_dir<P: AsRef<Path>>(&mut self, path: P, meta: Meta) -> Result<(), Error> {
+        let meta = self.hook_meta(meta)?;
         self.root.as_mut().expect("not none").upsert_dir(path, meta)
     }
 
@@ -908,7 +882,7 @@ impl<W: Write + Seek> Builder<W> {
         };
 
         let symlink = Symlink {
-            meta,
+            meta: self.hook_meta(meta)?,
             start_block,
             len,
             tail,
@@ -958,37 +932,68 @@ impl<W: Write + Seek> Builder<W> {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
+    fn check_writer_alignment(&mut self, prepost: &str) {
+        let cur = self.writer.stream_position().unwrap();
+        if cur != self.inode_addr {
+            panic!(
+                "{}condition: writer mismatched with inode_addr cur={}, inode_addr={}",
+                prepost, cur, self.inode_addr
+            );
+        }
+        if cur % INODE_ALIGNMENT != 0 {
+            panic!(
+                "{}condition: writer not aligned to inode alignment {}, at {}",
+                prepost, INODE_ALIGNMENT, cur
+            );
+        }
+    }
+
     // NOTE: precondition is that our output stream is aligned to 32 bytes, this keeps us from
     // having to flush the BufWriter constantly
     // we also manually maintain the self.inode_addr
     // postcondition is that we are aligned to 32 bytes
-    fn write_inode(&mut self, data: &[u8], tail: &Option<Box<[u8]>>, xattrs: &XattrMap) -> Result<u32, Error> {
+    fn write_inode(
+        &mut self,
+        mut inode: Inode,
+        tail: &Option<Box<[u8]>>,
+        xattrs: &XattrMap,
+    ) -> Result<u32, Error> {
+        #[cfg(debug_assertions)]
+        self.check_writer_alignment("pre");
+
         self.n_inodes += 1;
 
-        if cfg!(debug_assertions) {
-            let cur = self.writer.stream_position()?;
-            if cur % INODE_ALIGNMENT != 0 {
-                panic!(
-                    "writer not aligned to inode alignment {}, at {}",
-                    INODE_ALIGNMENT, cur
-                );
+        let (xattr_count, xattr_padding) =
+            disk::xattr_count(xattrs.iter().map(|(k, v)| (k.len(), v.len())));
+        let xattr_count: u16 = xattr_count.try_into().map_err(|_| Error::TooManyXattrs)?;
+        let xattr_len = disk::xattr_count_to_len(xattr_count);
+        println!("xattr_count={xattr_count} xattr_padding={xattr_padding} xattr_len={xattr_len}");
+
+        match &mut inode {
+            Inode::Compact(x) => {
+                x.xattr_count = xattr_count.into();
             }
-        }
+            Inode::Extended(x) => {
+                x.xattr_count = xattr_count.into();
+            }
+        };
 
-        assert!(data.len() == 32 || data.len() == 64, "data len = {}", data.len());
+        let data = match &inode {
+            Inode::Compact(x) => x.as_bytes(),
+            Inode::Extended(x) => x.as_bytes(),
+        };
 
-        let xattr_len = std::mem::size_of::<XattrHeader>() + xattrs.iter().map(|(key, value)|
-            std::mem::size_of::<XattrEntry>() + key.len() + value.len()
-            ).sum::<usize>();
-
-        let total_len = data.len() + disk::round_up_to::<4>(xattr_len) + tail.as_ref().map(|x| x.len()).unwrap_or(0);
+        let total_len = data.len() + xattr_len + tail.as_ref().map(|x| x.len()).unwrap_or(0);
 
         if total_len as u64 > self.block_size() {
-            return Err(Error::TailTooBig);
+            return Err(Error::InodeTooBig);
         }
 
-        // we have to check that our inode + tail will fit within a block, if not, advance to the
+        // we have to check that our inode + xattrs + tail will fit within a block, if not, advance to the
         // next block
+        // TODO there is a problem here if we have already made the tail too big to possibly fit if
+        // there are a lot of xattrs; not sure how erofs handles this
         let block_no1 = self.block_no(self.inode_addr);
         let block_no2 = self.block_no(self.inode_addr + total_len as u64);
         if block_no1 != block_no2 {
@@ -1002,20 +1007,27 @@ impl<W: Write + Seek> Builder<W> {
         );
 
         let disk_id = self.addr_to_disk_id(self.inode_addr)?;
+
         self.writer.write_all(data)?;
 
-        { // xattrs
+        if !xattrs.is_empty() {
             let header = XattrHeader::new_zeroed();
             self.writer.write_all(header.as_bytes())?;
             for (key, value) in xattrs.iter() {
                 let mut entry = XattrEntry::new_zeroed();
+                // entry.prefix = 0 is left unset
                 entry.name_len = key.len().try_into().map_err(|_| Error::XattrKeyTooLong)?;
-                entry.value_size = value.len().try_into().map_err(|_| Error::XattrValueTooLong)?;
+                entry.value_size = value
+                    .len()
+                    .try_into()
+                    .map_err(|_| Error::XattrValueTooLong)?;
                 self.writer.write_all(entry.as_bytes())?;
                 self.writer.write_all(key)?;
                 self.writer.write_all(value)?;
             }
-            self.zero_fill(xattr_len, 4)?;
+            for _ in 0..xattr_padding {
+                self.writer.write_all(&[0])?;
+            }
         }
 
         if let Some(tail) = tail {
@@ -1027,7 +1039,8 @@ impl<W: Write + Seek> Builder<W> {
         let padding = self.zero_fill(total_len, INODE_ALIGNMENT)?;
         self.inode_addr += total_len as u64 + padding;
 
-        debug_assert!(self.inode_addr % INODE_ALIGNMENT == 0);
+        #[cfg(debug_assertions)]
+        self.check_writer_alignment("post");
 
         Ok(disk_id)
     }
@@ -1050,12 +1063,14 @@ impl<W: Write + Seek> Builder<W> {
         )?;
         // we are now done writing data, so we record the meta block number
         let meta_block = *self.meta_block.insert(self.cur_data_block);
-        // NOTE without tail packing for dir
-        //let reserve_for_dirs = (std::mem::size_of::<disk::InodeExtended>() * self.n_dirs) as u64;
-        let reserve_for_dirs = disk::round_up_to::<32>(self.dir_inode_buf.len()) as u64;
-
-        self.inode_addr = self.block_addr(meta_block) + reserve_for_dirs;
+        self.inode_addr = self.block_addr(meta_block);
         self.writer.seek(SeekFrom::Start(self.inode_addr))?;
+
+        walk_tree(
+            &mut root.root,
+            &mut BuilderTreeVisitorWriteDirInodes { builder: self },
+            max_depth,
+        )?;
 
         if cfg!(debug_assertions) {
             // this is currently guaranteed without dirent tail packing but could change
@@ -1082,11 +1097,6 @@ impl<W: Write + Seek> Builder<W> {
             max_depth,
         )?;
 
-        //println!("{:#?}", root.root);
-        self.seek_block(meta_block)?;
-        //assert!(reserve_for_dirs == self.dir_inode_buf.len() as u64);
-
-        self.writer.write_all(&self.dir_inode_buf)?;
         let _ = self.root.insert(root);
         Ok(())
     }
@@ -1152,8 +1162,11 @@ fn size_tail_len(len: usize, block_size_bits: u8) -> (usize, usize, usize) {
 
 fn make_mode(typ: FileType, mode: Mode) -> Result<u16, Error> {
     let result = typ.as_raw_mode() | mode.as_raw_mode();
-    if result > u16::MAX as u32 { Err(Error::ModeShouldFitInU16) }
-    else {Ok(result as u16) }
+    if result > u16::MAX as u32 {
+        Err(Error::ModeShouldFitInU16)
+    } else {
+        Ok(result as u16)
+    }
 }
 
 #[cfg(test)]
@@ -1175,7 +1188,7 @@ mod tests {
         Dir,
         Link,
         Symlink,
-        Fifo,
+        //Fifo,
     }
 
     impl Into<FileType> for EntryTyp {
@@ -1184,7 +1197,6 @@ mod tests {
                 EntryTyp::Link | EntryTyp::File => FileType::RegularFile,
                 EntryTyp::Dir => FileType::Directory,
                 EntryTyp::Symlink => FileType::Symlink,
-                _ => todo!(),
             }
         }
     }
@@ -1220,16 +1232,26 @@ mod tests {
     impl std::fmt::Debug for E {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("E")
-             .field("typ", &self.typ)
-             .field("path", &self.path)
-             .field("link", &self.link)
-             .field("mtime", &self.mtime)
-             .field("uid", &self.uid)
-             .field("gid", &self.gid)
-             .field("mode", &self.mode)
-             .field("data", &self.data.as_ref().map(|x| x.escape_ascii().to_string()))
-             .field("xattrs", &self.xattrs.iter().map(|(k, v)| (k.escape_ascii().to_string(), v.escape_ascii().to_string())).collect::<Vec<_>>())
-             .finish()
+                .field("typ", &self.typ)
+                .field("path", &self.path)
+                .field("link", &self.link)
+                .field("mtime", &self.mtime)
+                .field("uid", &self.uid)
+                .field("gid", &self.gid)
+                .field("mode", &self.mode)
+                .field(
+                    "data",
+                    &self.data.as_ref().map(|x| x.escape_ascii().to_string()),
+                )
+                .field(
+                    "xattrs",
+                    &self
+                        .xattrs
+                        .iter()
+                        .map(|(k, v)| (k.escape_ascii().to_string(), v.escape_ascii().to_string()))
+                        .collect::<Vec<_>>(),
+                )
+                .finish()
         }
     }
 
@@ -1266,13 +1288,13 @@ mod tests {
                 ..Default::default()
             }
         }
-        fn fifo<P: Into<PathBuf>>(path: P) -> Self {
-            Self {
-                typ: EntryTyp::Fifo,
-                path: path.into(),
-                ..Default::default()
-            }
-        }
+        //fn fifo<P: Into<PathBuf>>(path: P) -> Self {
+        //    Self {
+        //        typ: EntryTyp::Fifo,
+        //        path: path.into(),
+        //        ..Default::default()
+        //    }
+        //}
         fn uid(mut self: Self, uid: u32) -> Self {
             self.uid = uid;
             self
@@ -1284,7 +1306,6 @@ mod tests {
         }
 
         fn meta(&self) -> Meta {
-            let ft: FileType = self.typ.clone().into();
             Meta {
                 uid: self.uid,
                 gid: self.gid,
@@ -1297,7 +1318,11 @@ mod tests {
 
     type EList = BTreeSet<E>;
 
-    fn inode_to_e<'a, P: AsRef<Path>>(erofs: &'a disk::Erofs, inode: &Inode<'a>, name: P) -> E {
+    fn inode_to_e<'a, P: AsRef<Path>>(
+        erofs: &'a disk::Erofs,
+        inode: &disk::Inode<'a>,
+        name: P,
+    ) -> E {
         let data = match inode.file_type() {
             FileType::RegularFile => {
                 let (l, r) = erofs.get_data(inode).unwrap();
@@ -1314,15 +1339,17 @@ mod tests {
         };
 
         let xattrs = if let Some(xattrs) = erofs.get_xattrs(inode).unwrap() {
-            xattrs.iter().map(|entry| {
-                let entry = entry.unwrap();
-                let prefix = erofs.get_xattr_prefix(&entry).unwrap();
-                ([prefix, entry.name].concat().into(), entry.value.into())
-            }).collect::<XattrMap>()
+            xattrs
+                .iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let prefix = erofs.get_xattr_prefix(&entry).unwrap();
+                    ([prefix, entry.name].concat().into(), entry.value.into())
+                })
+                .collect::<XattrMap>()
         } else {
             XattrMap::new()
         };
-        println!("xattrs: {:?}", xattrs);
 
         E {
             typ: inode.file_type().into(),
@@ -1363,7 +1390,9 @@ mod tests {
                         entry.meta(),
                     )?;
                 }
-                t => todo!("unhandled typ {:?}", t),
+                EntryTyp::Dir => {
+                    b.upsert_dir(&entry.path, entry.meta())?;
+                }
             }
         }
         b.into_inner().map(|(_stats, w)| w)
@@ -1411,6 +1440,18 @@ mod tests {
         let buf = into_erofs(entries, Cursor::new(vec![]))
             .unwrap()
             .into_inner();
+        //for chunk in buf.escape_ascii().to_string().collect::<Vec<_>>().as_slice().chunks(100) {
+        //    println!("{}", chunk);
+        //}
+        //println!("{}", buf.escape_ascii().to_string());
+        if false {
+            let mut proc = std::process::Command::new("xxd")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            proc.stdin.as_mut().unwrap().write_all(&buf).unwrap();
+            proc.wait().unwrap();
+        }
         erofs_to_elist(&buf).unwrap()
     }
 
@@ -1551,7 +1592,7 @@ mod tests {
             )?;
         }
 
-        let tf = b.into_inner().expect("io fail");
+        let _tf = b.into_inner().expect("io fail");
         //fsck_erofs(tf.path())?;
         fsck_erofs(path)?;
         Ok(())
@@ -1589,7 +1630,7 @@ mod tests {
         ($entries:expr) => {{
             let entries = $entries.iter().cloned().collect::<EList>();
             let got = erofs_roundtrip(&entries);
-            println!("got {:?}", got);
+            //println!("got {:?}", got);
             let missing = entries.difference(&got).cloned().collect::<EList>();
             assert_eq!(EList::new(), missing);
             //assert_eq!(
@@ -1602,7 +1643,8 @@ mod tests {
     #[test]
     fn test_fsck_simple() {
         check_erofs_fsck!(vec![
-            E::file("/x", b"hi"),
+            E::file("/x", b"hi").uid(1000),
+            E::dir("/dir"),
             E::file("/dir/x", b"foo"),
             E::file("/a/b/c/d/e/x", b"foo"),
             E::symlink("/y", "/x"),

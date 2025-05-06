@@ -4,8 +4,9 @@ use std::fs::File;
 use memmap2::MmapOptions;
 use rustix::fs::FileType;
 
-use peerofs::disk::{DirentFileType, Erofs, Error, Inode, Layout};
+use peerofs::disk::{DirentFileType, Erofs, Error, Inode};
 
+#[allow(dead_code)]
 fn all_inodes<'a>(erofs: &Erofs<'a>) -> Result<Vec<Inode<'a>>, Error> {
     let mut seen = HashSet::new();
     let mut ret = vec![];

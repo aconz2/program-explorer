@@ -75,7 +75,7 @@ pub enum Error {
     BuiltinPrefixTooBig,
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout, Default, IntoBytes)]
+#[derive(Debug, Immutable, KnownLayout, Default, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct Superblock {
     pub(crate) magic: U32,
@@ -104,7 +104,7 @@ pub struct Superblock {
     _reserved2: [u8; 23],
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Debug, TryFromBytes, Immutable, KnownLayout, IntoBytes)]
 #[repr(C)]
 pub struct InodeCompact {
     pub(crate) format_layout: U16,
@@ -390,15 +390,11 @@ impl<'a> Inode<'a> {
     }
 
     pub fn xattr_size(&self) -> Option<usize> {
-        let count: usize = self.xattr_count().into();
-        if count == 0 {
+        let len = xattr_count_to_len(self.xattr_count().into());
+        if len == 0 {
             None
         } else {
-            // TODO why is this count-1 ??
-            // this already includes any shared xattrs
-            let size = std::mem::size_of::<XattrHeader>()
-                + (count - 1) * std::mem::size_of::<XattrEntry>();
-            Some(size)
+            Some(len)
         }
     }
 
@@ -610,9 +606,8 @@ impl XattrPrefix {
     }
 }
 
-#[derive(Debug)]
 pub struct Xattrs<'a> {
-    header: &'a XattrHeader,
+    pub(crate) header: &'a XattrHeader,
     data: &'a [u8],
     shared_data: &'a [u8],
 }
@@ -1032,10 +1027,30 @@ pub fn round_up_to<const N: usize>(x: usize) -> usize {
     ((x + (N - 1)) / N) * N
 }
 
-pub fn xattr_count(x: usize) -> usize {
-    if x == 0 { 0 }
-    else {
-        (x - 1) * 4
+// compute the xattr_count field for an inode given the sequence of key,value lengths
+// note that this doesn't include the size of XattrHeader as that is implicitly included if
+// count != 0
+// returns the xattr_count field and the unpadded len
+pub fn xattr_count(x: impl Iterator<Item = (usize, usize)>) -> (usize, usize) {
+    let len = x
+        .map(|(k, v)| k + v + std::mem::size_of::<XattrEntry>())
+        .sum::<usize>();
+    // len can only be zero if count was zero since we add sizeof(XattrEntry)
+    if len == 0 {
+        (0, 0)
+    } else {
+        let padded = round_up_to::<{ std::mem::size_of::<XattrEntry>() }>(len);
+        let padding = padded - len; // cannot underflow
+        (padded / 4 + 1, padding)
+    }
+}
+
+pub fn xattr_count_to_len(count: u16) -> usize {
+    if count == 0 {
+        0
+    } else {
+        std::mem::size_of::<XattrHeader>()
+            + (count as usize - 1) * std::mem::size_of::<XattrEntry>()
     }
 }
 
