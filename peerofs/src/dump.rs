@@ -78,6 +78,7 @@ fn main() {
             inode.mode()
         );
         if let Some(xattrs) = erofs.get_xattrs(&inode).unwrap() {
+            //println!("header {:?}", xattrs.header);
             print!(" {{");
             for xattr in xattrs.iter() {
                 if let Ok(xattr) = xattr {
@@ -92,6 +93,8 @@ fn main() {
                         xattr.name.escape_ascii().to_string(),
                         xattr.value.escape_ascii().to_string()
                     );
+                } else {
+                    eprintln!("error getting xattr {:?}", xattr);
                 }
             }
             print!("}}");

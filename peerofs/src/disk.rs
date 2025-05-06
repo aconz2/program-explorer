@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZero;
 
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
@@ -25,6 +26,7 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // and why not just have FlatInline, but if you are storing 8191 bytes for example, then if you
 // always used FlatInline, you would store 1 block and 4095 bytes inline; whereas with FlatPlain
 // you just store in 2 blocks
+// - TODO compressed storage
 //
 // Directories
 // - dirents are stored in blocks of the block size. A single directory may span multiple blocks
@@ -40,12 +42,18 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // Xattrs
 // - there is a built in list of prefixes and then an additional dynamic table of sb.xattr_prefix_count
 // - in an inode, the xattr_count is NOT the number of xattrs. it is the total size of all the
-// xattrs laid out divided by 4 and then +1 (why the +1??).
-// - xattrs are laid out after the map header as (XattryEntry name value)+
+// xattrs (including the shared ids) laid out divided by 4 and then +1 (why the +1??).
+// - xattrs are laid out after the map header as
+//   XattrHeader u32{header.shared_count} (XattryEntry name value)+ padding?
+//               |---------------------------------------------------------|
+//                                   len aligned 4, xattr_count = len / 4 + 1
+//                                   len = (xattr_count - 1) * 4
 // - not sure yet whether xattr data is allowed to span multiple blocks
 // - xattr data is immediately after an inode and before the tail data
 // - TODO don't know what name_filter does (okay looks like part of a bloom filter)
 // - FYI security.selinux xattr values have a null terminator
+// - right now xattr keys are &[u8] when to the kernel they are null terminated strings so can't
+// meaningfully contain a null byte inside
 
 #[derive(Debug)]
 pub enum Error {
@@ -194,7 +202,7 @@ const XATTR_BUILTIN_PREFIX_TABLE: [&'static [u8]; 6] = [
     b"system.posix_acl_access",
     b"system.posix_acl_default",
     b"trusted",
-    b"",
+    b"", // Lustre is unused I think
     b"security.",
 ];
 
@@ -529,7 +537,8 @@ impl<'a> DirentsIterator<'a> {
         let name_offset: usize = dirent.name_offset.into();
         // name_offset is referenced from the start of the block, not relative to the entry itself
 
-        let name = if self.i < self.count - 1 {
+        // addition cannot overflow
+        let name = if (self.i as u32) + 1 < (self.count as u32) {
             let next_dirent = self.get((self.i + 1).into())?;
             let next_offset: usize = next_dirent.name_offset.into();
             let name_len = next_offset - name_offset;
@@ -580,9 +589,10 @@ impl<'a> Iterator for DirentsIterator<'a> {
     }
 }
 
+#[derive(Debug)]
 pub enum XattrPrefix {
-    Builtin(u8), // nonzero && (bit 7 was clear)
-    Table(u8),   // possibly zero (bit 7 was set)
+    Builtin(NonZero<u8>), // nonzero && (bit 7 was clear)
+    Table(u8),   // possibly zero (but max 127) (bit 7 was set)
 }
 
 impl XattrPrefix {
@@ -591,11 +601,9 @@ impl XattrPrefix {
             Ok(None)
         } else if x & 0x80 != 0 {
             Ok(Some(XattrPrefix::Table(x & 0x7f)))
-        }
-        // TODO should we use try_from since here the x could be too big?
-        // right now just checking in get_xattr_prefix
-        else if x < XattrBuiltinPrefix::MAX as u8 {
-            Ok(Some(XattrPrefix::Builtin(x)))
+        } else if x < XattrBuiltinPrefix::MAX as u8 {
+            // x != 0 as checked above
+            Ok(Some(XattrPrefix::Builtin(NonZero::new(x).unwrap())))
         } else {
             Err(Error::InvalidXattrPrefix)
         }
@@ -606,14 +614,20 @@ impl XattrPrefix {
 pub struct Xattrs<'a> {
     header: &'a XattrHeader,
     data: &'a [u8],
+    shared_data: &'a [u8],
 }
 
 impl<'a> Xattrs<'a> {
     pub fn iter(&self) -> XattrsIterator<'a> {
-        XattrsIterator { data: self.data }
+        XattrsIterator {
+            data: self.data,
+            shared_data: self.shared_data,
+            shared_remaining: self.header.shared_count,
+        }
     }
 }
 
+#[derive(Debug)]
 pub struct XattrItem<'a> {
     prefix: Option<XattrPrefix>,
     pub name: &'a [u8],
@@ -622,10 +636,34 @@ pub struct XattrItem<'a> {
 
 pub struct XattrsIterator<'a> {
     data: &'a [u8],
+    shared_data: &'a [u8],
+    shared_remaining: u8,
 }
 
 impl<'a> XattrsIterator<'a> {
-    fn next_impl(&mut self) -> Result<XattrItem<'a>, Error> {
+    // these two are slightly different, unshared needs to advance the offset aligned, idk which I
+    // prefer and whether to unify
+
+    fn next_shared(&mut self) -> Result<XattrItem<'a>, Error> {
+        debug_assert!(self.shared_remaining > 0);
+        self.shared_remaining -= 1;
+        let (index, data) = U32::try_read_from_prefix(self.data).map_err(|_| Error::BadConversion)?;
+        self.data = data;
+
+        let offset = (index.get() as usize) * 4;
+        let (entry, sdata) = XattrEntry::try_ref_from_prefix(self.shared_data.get(offset..).ok_or(Error::Oob)?)
+            .map_err(|_| Error::BadConversion)?;
+        let name_len = usize::from(entry.name_len);
+        let value_len = usize::from(entry.value_size);
+        let (name, sdata) = sdata.split_at_checked(name_len).ok_or(Error::Oob)?;
+        let (value, _) = sdata.split_at_checked(value_len).ok_or(Error::Oob)?;
+        let prefix = XattrPrefix::try_from(entry.name_index)?;
+        Ok(XattrItem {
+            prefix, name, value
+        })
+    }
+
+    fn next_unshared(&mut self) -> Result<XattrItem<'a>, Error> {
         let (entry, data) =
             XattrEntry::try_ref_from_prefix(self.data).map_err(|_| Error::BadConversion)?;
         let name_len = usize::from(entry.name_len);
@@ -658,10 +696,12 @@ impl<'a> Iterator for XattrsIterator<'a> {
     type Item = Result<XattrItem<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.data.is_empty() {
-            None
+        if self.shared_remaining > 0 {
+            Some(self.next_shared())
+        } else if !self.data.is_empty() {
+            Some(self.next_unshared())
         } else {
-            Some(self.next_impl())
+            None
         }
     }
 }
@@ -842,13 +882,21 @@ impl<'a> Erofs<'a> {
         Dirents::new(data, self.block_size() as usize)
     }
 
+    fn xattr_shared_data(&self) -> Result<&'a [u8], Error> {
+        // unfortunately we don't know an upper length bound ahead of time so we just have to slice
+        // open ended
+        let offset = self.block_offset(self.sb.xattr_blkaddr.into()) as usize;
+        self.data.get(offset..).ok_or(Error::Oob)
+    }
+
     pub fn get_xattrs(&self, inode: &Inode<'a>) -> Result<Option<Xattrs<'a>>, Error> {
         if let Some(size) = inode.xattr_size() {
             let offset = (self.inode_offset(inode) + inode.size() as u64) as usize;
             let data = self.data.get(offset..offset + size).ok_or(Error::Oob)?;
+            let shared_data = self.xattr_shared_data()?;
             let (header, data) =
                 XattrHeader::try_ref_from_prefix(data).map_err(|_| Error::BadConversion)?;
-            Ok(Some(Xattrs { header, data }))
+            Ok(Some(Xattrs { header, data, shared_data }))
         } else {
             Ok(None)
         }
@@ -858,9 +906,10 @@ impl<'a> Erofs<'a> {
         match item.prefix {
             None => Ok(&[]),
             Some(XattrPrefix::Builtin(i)) => {
-                assert!(i > 0); // guaranteed by constructor
                 XATTR_BUILTIN_PREFIX_TABLE
-                    .get((i - 1) as usize)
+                    // will not underflow since i NonZero
+                    .get((i.get() - 1) as usize)
+                    // this is checked during construction so shouldn't happen
                     .ok_or(Error::BuiltinPrefixTooBig)
                     .copied()
             }
@@ -993,6 +1042,8 @@ fn round_up_to<const N: usize>(x: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // basic tests
 
     #[test]
     fn test_sizeof() {
