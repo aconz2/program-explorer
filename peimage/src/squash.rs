@@ -27,7 +27,7 @@ pub enum SquashError {
     FifoOpen,
     UidTooBig,
     GidTooBig,
-    UnhandledEntryType(EntryType},
+    UnhandledEntryType(EntryType),
     Erofs(ErofsError),
 }
 
@@ -289,7 +289,7 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
                 self.builder.add_link(path, link, meta)?;
             }
             t => {
-                return Err(Error::UnhandledEntryType(t));
+                return Err(SquashError::UnhandledEntryType(t));
             }
         }
         Ok(())

@@ -54,6 +54,12 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // - FYI security.selinux xattr values have a null terminator
 // - right now xattr keys are &[u8] when to the kernel they are null terminated strings so can't
 // meaningfully contain a null byte inside
+//
+// TODO
+// - add some tests that are independent of build, mainly to read erofs images built by mkfs.erofs
+// which for example excercises shared xattrs which we don't currently implement in build.
+// - take a pass through field names and rename them (I guess retaining a comment to the original
+// field name)
 
 #[derive(Debug)]
 pub enum Error {

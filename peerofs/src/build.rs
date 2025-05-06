@@ -25,7 +25,7 @@ const MAX_DEPTH: usize = 32; // TODO could be configurable
 // meta_blkaddr makes this strategy very suitable and seems "right" to me. One drawback is that if
 // we use tail packing, we have to keep the tails in memory until writing out the inodes.
 //
-// A bit more detail, currently the strategy is
+// A bit more detail, currently the strategy is TODO update this
 // Phase 0:
 //  - Resolve all hardlinks. If a hardlink resolves to a FlatInline node, we have to copy
 //  the tail storage
@@ -445,7 +445,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
 
         let mut iter = dir.children.iter();
 
-        //println!("dir disk id={:?}", dir.disk_id.unwrap());
+        //eprintln!("dir disk id={:?}", dir.disk_id.unwrap());
         for count in dir.n_dirents_per_block.iter() {
             let count = *count;
             let mut name_offset = (count as usize) * std::mem::size_of::<disk::Dirent>();
@@ -1423,20 +1423,20 @@ mod tests {
         let erofs = disk::Erofs::new(data)?;
 
         let root_inode = erofs.get_root_inode()?.disk_id();
-        //println!("root inode is {:?}", root_inode);
+        //eprintln!("root inode is {:?}", root_inode);
         let mut q = vec![(PathBuf::from("/"), root_inode)];
         seen.insert(root_inode);
 
         while let Some((name, cur)) = q.pop() {
             let inode = erofs.get_inode(cur)?;
-            //println!("processing {:?}", cur);
+            //eprintln!("processing {:?}", cur);
             ret.insert(inode_to_e(&erofs, &inode, &name));
             match inode.file_type() {
                 FileType::Directory => {
                     let dirents = erofs.get_dirents(&inode)?;
                     for item in dirents.iter()? {
                         let item = item?;
-                        //println!("item.name= {:?}", item.name);
+                        //eprintln!("item.name= {:?}", item.name);
                         if item.name == b"." || item.name == b".." {
                             continue;
                         }
@@ -1458,10 +1458,6 @@ mod tests {
         let buf = into_erofs(entries, Cursor::new(vec![]))
             .unwrap()
             .into_inner();
-        //for chunk in buf.escape_ascii().to_string().collect::<Vec<_>>().as_slice().chunks(100) {
-        //    println!("{}", chunk);
-        //}
-        //println!("{}", buf.escape_ascii().to_string());
         if false {
             let mut proc = std::process::Command::new("xxd")
                 .stdin(std::process::Stdio::piped())
