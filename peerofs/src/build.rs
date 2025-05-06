@@ -68,7 +68,7 @@ const MAX_DEPTH: usize = 32; // TODO could be configurable
 //
 // Xattrs
 // - we don't build shared xattrs right now
-// - TODO check shared prefix
+// - we do support the builtin prefixes (see XATTR_BUILTIN_PREFIX_TABLE)
 //
 // TODO
 // - link count, do they actually matter?
@@ -110,6 +110,7 @@ pub enum Error {
     TooManyXattrs,
     ModeShouldFitInU16,
     DirDiskIdMismatch { expected: Option<u32>, got: u32 },
+    Oob,
     Other(String),
     Io(std::io::ErrorKind),
 }
@@ -964,11 +965,11 @@ impl<W: Write + Seek> Builder<W> {
 
         self.n_inodes += 1;
 
+        let xattr_entries = make_xattr_entries(xattrs)?;
         let (xattr_count, xattr_padding) =
-            disk::xattr_count(xattrs.iter().map(|(k, v)| (k.len(), v.len())));
+            disk::xattr_count(xattr_entries.iter().map(|(_prefix_len, entry)| entry));
         let xattr_count: u16 = xattr_count.try_into().map_err(|_| Error::TooManyXattrs)?;
         let xattr_len = disk::xattr_count_to_len(xattr_count);
-        println!("xattr_count={xattr_count} xattr_padding={xattr_padding} xattr_len={xattr_len}");
 
         match &mut inode {
             Inode::Compact(x) => {
@@ -1013,16 +1014,11 @@ impl<W: Write + Seek> Builder<W> {
         if !xattrs.is_empty() {
             let header = XattrHeader::new_zeroed();
             self.writer.write_all(header.as_bytes())?;
-            for (key, value) in xattrs.iter() {
-                let mut entry = XattrEntry::new_zeroed();
-                // entry.prefix = 0 is left unset
-                entry.name_len = key.len().try_into().map_err(|_| Error::XattrKeyTooLong)?;
-                entry.value_size = value
-                    .len()
-                    .try_into()
-                    .map_err(|_| Error::XattrValueTooLong)?;
+            for ((prefix_len, entry), (key, value)) in xattr_entries.into_iter().zip(xattrs.iter())
+            {
                 self.writer.write_all(entry.as_bytes())?;
-                self.writer.write_all(key)?;
+                self.writer
+                    .write_all(key.get(usize::from(prefix_len)..).ok_or(Error::Oob)?)?;
                 self.writer.write_all(value)?;
             }
             for _ in 0..xattr_padding {
@@ -1167,6 +1163,28 @@ fn make_mode(typ: FileType, mode: Mode) -> Result<u16, Error> {
     } else {
         Ok(result as u16)
     }
+}
+
+fn make_xattr_entries(xattrs: &XattrMap) -> Result<Vec<(u8, XattrEntry)>, Error> {
+    let ret: Result<Vec<_>, _> = xattrs
+        .iter()
+        .map(|(key, value)| {
+            let (prefix_id, prefix_len) = disk::xattr_builtin_prefix(key).unwrap_or((0, 0));
+            assert!(prefix_len as usize <= key.len());
+            let entry = XattrEntry {
+                name_len: (key.len() - prefix_len as usize)
+                    .try_into()
+                    .map_err(|_| Error::XattrKeyTooLong)?,
+                value_size: value
+                    .len()
+                    .try_into()
+                    .map_err(|_| Error::XattrValueTooLong)?,
+                name_index: prefix_id,
+            };
+            Ok((prefix_len, entry))
+        })
+        .collect();
+    ret
 }
 
 #[cfg(test)]
@@ -1689,6 +1707,11 @@ mod tests {
         check_erofs_roundtrip!(vec![
             E::file("/x", b"hi").xattr("user.attr", "value"),
             E::file("/dir/x", b"foo").xattr("user.attr", "value"),
+            E::file("/y", b"hi").xattr("system.posix_acl_access", "some acl"),
+            E::file("/z", b"hi").xattr("system.posix_acl_default", "some default"),
+            E::file("/a", b"hi").xattr("trusted.foo", "foo"),
+            E::file("/b", b"hi").xattr("security.bar", "bar"),
+            E::file("/c", b"hi").xattr("notaprefix.somethingelse", "baz"),
         ]);
     }
 

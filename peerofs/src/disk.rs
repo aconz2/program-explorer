@@ -181,7 +181,7 @@ pub struct XattrHeader {
 #[repr(C)]
 pub struct XattrEntry {
     pub(crate) name_len: u8,
-    pub(crate) name_index: u8,
+    pub(crate) name_index: u8, // name_index is the prefix id (see XattrPrefix)
     pub(crate) value_size: U16,
     // u8 name[]
 }
@@ -1030,10 +1030,15 @@ pub fn round_up_to<const N: usize>(x: usize) -> usize {
 // compute the xattr_count field for an inode given the sequence of key,value lengths
 // note that this doesn't include the size of XattrHeader as that is implicitly included if
 // count != 0
-// returns the xattr_count field and the unpadded len
-pub fn xattr_count(x: impl Iterator<Item = (usize, usize)>) -> (usize, usize) {
+// entries should already have their prefixes accounted for in name_len
+// returns the xattr_count field and the padding required
+pub fn xattr_count<'a>(x: impl Iterator<Item = &'a XattrEntry>) -> (usize, usize) {
     let len = x
-        .map(|(k, v)| k + v + std::mem::size_of::<XattrEntry>())
+        .map(|entry| {
+            usize::from(entry.name_len)
+                + usize::from(entry.value_size)
+                + std::mem::size_of::<XattrEntry>()
+        })
         .sum::<usize>();
     // len can only be zero if count was zero since we add sizeof(XattrEntry)
     if len == 0 {
@@ -1052,6 +1057,21 @@ pub fn xattr_count_to_len(count: u16) -> usize {
         std::mem::size_of::<XattrHeader>()
             + (count as usize - 1) * std::mem::size_of::<XattrEntry>()
     }
+}
+
+pub fn xattr_builtin_prefix(key: &[u8]) -> Option<(u8, u8)> {
+    XATTR_BUILTIN_PREFIX_TABLE
+        .iter()
+        .enumerate()
+        .find_map(|(i, prefix)| {
+            if key.starts_with(prefix) {
+                // will not overflow because table is small
+                // prefix.len() is u8 because table is static and they are short
+                Some(((i + 1) as u8, prefix.len() as u8))
+            } else {
+                None
+            }
+        })
 }
 
 // TODO:
