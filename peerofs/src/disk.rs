@@ -168,7 +168,7 @@ pub struct ChunkInfo {
     _reserved: U16,
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct XattrHeader {
     name_filter: U32,
@@ -177,12 +177,12 @@ pub struct XattrHeader {
     // u32 shared_xattrs[]
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct XattrEntry {
-    name_len: u8,
-    name_index: u8,
-    value_size: U16,
+    pub(crate) name_len: u8,
+    pub(crate) name_index: u8,
+    pub(crate) value_size: U16,
     // u8 name[]
 }
 
@@ -395,7 +395,7 @@ impl<'a> Inode<'a> {
             None
         } else {
             // TODO why is this count-1 ??
-            // doesn't this also have to include sizeof(u32) * header->shared_count??
+            // this already includes any shared xattrs
             let size = std::mem::size_of::<XattrHeader>()
                 + (count - 1) * std::mem::size_of::<XattrEntry>();
             Some(size)
@@ -592,7 +592,7 @@ impl<'a> Iterator for DirentsIterator<'a> {
 #[derive(Debug)]
 pub enum XattrPrefix {
     Builtin(NonZero<u8>), // nonzero && (bit 7 was clear)
-    Table(u8),   // possibly zero (but max 127) (bit 7 was set)
+    Table(u8),            // possibly zero (but max 127) (bit 7 was set)
 }
 
 impl XattrPrefix {
@@ -630,7 +630,7 @@ impl<'a> Xattrs<'a> {
 #[derive(Debug)]
 pub struct XattrItem<'a> {
     prefix: Option<XattrPrefix>,
-    pub name: &'a [u8],
+    pub name: &'a [u8], // TODO maybe rename this key, though erofs calls it name
     pub value: &'a [u8],
 }
 
@@ -647,19 +647,23 @@ impl<'a> XattrsIterator<'a> {
     fn next_shared(&mut self) -> Result<XattrItem<'a>, Error> {
         debug_assert!(self.shared_remaining > 0);
         self.shared_remaining -= 1;
-        let (index, data) = U32::try_read_from_prefix(self.data).map_err(|_| Error::BadConversion)?;
+        let (index, data) =
+            U32::try_read_from_prefix(self.data).map_err(|_| Error::BadConversion)?;
         self.data = data;
 
         let offset = (index.get() as usize) * 4;
-        let (entry, sdata) = XattrEntry::try_ref_from_prefix(self.shared_data.get(offset..).ok_or(Error::Oob)?)
-            .map_err(|_| Error::BadConversion)?;
+        let (entry, sdata) =
+            XattrEntry::try_ref_from_prefix(self.shared_data.get(offset..).ok_or(Error::Oob)?)
+                .map_err(|_| Error::BadConversion)?;
         let name_len = usize::from(entry.name_len);
         let value_len = usize::from(entry.value_size);
         let (name, sdata) = sdata.split_at_checked(name_len).ok_or(Error::Oob)?;
         let (value, _) = sdata.split_at_checked(value_len).ok_or(Error::Oob)?;
         let prefix = XattrPrefix::try_from(entry.name_index)?;
         Ok(XattrItem {
-            prefix, name, value
+            prefix,
+            name,
+            value,
         })
     }
 
@@ -797,14 +801,7 @@ impl<'a> Erofs<'a> {
     fn inode_end(&self, inode: &Inode<'a>) -> u64 {
         let start = self.inode_offset(inode);
         let inode_size = inode.size();
-        //let xattr_count = inode.xattr_count();
         let xattr_size = inode.xattr_size().unwrap_or(0) as u64;
-        // if xattr header has shared_count, then also include that!
-        //let xattr_size = if xattr_count == 0 {
-        //    0
-        //} else {
-        //    std::mem::size_of::<XattrHeader> + xattr_count * std::mem::size_of<XattrEntry>
-        //}
         start + inode_size as u64 + xattr_size
     }
 
@@ -896,7 +893,11 @@ impl<'a> Erofs<'a> {
             let shared_data = self.xattr_shared_data()?;
             let (header, data) =
                 XattrHeader::try_ref_from_prefix(data).map_err(|_| Error::BadConversion)?;
-            Ok(Some(Xattrs { header, data, shared_data }))
+            Ok(Some(Xattrs {
+                header,
+                data,
+                shared_data,
+            }))
         } else {
             Ok(None)
         }
@@ -1024,11 +1025,18 @@ fn compute_block_tail_len(block_size: usize, size: usize) -> (usize, usize) {
 //    round_up_to<{std::mem::size_of::<T>}>(x)
 //}
 
-fn round_up_to<const N: usize>(x: usize) -> usize {
+pub fn round_up_to<const N: usize>(x: usize) -> usize {
     if x == 0 {
         return N;
     }
     ((x + (N - 1)) / N) * N
+}
+
+pub fn xattr_count(x: usize) -> usize {
+    if x == 0 { 0 }
+    else {
+        (x - 1) * 4
+    }
 }
 
 // TODO:
