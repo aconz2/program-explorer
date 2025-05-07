@@ -55,9 +55,13 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // - right now xattr keys are &[u8] when to the kernel they are null terminated strings so can't
 // meaningfully contain a null byte inside
 //
+// CRC
+// - the crc field is computed with crc32c castagnoli by taking the first block, slicing off the first
+// 1024 bytes, set the superblock crc field to 0, then compute it (over the whole block, not just
+// the superblock since extensions use data stored immediately after the superblock)
+// - initial value is u32::MAX
+//
 // TODO
-// - add some tests that are independent of build, mainly to read erofs images built by mkfs.erofs
-// which for example excercises shared xattrs which we don't currently implement in build.
 // - take a pass through field names and rename them (I guess retaining a comment to the original
 // field name)
 
@@ -389,14 +393,14 @@ impl Inode<'_> {
         }
     }
 
-    pub fn xattr_count(&self) -> u16 {
+    fn xattr_count(&self) -> u16 {
         match self {
             Inode::Compact((_, x)) => x.xattr_count.into(),
             Inode::Extended((_, x)) => x.xattr_count.into(),
         }
     }
 
-    pub fn xattr_size(&self) -> Option<usize> {
+    fn xattr_size(&self) -> Option<usize> {
         let len = xattr_count_to_len(self.xattr_count());
         if len == 0 {
             None
@@ -614,7 +618,7 @@ impl XattrPrefix {
 }
 
 pub struct Xattrs<'a> {
-    pub(crate) header: &'a XattrHeader,
+    header: &'a XattrHeader,
     data: &'a [u8],
     shared_data: &'a [u8],
 }
@@ -712,7 +716,7 @@ impl<'a> Iterator for XattrsIterator<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum DirentFileType {
     Unknown = 0,
     RegularFile = 1,
@@ -773,8 +777,9 @@ pub struct Erofs<'a> {
 
 impl<'a> Erofs<'a> {
     pub fn new(data: &'a [u8]) -> Result<Erofs<'a>, Error> {
-        let (sb, _) = Superblock::try_ref_from_prefix(&data[EROFS_SUPER_OFFSET..])
-            .map_err(|_| Error::BadConversion)?;
+        let (sb, _) =
+            Superblock::try_ref_from_prefix(&data.get(EROFS_SUPER_OFFSET..).ok_or(Error::Oob)?)
+                .map_err(|_| Error::BadConversion)?;
         if sb.magic != EROFS_SUPER_MAGIG_V1 {
             return Err(Error::BadMagic);
         }
@@ -802,6 +807,24 @@ impl<'a> Erofs<'a> {
         let inode_size = inode.size();
         let xattr_size = inode.xattr_size().unwrap_or(0) as u64;
         start + inode_size as u64 + xattr_size
+    }
+
+    pub fn compute_checksum(&self) -> Result<u32, Error> {
+        Ok(crc32c(
+            u32::from(self.sb.magic)
+                .to_le_bytes()
+                .iter()
+                .chain(0u32.to_le_bytes().iter())
+                .chain(
+                    self.data
+                        .get(EROFS_SUPER_OFFSET + 8..self.block_size() as usize)
+                        .ok_or(Error::Oob)?,
+                ),
+        ))
+    }
+
+    pub fn check_checksum(&self) -> Result<bool, Error> {
+        Ok(self.compute_checksum()? == self.sb.checksum.into())
     }
 
     pub fn get_inode(&self, disk_id: u32) -> Result<Inode<'a>, Error> {
@@ -945,6 +968,7 @@ impl<'a> Erofs<'a> {
             return Err(Error::NotSymlink);
         }
         let (block, tail) = self.get_data(inode)?;
+        // TODO I don't know if this is always right
         if !block.is_empty() {
             return Err(Error::NotExpectingBlockData);
         }
@@ -1096,11 +1120,33 @@ pub fn xattr_builtin_prefix(key: &[u8]) -> Option<XattrBuiltinPrefixWithLen> {
         })
 }
 
+// This is a translated version of what appears in erofs-utils
+// I didn't think a specialized or tabled algo was necessary since we only ever compute up to a
+// single page
+fn crc32c<'a>(data: impl IntoIterator<Item = &'a u8>) -> u32 {
+    let poly = 0x82F63B78;
+    let mut crc = u32::MAX;
+    for x in data {
+        crc ^= *x as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (if crc & 1 == 0 { 0 } else { poly });
+        }
+    }
+    crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // basic tests
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+
+    use memmap2::MmapOptions;
+    use rustix::fs::XattrFlags;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[test]
     fn test_sizeof() {
@@ -1150,5 +1196,154 @@ mod tests {
         assert_eq!(128, round_up_to::<128>(127));
         assert_eq!(128, round_up_to::<128>(128));
         assert_eq!(256, round_up_to::<128>(129));
+    }
+
+    fn set_xattr(p: impl rustix::path::Arg, k: &str, v: impl AsRef<[u8]>) {
+        rustix::fs::setxattr(p, k, v.as_ref(), XattrFlags::CREATE).unwrap();
+    }
+
+    fn get_xattr(p: impl rustix::path::Arg, k: &str) -> Option<Box<[u8]>> {
+        let mut buf = vec![0; 128];
+        match rustix::fs::getxattr(p, k, &mut buf) {
+            Ok(size) => {
+                buf.resize(size, 0);
+                Some(buf.into())
+            }
+            Err(e) if e == rustix::io::Errno::NODATA => None,
+            e => {
+                panic!("get_xattr failed {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_with_mkfs() {
+        let dir = tempdir().unwrap();
+        let dest = NamedTempFile::new().unwrap();
+
+        let pa = dir.path().join("a");
+        let pb = dir.path().join("b");
+        let pc = dir.path().join("c");
+        let pd = dir.path().join("d");
+
+        let data_b = vec![0; 4097];
+        let data_c = vec![0; 4096];
+
+        fs::write(&pa, b"hello world").unwrap();
+        fs::write(&pb, &data_b).unwrap();
+        fs::write(&pc, &data_c).unwrap();
+        symlink(&pa, &pd).unwrap();
+
+        for p in [&pa, &pb, &pc] {
+            set_xattr(p, "user.shared", "value-shared");
+        }
+
+        set_xattr(&pa, "user.attr", "unique-a");
+        set_xattr(&pb, "user.attr", "unique-b");
+        set_xattr(&pc, "user.attr", "unique-c");
+
+        let success = Command::new("mkfs.erofs")
+            .arg(dest.path())
+            .arg(dir.path())
+            .arg("-b4096") // block size
+            .arg("-x2") // this means that if more than 2 files have the same xattr, it goes into the
+            // shared xattr table
+            .status()
+            .unwrap()
+            .success();
+        assert!(success);
+
+        // on test systems with selinux, all these tempfiles will have gotten labeled with
+        // security.selinux and thus they all go into the shared xattr table
+        let expected_shared_count = if get_xattr(&pa, "security.selinux").is_some() {
+            2 // security.selinux, user.shared
+        } else {
+            1 // user.shared
+        };
+
+        let mmap = unsafe { MmapOptions::new().map(&dest).unwrap() };
+        let erofs = Erofs::new(&mmap).unwrap();
+
+        assert_eq!(erofs.block_size(), 4096);
+        assert!(erofs.check_checksum().unwrap());
+
+        let root = erofs.get_root_inode().unwrap();
+        let dirents = erofs.get_dirents(&root).unwrap();
+
+        fn xattr_map(erofs: &Erofs, xattrs: &Xattrs) -> BTreeMap<String, Box<[u8]>> {
+            xattrs
+                .iter()
+                .map(|item| {
+                    let item = item.unwrap();
+                    let key = String::from_utf8(
+                        [erofs.get_xattr_prefix(&item).unwrap(), item.name].concat(),
+                    )
+                    .unwrap();
+                    (key, item.value.into())
+                })
+                .collect()
+        }
+
+        fn inode_data(erofs: &Erofs, inode: &Inode) -> Box<[u8]> {
+            let (head, tail) = erofs.get_data(inode).unwrap();
+            [head, tail].concat().into()
+        }
+
+        for item in dirents.iter().unwrap() {
+            let item = item.unwrap();
+            let inode = erofs.get_inode_from_dirent(&item).unwrap();
+            // why isn't there String::from_utf8_slice?
+            match String::from_utf8(item.name.into()).unwrap().as_str() {
+                "." => {
+                    assert_eq!(item.file_type, DirentFileType::Directory);
+                }
+                ".." => {}
+                "a" => {
+                    assert_eq!(item.file_type, DirentFileType::RegularFile);
+                    assert_eq!(inode.file_type(), FileType::RegularFile);
+                    let xattrs = erofs.get_xattrs(&inode).unwrap().unwrap();
+                    assert_eq!(xattrs.header.shared_count, expected_shared_count);
+                    let map = xattr_map(&erofs, &xattrs);
+                    assert_eq!(map["user.shared"].as_ref(), b"value-shared");
+                    assert_eq!(map["user.attr"].as_ref(), b"unique-a");
+                    assert_eq!(inode.data_size() as usize, b"hello world".len());
+                    assert_eq!(inode_data(&erofs, &inode).as_ref(), b"hello world");
+                }
+                "b" => {
+                    assert_eq!(item.file_type, DirentFileType::RegularFile);
+                    assert_eq!(inode.file_type(), FileType::RegularFile);
+                    let xattrs = erofs.get_xattrs(&inode).unwrap().unwrap();
+                    assert_eq!(xattrs.header.shared_count, expected_shared_count);
+                    let map = xattr_map(&erofs, &xattrs);
+                    assert_eq!(map["user.shared"].as_ref(), b"value-shared");
+                    assert_eq!(map["user.attr"].as_ref(), b"unique-b");
+                    assert_eq!(inode.data_size() as usize, data_b.len());
+                    assert_eq!(inode_data(&erofs, &inode).as_ref(), data_b);
+                }
+                "c" => {
+                    assert_eq!(item.file_type, DirentFileType::RegularFile);
+                    assert_eq!(inode.file_type(), FileType::RegularFile);
+                    let xattrs = erofs.get_xattrs(&inode).unwrap().unwrap();
+                    assert_eq!(xattrs.header.shared_count, expected_shared_count);
+                    let map = xattr_map(&erofs, &xattrs);
+                    assert_eq!(map["user.shared"].as_ref(), b"value-shared");
+                    assert_eq!(map["user.attr"].as_ref(), b"unique-c");
+                    assert_eq!(inode.data_size() as usize, data_c.len());
+                    assert_eq!(inode_data(&erofs, &inode).as_ref(), data_c);
+                }
+                "d" => {
+                    assert_eq!(item.file_type, DirentFileType::Symlink);
+                    assert_eq!(inode.file_type(), FileType::Symlink);
+                    // the symlink does get the absolute path...
+                    assert_eq!(
+                        pa.as_os_str().as_encoded_bytes(),
+                        erofs.get_symlink(&inode).unwrap()
+                    );
+                }
+                name => {
+                    assert!(false, "got unexpected file name {}", name);
+                }
+            }
+        }
     }
 }
