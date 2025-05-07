@@ -18,10 +18,10 @@ pub const INODE_ALIGNMENT: u64 = 32;
 //
 // Data Storage
 // - FlatInline storage stores whole blocks worth of data starting at raw_block_addr (number) and
-// then the remainder immediately follows the inode like FlatInline. Inline (also called tail
+// then the remainder immediately follows the inode. Inline (also called tail
 // packing) storage cannot cross a block boundary, so the maximum tail length is really the block
 // size minus inode size (32 or 64 + xattrs). And if you can't fit in the current block, then you
-// have to just skip to the start of the next block.
+// have to skip to the start of the next block.
 // - FlatPlain storage is like FlatInline but with no tail data. I was wondering why this exists
 // and why not just have FlatInline, but if you are storing 8191 bytes for example, then if you
 // always used FlatInline, you would store 1 block and 4095 bytes inline; whereas with FlatPlain
@@ -29,27 +29,31 @@ pub const INODE_ALIGNMENT: u64 = 32;
 // - TODO compressed storage
 //
 // Directories
-// - dirents are stored in blocks of the block size. A single directory may span multiple blocks
-// - Names are stored without null terminator, except the last one in a block. (see next)
-// - The final name in a dirent block *may* have a null terminator if it ends before the block,
-// otherwise the name's last byte is the last byte in the block.
+// - dirents are stored in blocks up to the block size. A single directory may span multiple blocks
 // - dirents can be stored as either FlatInline or FlatPlain. If FlatInline and there is data
 // stored in blocks, the dirent block will end before the tail data starts (since dirent blocks are
 // max sized the block size).
-// - dirent name_offset is relative to the start of the block or start of the tail data
-// - dirents are sorted in name order EXCEPT for . and .. which are materialized on disk
+// - Names are stored without null terminator, except possibly the last one in a block. (see next)
+// - The final name in a dirent block must have a null terminator if it ends before the block
+// because there is no other way to know when it ends. Otherwise the name's last byte is the last
+// byte in the block.
+// - dirent name_offset is relative to the start of the block/tail
+// - dirents are sorted in ascending name order
+// - all dirs must store the . and ..
+// - in the root's dirents, the .. entry points to itself
 //
 // Xattrs
-// - there is a built in list of prefixes and then an additional dynamic table of sb.xattr_prefix_count
-// - in an inode, the xattr_count is NOT the number of xattrs. it is the total size of all the
-// xattrs (including the shared ids) laid out divided by 4 and then +1 (why the +1??).
-// - xattrs are laid out after the map header as
+// - xattr data is immediately after an inode and before the tail data
+// - if an inode has no xattrs, there is no xattr header
+// - xattrs are laid out after the xattr header as
 //   XattrHeader u32{header.shared_count} (XattryEntry name value)+ padding?
 //               |---------------------------------------------------------|
 //                                   len aligned 4, xattr_count = len / 4 + 1
 //                                   len = (xattr_count - 1) * 4
+// - there is a built in list of prefixes and then an additional dynamic table of sb.xattr_prefix_count
+// - in an inode, the xattr_count is NOT the number of xattrs. it is the total size of all the
+// xattrs (including the shared ids) laid out divided by 4 and then +1 (why the +1??).
 // - not sure yet whether xattr data is allowed to span multiple blocks
-// - xattr data is immediately after an inode and before the tail data
 // - TODO don't know what name_filter does (okay looks like part of a bloom filter)
 // - FYI security.selinux xattr values have a null terminator
 // - right now xattr keys are &[u8] when to the kernel they are null terminated strings so can't
