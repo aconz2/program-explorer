@@ -1031,12 +1031,18 @@ pub fn round_up_to<const N: usize>(x: usize) -> usize {
     x.div_ceil(N) * N
 }
 
+#[derive(Default)]
+pub struct XattrCountAndPadding {
+    pub xattr_count: usize,
+    pub padding: usize,
+}
+
 // compute the xattr_count field for an inode given the sequence of key,value lengths
 // note that this doesn't include the size of XattrHeader as that is implicitly included if
 // count != 0
 // entries should already have their prefixes accounted for in name_len
 // returns the xattr_count field and the padding required
-pub fn xattr_count<'a>(x: impl Iterator<Item = &'a XattrEntry>) -> (usize, usize) {
+pub fn xattr_count<'a>(x: impl Iterator<Item = &'a XattrEntry>) -> XattrCountAndPadding {
     let len = x
         .map(|entry| {
             usize::from(entry.name_len)
@@ -1046,11 +1052,15 @@ pub fn xattr_count<'a>(x: impl Iterator<Item = &'a XattrEntry>) -> (usize, usize
         .sum::<usize>();
     // len can only be zero if count was zero since we add sizeof(XattrEntry)
     if len == 0 {
-        (0, 0)
+        XattrCountAndPadding::default()
     } else {
         let padded = round_up_to::<{ std::mem::size_of::<XattrEntry>() }>(len);
         let padding = padded - len; // cannot underflow
-        (padded / 4 + 1, padding)
+        let xattr_count = padded / 4 + 1;
+        XattrCountAndPadding {
+            xattr_count,
+            padding,
+        }
     }
 }
 
@@ -1063,7 +1073,12 @@ pub fn xattr_count_to_len(count: u16) -> usize {
     }
 }
 
-pub fn xattr_builtin_prefix(key: &[u8]) -> Option<(u8, u8)> {
+pub struct XattrBuiltinPrefixWithLen {
+    pub id: u8,
+    pub len: u8,
+}
+
+pub fn xattr_builtin_prefix(key: &[u8]) -> Option<XattrBuiltinPrefixWithLen> {
     XATTR_BUILTIN_PREFIX_TABLE
         .iter()
         .enumerate()
@@ -1071,20 +1086,15 @@ pub fn xattr_builtin_prefix(key: &[u8]) -> Option<(u8, u8)> {
             if key.starts_with(prefix) {
                 // will not overflow because table is small
                 // prefix.len() is u8 because table is static and they are short
-                Some(((i + 1) as u8, prefix.len() as u8))
+                Some(XattrBuiltinPrefixWithLen {
+                    id: (i + 1) as u8,
+                    len: prefix.len() as u8,
+                })
             } else {
                 None
             }
         })
 }
-
-// TODO:
-//   xattr_entry
-//   xattr_prefix
-//   dirent
-//   chunk_index
-//   lz4_cfg
-//   map/clusters
 
 #[cfg(test)]
 mod tests {

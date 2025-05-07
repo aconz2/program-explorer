@@ -966,8 +966,10 @@ impl<W: Write + Seek> Builder<W> {
         self.n_inodes += 1;
 
         let xattr_entries = make_xattr_entries(xattrs)?;
-        let (xattr_count, xattr_padding) =
-            disk::xattr_count(xattr_entries.iter().map(|(_prefix_len, entry)| entry));
+        let disk::XattrCountAndPadding {
+            xattr_count,
+            padding: xattr_padding,
+        } = disk::xattr_count(xattr_entries.iter().map(|(_prefix_len, entry)| entry));
         let xattr_count: u16 = xattr_count.try_into().map_err(|_| Error::TooManyXattrs)?;
         let xattr_len = disk::xattr_count_to_len(xattr_count);
 
@@ -1169,7 +1171,9 @@ fn make_xattr_entries(xattrs: &XattrMap) -> Result<Vec<(u8, XattrEntry)>, Error>
     let ret: Result<Vec<_>, _> = xattrs
         .iter()
         .map(|(key, value)| {
-            let (prefix_id, prefix_len) = disk::xattr_builtin_prefix(key).unwrap_or((0, 0));
+            let (prefix_id, prefix_len) = disk::xattr_builtin_prefix(key)
+                .map(|x| (x.id, x.len))
+                .unwrap_or((0, 0));
             assert!(prefix_len as usize <= key.len());
             let entry = XattrEntry {
                 name_len: (key.len() - prefix_len as usize)
