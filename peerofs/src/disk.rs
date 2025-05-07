@@ -81,7 +81,7 @@ pub enum Error {
     BuiltinPrefixTooBig,
 }
 
-#[derive(Debug, Immutable, KnownLayout, Default, FromZeros, IntoBytes)]
+#[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct Superblock {
     pub(crate) magic: U32,
@@ -200,10 +200,11 @@ enum XattrBuiltinPrefix {
     Trusted = 4,
     Lustre = 5, // I think this is unused
     Security = 6,
+    #[allow(clippy::upper_case_acronyms)]
     MAX = 7,
 }
 
-const XATTR_BUILTIN_PREFIX_TABLE: [&'static [u8]; 6] = [
+const XATTR_BUILTIN_PREFIX_TABLE: [&[u8]; 6] = [
     b"user.",
     b"system.posix_acl_access",
     b"system.posix_acl_default",
@@ -350,7 +351,7 @@ pub enum Inode<'a> {
     Extended((u32, &'a InodeExtended)),
 }
 
-impl<'a> Inode<'a> {
+impl Inode<'_> {
     pub fn format_layout(typ: InodeType, layout: Layout) -> u16 {
         let format = match typ {
             InodeType::Compact => 0u16,
@@ -396,7 +397,7 @@ impl<'a> Inode<'a> {
     }
 
     pub fn xattr_size(&self) -> Option<usize> {
-        let len = xattr_count_to_len(self.xattr_count().into());
+        let len = xattr_count_to_len(self.xattr_count());
         if len == 0 {
             None
         } else {
@@ -521,7 +522,7 @@ impl<'a> DirentsIterator<'a> {
         }
         debug_assert!(!self.data.is_empty());
         let (dirent, _) =
-            Dirent::try_ref_from_prefix(&self.data).map_err(|_| Error::BadConversion)?;
+            Dirent::try_ref_from_prefix(self.data).map_err(|_| Error::BadConversion)?;
         let offset: u16 = dirent.name_offset.into();
         let (count, rem) = div_mod_u16(offset, std::mem::size_of::<Dirent>().try_into().unwrap());
         if rem != 0 {
@@ -743,10 +744,7 @@ impl TryFrom<u8> for DirentFileType {
 
 impl Layout {
     fn is_compressed(&self) -> bool {
-        match self {
-            Layout::CompressedFull | Layout::CompressedCompact => true,
-            _ => false,
-        }
+        matches!(self, Layout::CompressedFull | Layout::CompressedCompact)
     }
 }
 
@@ -842,7 +840,7 @@ impl<'a> Erofs<'a> {
                 let (block_len, tail_len) = self.compute_block_tail_len(inode.data_size());
 
                 let tail = {
-                    let data_begin = self.inode_end(&inode) as usize;
+                    let data_begin = self.inode_end(inode) as usize;
                     self.data
                         .get(data_begin..data_begin + tail_len)
                         .ok_or(Error::Oob)?
@@ -1030,7 +1028,7 @@ pub fn round_up_to<const N: usize>(x: usize) -> usize {
     if x == 0 {
         return N;
     }
-    ((x + (N - 1)) / N) * N
+    x.div_ceil(N) * N
 }
 
 // compute the xattr_count field for an inode given the sequence of key,value lengths
@@ -1134,5 +1132,13 @@ mod tests {
         assert_eq!((4096, 0), compute_block_tail_len(4096, 4096));
         assert_eq!((4096, 1), compute_block_tail_len(4096, 4097));
         assert_eq!((0, 4095), compute_block_tail_len(4096, 4095));
+    }
+
+    #[test]
+    fn test_round_up_to() {
+        assert_eq!(128, round_up_to::<128>(0));
+        assert_eq!(128, round_up_to::<128>(127));
+        assert_eq!(128, round_up_to::<128>(128));
+        assert_eq!(256, round_up_to::<128>(129));
     }
 }

@@ -17,16 +17,13 @@ fn all_inodes<'a>(erofs: &Erofs<'a>) -> Result<Vec<Inode<'a>>, Error> {
             continue;
         }
         let inode = erofs.get_inode(cur)?;
-        match inode.file_type() {
-            FileType::Directory => {
-                let dirents = erofs.get_dirents(&inode)?;
-                //eprintln!("iterating dirent id {:?}", inode.disk_id());
-                for item in dirents.iter()? {
-                    let item = item?;
-                    q.push(item.disk_id.try_into().expect("why is this u64"));
-                }
+        if inode.file_type() == FileType::Directory {
+            let dirents = erofs.get_dirents(&inode)?;
+            //eprintln!("iterating dirent id {:?}", inode.disk_id());
+            for item in dirents.iter()? {
+                let item = item?;
+                q.push(item.disk_id.try_into().expect("why is this u64"));
             }
-            _ => {}
         }
         ret.push(inode);
     }
@@ -91,8 +88,8 @@ fn main() {
                     print!(
                         "{}{}={}, ",
                         prefix,
-                        xattr.name.escape_ascii().to_string(),
-                        xattr.value.escape_ascii().to_string()
+                        xattr.name.escape_ascii(),
+                        xattr.value.escape_ascii(),
                     );
                 } else {
                     eprintln!("error getting xattr {:?}", xattr);
@@ -112,7 +109,7 @@ fn main() {
             DirentFileType::Symlink => {
                 let inode = erofs.get_inode_from_dirent(&item).unwrap();
                 let link = erofs.get_symlink(&inode).unwrap();
-                print!(" -> {}", link.escape_ascii().to_string());
+                print!(" -> {}", link.escape_ascii());
             }
             DirentFileType::RegularFile => {
                 let inode = erofs.get_inode_from_dirent(&item).unwrap();
@@ -125,7 +122,7 @@ fn main() {
             }
             _ => {}
         }
-        println!("");
+        println!();
     }
 
     //let inodes = all_inodes(&erofs).expect("inode gather fail");

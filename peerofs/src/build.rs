@@ -303,7 +303,7 @@ fn walk_tree<V: TreeVisitor>(
                     visitor.on_symlink(s)?;
                 }
                 Dirent::Dir(d) => {
-                    let _ = recur(d, visitor, depth + 1, max_depth)?;
+                    recur(d, visitor, depth + 1, max_depth)?;
                 }
                 Dirent::Dot | Dirent::DotDot => {}
             }
@@ -675,7 +675,7 @@ impl Dir {
             let name_start = len + (std::mem::size_of::<disk::Dirent>() as u64);
             let additional_len = (std::mem::size_of::<disk::Dirent>() + name.len()) as u64;
             let next_len = len + additional_len;
-            if next_len > block_size || name_start > std::u16::MAX as u64 {
+            if next_len > block_size || name_start > u16::MAX as u64 {
                 self.n_dirents_per_block.push(count);
                 count = 1;
                 len = additional_len;
@@ -717,7 +717,7 @@ impl<W: Write + Seek> Builder<W> {
             root: Some(Root::default()),
             increment_uid_gid: None,
             writer: BufWriter::with_capacity(32 * 1024, writer),
-            superblock: Superblock::default(),
+            superblock: Superblock::new_zeroed(),
             cur_data_block: 1,
             block_size_bits,
             meta_block: None,
