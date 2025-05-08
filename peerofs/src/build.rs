@@ -156,7 +156,7 @@ pub struct Builder<W: Write + Seek> {
     max_depth: usize,
 }
 
-type XattrMap = BTreeMap<Box<[u8]>, Box<[u8]>>;
+pub type XattrMap = BTreeMap<Box<[u8]>, Box<[u8]>>;
 
 #[derive(Debug)]
 pub struct Meta {

@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 use flate2::bufread::DeflateDecoder;
 use flate2::bufread::GzDecoder;
 use oci_spec::image::MediaType;
+use rustix::fs::Mode;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
 
 use peerofs::build::{
-    Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats,
+    Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats, XattrMap,
 };
 
 #[derive(Debug)]
@@ -238,18 +239,20 @@ struct SquashToErofs<W: Write + Seek> {
     builder: ErofsBuilder<W>,
 }
 
-fn header_to_meta(header: &tar::Header) -> Result<ErofsMeta, SquashError> {
+fn header_to_meta(header: &tar::Header, xattrs: XattrMap) -> Result<ErofsMeta, SquashError> {
     let meta = ErofsMeta {
         uid: header
-        .uid()?
-        .try_into()
-        .map_err(|_| SquashError::UidTooBig)?,
-    gid: header
-        .gid()?
-        .try_into()
-        .map_err(|_| SquashError::GidTooBig)?,
+            .uid()?
+            .try_into()
+            .map_err(|_| SquashError::UidTooBig)?,
+        gid: header
+            .gid()?
+            .try_into()
+            .map_err(|_| SquashError::GidTooBig)?,
+        mtime: header.mtime()?,
+        mode: Mode::from_raw_mode(header.mode()?),
+        xattrs,
         ..Default::default()
-
     };
     Ok(meta)
 }
@@ -258,21 +261,21 @@ fn header_to_meta(header: &tar::Header) -> Result<ErofsMeta, SquashError> {
 impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
     fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
         // TODO xattrs, mtime
-        //if let Some(extensions) = entry.pax_extensions()? {
-        //    let mut acc = vec![];
-        //    for extension in extensions.into_iter() {
-        //        let extension = extension?;
-        //        let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
-        //        let value = extension.value_bytes();
-        //        acc.push((key, value));
-        //    }
-        //    self.archive.append_pax_extensions(acc)?;
-        //}
+        let mut xattrs = XattrMap::new();
+        if let Some(extensions) = entry.pax_extensions()? {
+            for extension in extensions.into_iter() {
+                let extension = extension?;
+                // maybe we should check this is valid but idk
+                let key = extension.key_bytes();
+                let value = extension.value_bytes();
+                xattrs.insert(key.into(), value.into());
+            }
+        }
 
         // annoying we have to clone the header since we have to borrow the entry to read
         // from. same with owning the path
         let header = entry.header().clone();
-        let meta = header_to_meta(&header)?;
+        let meta = header_to_meta(&header, xattrs)?;
         match entry.header().entry_type() {
             EntryType::Regular => {
                 let path = entry.path()?.into_owned();
