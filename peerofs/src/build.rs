@@ -188,6 +188,7 @@ struct Root {
 struct File {
     meta: Meta,
     start_block: u32,
+    n_links: u32,
     len: usize,
     tail: Option<Box<[u8]>>,
     disk_id: Option<u32>,
@@ -198,6 +199,7 @@ struct File {
 struct Symlink {
     meta: Meta,
     start_block: u32,
+    n_links: u32,
     len: usize,
     tail: Option<Box<[u8]>>,
     disk_id: Option<u32>,
@@ -549,10 +551,10 @@ impl Root {
 
     // cannot lookup the root dir since we couldn't move it into a Dirent::Dir
     // but this is only used for resolving links and can't link to dir so okay
-    fn get<P: AsRef<Path>>(&mut self, path: P) -> Result<Option<&Dirent>, Error> {
+    fn get<P: AsRef<Path>>(&mut self, path: P) -> Result<Option<&mut Dirent>, Error> {
         let path = path.as_ref();
         if let (dir, Some(name)) = self.lookup(path)? {
-            Ok(dir.children.get(name))
+            Ok(dir.children.get_mut(name))
         } else {
             Ok(None)
         }
@@ -850,6 +852,7 @@ impl<W: Write + Seek> Builder<W> {
             start_block,
             len,
             tail,
+            n_links: 1,
             ..Default::default()
         };
         self.root.as_mut().expect("not none").add_file(path, file)
@@ -902,6 +905,7 @@ impl<W: Write + Seek> Builder<W> {
             start_block,
             len,
             tail,
+            n_links: 1,
             ..Default::default()
         };
         self.root
@@ -1126,8 +1130,14 @@ impl<W: Write + Seek> Builder<W> {
                 // is valid but we would try to resolve in the order they come and not in graph
                 // order
                 match root.get(&target)?.ok_or(Error::HardlinkNotResolved)? {
-                    Dirent::File(f) => Ok((f.start_block, f.len, f.tail.clone())),
-                    Dirent::Symlink(s) => Ok((s.start_block, s.len, s.tail.clone())),
+                    Dirent::File(f) => {
+                        f.n_links += 1;
+                        Ok((f.start_block, f.len, f.tail.clone()))
+                    }
+                    Dirent::Symlink(s) => {
+                        s.n_links += 1;
+                        Ok((s.start_block, s.len, s.tail.clone()))
+                    }
                     Dirent::Dot | Dirent::DotDot | Dirent::Dir(_) => Err(Error::HardlinkToDir),
                 }?
             };
@@ -1138,6 +1148,7 @@ impl<W: Write + Seek> Builder<W> {
                     start_block,
                     len,
                     tail,
+                    n_links: 1,
                     ..Default::default()
                 },
             )?;
@@ -1449,7 +1460,7 @@ mod tests {
 
         while let Some((name, cur)) = q.pop() {
             let inode = erofs.get_inode(cur)?;
-            //eprintln!("processing {:?}", cur);
+            //eprintln!("processing {name:?} {}", cur);
             ret.insert(inode_to_e(&erofs, &inode, &name));
             match inode.file_type() {
                 FileType::Directory => {
@@ -1612,9 +1623,7 @@ mod tests {
 
     #[test]
     fn test_builder_simple() -> Result<(), Error> {
-        let path = Path::new("/tmp/peerofs.test.erofs");
-        let mut b = Builder::new(std::fs::File::create(path).expect("tf"))?;
-        //let mut b = Builder::new(NamedTempFile::new().expect("tf"))?;
+        let mut b = Builder::new(NamedTempFile::new().expect("tf"))?;
         {
             let data = b"hello world";
             b.add_file(
@@ -1626,9 +1635,8 @@ mod tests {
             )?;
         }
 
-        let _tf = b.into_inner().expect("io fail");
-        //fsck_erofs(tf.path())?;
-        fsck_erofs(path)?;
+        let (_stats, tf) = b.into_inner().expect("io fail");
+        fsck_erofs(tf.path())?;
         Ok(())
     }
 
@@ -1674,9 +1682,17 @@ mod tests {
         }};
     }
 
+    macro_rules! check_erofs {
+        ($entries:expr) => {{
+            let entries = $entries;
+            check_erofs_fsck!(entries);
+            check_erofs_roundtrip!(entries);
+        }};
+    }
+
     #[test]
     fn test_fsck_simple() {
-        check_erofs_fsck!(vec![
+        check_erofs!(vec![
             E::file("/x", b"hi").uid(1000),
             E::dir("/dir"),
             E::file("/dir/x", b"foo"),
@@ -1689,12 +1705,22 @@ mod tests {
 
     #[test]
     fn test_fsck_tails() {
-        check_erofs_fsck!(vec![
-            E::file("/x", &vec![0; 4095]),
-            E::file("/y", &vec![0; 4097]),
-            E::file("/z", &vec![0; 4096 + 2047]),
-            E::file("/a", &vec![0; 4096 + 2048]),
-            E::file("/b", &vec![0; 4096 + 2049]),
+        // make the data bit more interesting
+        fn d(size: usize) -> Vec<u8> {
+            (0..size).map(|x| x as u8).collect()
+        }
+        check_erofs!(vec![
+            E::file("/a", &d(0)),
+            E::file("/b", &d(1)),
+            E::file("/c", &d(2047)),
+            E::file("/d", &d(2048)),
+            E::file("/e", &d(2049)),
+            E::file("/f", &d(4095)),
+            E::file("/g", &d(4096)),
+            E::file("/h", &d(4097)),
+            E::file("/i", &d(4096 + 2047)),
+            E::file("/j", &d(4096 + 2048)),
+            E::file("/k", &d(4096 + 2049)),
         ]);
     }
 
@@ -1708,19 +1734,19 @@ mod tests {
             // start counting at 1000, this gives us names from 1000 to 1127 and then we append 20
             // 0's to the end to get total length 24
             let start = 1000;
-            let suffix = String::from_utf8(vec![30u8; 20]).unwrap();
+            let suffix = String::from_utf8(vec![48u8; 20]).unwrap();
             for i in start..(start + 128) {
                 let name = format!("{}{}", i, suffix);
                 assert!(name.len() == 24);
                 entries.push(E::file(name, b"data"));
             }
-            check_erofs_fsck!(entries);
+            check_erofs!(entries);
         }
     }
 
     #[test]
     fn test_builder() {
-        check_erofs_roundtrip!(vec![
+        check_erofs!(vec![
             E::file("/x", b"hi").xattr("user.attr", "value"),
             E::symlink("/s1", "/x"),
             E::file("/dir/x", b"foo").xattr("user.attr", "value"),
@@ -1742,6 +1768,7 @@ mod tests {
             very_deep_file.push_str("d/");
         }
         very_deep_file.push_str("f");
+        // should we limit the depth on insertion instead?
         b.add_file(very_deep_file, Meta::default(), 0, &mut Cursor::new(b""))
             .unwrap();
         let Err(Error::MaxDepthExceeded) = b.into_inner() else {

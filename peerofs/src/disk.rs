@@ -89,6 +89,8 @@ pub enum Error {
     NotCompressed,
     InvalidXattrPrefix,
     BuiltinPrefixTooBig,
+    XattrPrefixTableNotHandled,
+    LayoutNotHandled(Layout),
 }
 
 #[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]
@@ -889,13 +891,18 @@ impl<'a> Erofs<'a> {
             }
             Layout::FlatPlain => {
                 let data_len = inode.data_size() as usize;
+                if data_len == 0 {
+                    return Ok(([].as_ref(), [].as_ref()));
+                }
                 let data_begin = self.block_offset(inode.raw_block_addr()) as usize;
                 self.data
                     .get(data_begin..data_begin + data_len)
                     .ok_or(Error::Oob)
-                    .map(|x| (x, &[][..]))
+                    .map(|x| (x, [].as_ref()))
             }
-            layout => todo!("layout={:?} {:?} {:?}", layout, inode, inode.file_type()),
+            layout => {
+                Err(Error::LayoutNotHandled(layout))
+            }
         }
     }
 
@@ -942,7 +949,9 @@ impl<'a> Erofs<'a> {
                     .ok_or(Error::BuiltinPrefixTooBig)
                     .copied()
             }
-            _ => todo!("handle xattr prefix from table"),
+            _ => {
+                Err(Error::XattrPrefixTableNotHandled)
+            }
         }
     }
 
