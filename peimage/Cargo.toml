@@ -18,6 +18,7 @@ rand = "0.9.0"
 rustix = "1.0.5"
 zstd = "0.13.3"
 peerofs = { version = "0.1.0", path = "../peerofs" }
+reqwest = { version = "0.12.15", features = ["stream"] }
 
 [features]
 # skip CRC32 calculation when reading from gzip files, not sure this is a good idea or not
@@ -28,23 +29,27 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "squash"
-path = "src/squashbin.rs"
+path = "src/bin/squashbin.rs"
 
 [[bin]]
 name = "squash-podman"
-path = "src/squashpodman.rs"
+path = "src/bin/squashpodman.rs"
 
 [[bin]]
 name = "squash-oci"
-path = "src/squashoci.rs"
+path = "src/bin/squashoci.rs"
 
 [[bin]]
 name = "squash-erofs"
-path = "src/squasherofs.rs"
+path = "src/bin/squasherofs.rs"
 
 [[bin]]
 name = "tardiff"
-path = "src/tardiff.rs"
+path = "src/bin/tardiff.rs"
+
+[[bin]]
+name = "oci-dist"
+path = "src/bin/ocidist.rs"
 
 [lints]
 workspace = true

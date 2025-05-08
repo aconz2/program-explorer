@@ -3,3 +3,4 @@ pub mod mkfs;
 pub mod ocidir;
 pub mod podman;
 pub mod squash;
+pub mod ocidist;
