@@ -91,7 +91,6 @@ pub fn load_layers_from_podman(image: &str) -> Result<Vec<(Compression, Vec<u8>)
             blobs
                 .remove(&digest_to_string(x.digest())?)
                 .ok_or(Error::MissingBlob)
-                .map_err(|x| x.into())
                 .map(|b| (Compression::Gzip, b))
         })
         .collect()

@@ -6,14 +6,16 @@ use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use flate2::bufread::GzDecoder;
-#[cfg(feature="nocrc")]
+#[cfg(feature = "nocrc")]
 use flate2::bufread::DeflateDecoder;
+use flate2::bufread::GzDecoder;
 use oci_spec::image::MediaType;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
 
-use peerofs::build::{Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats};
+use peerofs::build::{
+    Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats,
+};
 
 #[derive(Debug)]
 pub enum SquashError {
@@ -237,22 +239,25 @@ struct SquashToErofs<W: Write + Seek> {
 }
 
 fn header_to_meta(header: &tar::Header) -> Result<ErofsMeta, SquashError> {
-    let mut meta = ErofsMeta::default();
-    meta.uid = header
+    let meta = ErofsMeta {
+        uid: header
         .uid()?
         .try_into()
-        .map_err(|_| SquashError::UidTooBig)?;
-    meta.gid = header
+        .map_err(|_| SquashError::UidTooBig)?,
+    gid: header
         .gid()?
         .try_into()
-        .map_err(|_| SquashError::GidTooBig)?;
+        .map_err(|_| SquashError::GidTooBig)?,
+        ..Default::default()
+
+    };
     Ok(meta)
 }
 
 // TODO the error handling here is subpar b/c everything gets funneled into SquashError
 impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
     fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
-        // TODO xattrs
+        // TODO xattrs, mtime
         //if let Some(extensions) = entry.pax_extensions()? {
         //    let mut acc = vec![];
         //    for extension in extensions.into_iter() {
@@ -432,15 +437,12 @@ where
                         .expect("only way this can be none is if reader EWOULDBLOCK");
                     Archive::new(DeflateDecoder::new(reader.into_inner()))
                 };
-                #[cfg(not(feature="nocrc"))]
-                let reader = Archive::new(GzDecoder::new(BufReader::with_capacity(32 * 1024, &mut *reader)));
-                squash_layer(
-                    cb,
-                    i,
-                    &mut stats,
-                    &mut deletions,
-                    reader,
-                )?;
+                #[cfg(not(feature = "nocrc"))]
+                let reader = Archive::new(GzDecoder::new(BufReader::with_capacity(
+                    32 * 1024,
+                    &mut *reader,
+                )));
+                squash_layer(cb, i, &mut stats, &mut deletions, reader)?;
             }
             Compression::Zstd => {
                 squash_layer(
