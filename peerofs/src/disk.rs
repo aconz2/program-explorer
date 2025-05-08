@@ -8,6 +8,8 @@ use zerocopy::{FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 pub const EROFS_SUPER_OFFSET: usize = 1024;
 pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
 pub const INODE_ALIGNMENT: u64 = 32;
+// if an inode has only tail data, its blkaddr gets set to -1
+pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 
 // NOTES:
 // - inode ino is a sequential number, but will not match the nid you look it up with; ie the
@@ -782,7 +784,7 @@ pub struct Erofs<'a> {
 impl<'a> Erofs<'a> {
     pub fn new(data: &'a [u8]) -> Result<Erofs<'a>, Error> {
         let (sb, _) =
-            Superblock::try_ref_from_prefix(&data.get(EROFS_SUPER_OFFSET..).ok_or(Error::Oob)?)
+            Superblock::try_ref_from_prefix(data.get(EROFS_SUPER_OFFSET..).ok_or(Error::Oob)?)
                 .map_err(|_| Error::BadConversion)?;
         if sb.magic != EROFS_SUPER_MAGIG_V1 {
             return Err(Error::BadMagic);

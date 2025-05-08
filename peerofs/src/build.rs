@@ -10,7 +10,7 @@ use zerocopy::{FromZeros, IntoBytes};
 use crate::disk;
 use crate::disk::{
     DirentFileType, InodeInfo, InodeType, Layout, Superblock, XattrEntry, XattrHeader,
-    EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, INODE_ALIGNMENT,
+    EROFS_NULL_ADDR, EROFS_SUPER_MAGIG_V1, EROFS_SUPER_OFFSET, INODE_ALIGNMENT,
 };
 
 const MAX_DEPTH: usize = 32; // TODO could be configurable
@@ -70,6 +70,13 @@ const MAX_DEPTH: usize = 32; // TODO could be configurable
 // - we don't build shared xattrs right now
 // - we do support the builtin prefixes (see XATTR_BUILTIN_PREFIX_TABLE)
 //
+// Int sizes
+// - inodes store the block address (really a block number which gets converted to an address by
+// multiplying by the block size) as u32. File/Dir/Symlink structs here store it as a raw u32,
+// which can be u32::MAX ie EROFS_NULL_ADDR if they don't store any data ie only tail data. It
+// would maybe be nicer to do all this with Option<NonMaxU32> which I explored a bit but is a bet
+// messy and not sure how much it improves things.
+//
 // TODO
 // - link count, do they actually matter?
 // - tail pack dirents
@@ -81,6 +88,7 @@ pub enum Error {
     EmptyPath,
     EmptyFilename,
     NotADir,
+    BlockNoTooBig,
     MetaBlockTooBig,
     FileBlockTooBig,
     InodeTooBig,
@@ -179,7 +187,7 @@ struct Root {
 #[derive(Debug, Default)]
 struct File {
     meta: Meta,
-    start_block: u64,
+    start_block: u32,
     len: usize,
     tail: Option<Box<[u8]>>,
     disk_id: Option<u32>,
@@ -189,7 +197,7 @@ struct File {
 #[derive(Debug, Default)]
 struct Symlink {
     meta: Meta,
-    start_block: u64,
+    start_block: u32,
     len: usize,
     tail: Option<Box<[u8]>>,
     disk_id: Option<u32>,
@@ -201,7 +209,7 @@ struct Dir {
     meta: Meta,
     disk_id: Option<u32>,
     // start of data block where dirents is located
-    start_block: Option<u64>,
+    start_block: u32,
     // number of dirents in each block
     n_dirents_per_block: Vec<u16>,
     total_size: u64,
@@ -218,7 +226,7 @@ impl Default for Dir {
             children,
             meta: Meta::default(),
             disk_id: None,
-            start_block: None,
+            start_block: EROFS_NULL_ADDR,
             n_dirents_per_block: vec![],
             total_size: 0,
         }
@@ -339,7 +347,7 @@ struct BuilderTreeVisitorWriteDirents<'a, W: Write + Seek> {
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
     fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let n_blocks =
-            dir.prepare_dirent_data(self.builder.block_size(), self.builder.cur_data_block);
+            dir.prepare_dirent_data(self.builder.block_size(), self.builder.cur_data_block)?;
 
         self.builder.n_dirs += 1;
         self.builder.stats.dirs += 1;
@@ -352,7 +360,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorPrepareDirents<'_, W> {
 fn make_inode(
     file_type: FileType,
     size: u64,
-    start_block: Option<u64>,
+    start_block: u32, // can be EROFS_NULL_ADDR
     meta: &Meta,
     tail: &Option<Box<[u8]>>,
 ) -> Result<disk::InodeExtended, Error> {
@@ -368,12 +376,7 @@ fn make_inode(
     i.gid = meta.gid.into();
     i.mtime = meta.mtime.into();
     i.nlink = 1.into(); // TODO!
-    i.info = InodeInfo::raw_block(
-        start_block
-            .ok_or(Error::NoStartBlock)?
-            .try_into()
-            .map_err(|_| Error::FileBlockTooBig)?,
-    );
+    i.info = InodeInfo::raw_block(start_block);
     i.size = size.into();
 
     Ok(i)
@@ -405,7 +408,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         let inode = Inode::Extended(make_inode(
             FileType::RegularFile,
             file.len as u64,
-            Some(file.start_block),
+            file.start_block,
             &file.meta,
             &file.tail,
         )?);
@@ -423,7 +426,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
         let inode = Inode::Extended(make_inode(
             FileType::Symlink,
             symlink.len as u64,
-            Some(symlink.start_block),
+            symlink.start_block,
             &symlink.meta,
             &symlink.tail,
         )?);
@@ -440,8 +443,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
 impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
     // write dirents in same order as we reserved their blocks so that writes are contiguous
     fn on_dir_enter(&mut self, dir: &mut Dir) -> Result<(), Error> {
-        let start_block = dir.start_block.ok_or(Error::NoStartBlock)?;
-        self.builder.seek_block(start_block)?;
+        self.builder.seek_block(dir.start_block.into())?;
 
         let mut iter = dir.children.iter();
 
@@ -665,9 +667,8 @@ impl Dir {
     // Each block stores as many dirents as possible, limited by
     //  1) name_offset is a u16 offset from the start of the block
     //  2) all names for a block must fit inside the block
-    fn prepare_dirent_data(&mut self, block_size: u64, start_block: u64) -> u64 {
-        let prev = self.start_block.replace(start_block);
-        assert!(prev.is_none());
+    fn prepare_dirent_data(&mut self, block_size: u64, start_block: u64) -> Result<u64, Error> {
+        self.start_block = start_block.try_into().map_err(|_| Error::BlockNoTooBig)?;
         let mut len = 0u64;
         let mut count = 0u16;
 
@@ -706,7 +707,7 @@ impl Dir {
                 sum
             );
         }
-        self.n_dirents_per_block.len() as u64
+        Ok(self.n_dirents_per_block.len() as u64)
     }
 }
 
@@ -820,9 +821,15 @@ impl<W: Write + Seek> Builder<W> {
                 );
             }
         }
-        let start_block = self.cur_data_block;
+        let start_block = if block_len > 0 {
+            self.cur_data_block
+                .try_into()
+                .map_err(|_| Error::BlockNoTooBig)?
+        } else {
+            EROFS_NULL_ADDR
+        };
+
         if block_len > 0 {
-            //self.seek_block(self.cur_data_block)?;
             std::io::copy(&mut contents.take(block_len as u64), &mut self.writer)?;
             self.cur_data_block += n_blocks as u64;
 
@@ -871,10 +878,18 @@ impl<W: Write + Seek> Builder<W> {
         let len = data.len();
         let (n_blocks, block_len, tail_len) = size_tail_len(len, self.block_size_bits);
 
-        let start_block = self.cur_data_block;
-        self.seek_block(self.cur_data_block)?;
-        self.writer.write_all(&data[..block_len])?;
-        self.cur_data_block += n_blocks as u64;
+        let start_block = if block_len > 0 {
+            self.cur_data_block
+                .try_into()
+                .map_err(|_| Error::BlockNoTooBig)?
+        } else {
+            EROFS_NULL_ADDR
+        };
+        if block_len > 0 {
+            self.writer.write_all(&data[..block_len])?;
+            self.zero_fill_block(block_len)?;
+            self.cur_data_block += n_blocks as u64;
+        }
 
         let tail = if tail_len > 0 {
             Some(data[block_len..].into())
@@ -1147,6 +1162,7 @@ impl<W: Write + Seek> Builder<W> {
     }
 }
 
+// not the prettiest return type but only has two callers
 fn size_tail_len(len: usize, block_size_bits: u8) -> (usize, usize, usize) {
     let block_size = 1usize << block_size_bits;
     let n_blocks = len / block_size;
@@ -1345,19 +1361,18 @@ mod tests {
         inode: &disk::Inode<'a>,
         name: P,
     ) -> E {
-        let data = match inode.file_type() {
-            FileType::RegularFile => {
-                let (l, r) = erofs.get_data(inode).unwrap();
-                if l.is_empty() && r.is_empty() {
-                    None
-                } else {
-                    let mut buf = vec![];
-                    buf.extend(l);
-                    buf.extend(r);
-                    Some(buf)
-                }
-            }
-            _ => None,
+        let data = if inode.file_type() == FileType::RegularFile {
+            let (l, r) = erofs.get_data(inode).unwrap();
+            Some([l, r].concat().into())
+        } else {
+            None
+        };
+
+        let link = if inode.file_type() == FileType::Symlink {
+            let (l, r) = erofs.get_data(inode).unwrap();
+            Some(String::from_utf8([l, r].concat().into()).unwrap().into())
+        } else {
+            None
         };
 
         let xattrs = if let Some(xattrs) = erofs.get_xattrs(inode).unwrap() {
@@ -1381,6 +1396,7 @@ mod tests {
             mode: Mode::from_raw_mode(inode.mode() as u32).as_raw_mode() as u16, // mask out the S_IFMT
             data: data,
             xattrs,
+            link,
             ..Default::default()
         }
     }
@@ -1648,7 +1664,7 @@ mod tests {
         ($entries:expr) => {{
             let entries = $entries.iter().cloned().collect::<EList>();
             let got = erofs_roundtrip(&entries);
-            //println!("got {:?}", got);
+            //println!("got {:#?}", got);
             let missing = entries.difference(&got).cloned().collect::<EList>();
             assert_eq!(EList::new(), missing);
             //assert_eq!(
@@ -1706,12 +1722,14 @@ mod tests {
     fn test_builder() {
         check_erofs_roundtrip!(vec![
             E::file("/x", b"hi").xattr("user.attr", "value"),
+            E::symlink("/s1", "/x"),
             E::file("/dir/x", b"foo").xattr("user.attr", "value"),
             E::file("/y", b"hi").xattr("system.posix_acl_access", "some acl"),
             E::file("/z", b"hi").xattr("system.posix_acl_default", "some default"),
             E::file("/a", b"hi").xattr("trusted.foo", "foo"),
             E::file("/b", b"hi").xattr("security.bar", "bar"),
             E::file("/c", b"hi").xattr("notaprefix.somethingelse", "baz"),
+            E::symlink("/s2", "/x"),
         ]);
     }
 

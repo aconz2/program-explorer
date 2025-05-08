@@ -625,3 +625,6 @@ xattrs:
 dnf install -y attr
 setfattr -n user.MYATTR -v value filename
 getfattr -m '.+' -d filename
+
+reqwest bytes_stream
+futures::StreamExt gives stream.inspect
