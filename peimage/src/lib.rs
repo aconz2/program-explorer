@@ -1,5 +1,5 @@
 pub mod index;
 pub mod mkfs;
-pub mod oci;
+pub mod ocidir;
 pub mod podman;
 pub mod squash;

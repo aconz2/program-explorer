@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::os::fd::FromRawFd;
 
-use peimage::oci::load_layers_from_oci;
+use peimage::ocidir::load_layers_from_oci;
 use peimage::squash::{squash_to_erofs, squash_to_tar};
 
 fn main() {
