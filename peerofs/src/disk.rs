@@ -472,6 +472,13 @@ impl Inode<'_> {
             _ => Err(Error::NotRegDirLink),
         }
     }
+
+    pub fn link_count(&self) -> u32 {
+        match self {
+            Inode::Compact((_, x)) => x.nlink.into(),
+            Inode::Extended((_, x)) => x.nlink.into(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -552,11 +559,12 @@ impl<'a> DirentsIterator<'a> {
         let name_offset: usize = dirent.name_offset.into();
         // name_offset is referenced from the start of the block, not relative to the entry itself
 
-        // addition cannot overflow
+        // addition cannot overflow because count < u16::MAX
         let name = if (self.i as u32) + 1 < (self.count as u32) {
             let next_dirent = self.get((self.i + 1).into())?;
             let next_offset: usize = next_dirent.name_offset.into();
             let name_len = next_offset - name_offset;
+            self.i += 1;
             self.data
                 .get(name_offset..name_offset + name_len)
                 .ok_or(Error::Oob)?
@@ -574,8 +582,6 @@ impl<'a> DirentsIterator<'a> {
                 slice
             }
         };
-
-        self.i += 1;
 
         Ok(DirentItem {
             disk_id,
@@ -900,9 +906,7 @@ impl<'a> Erofs<'a> {
                     .ok_or(Error::Oob)
                     .map(|x| (x, [].as_ref()))
             }
-            layout => {
-                Err(Error::LayoutNotHandled(layout))
-            }
+            layout => Err(Error::LayoutNotHandled(layout)),
         }
     }
 
@@ -949,9 +953,7 @@ impl<'a> Erofs<'a> {
                     .ok_or(Error::BuiltinPrefixTooBig)
                     .copied()
             }
-            _ => {
-                Err(Error::XattrPrefixTableNotHandled)
-            }
+            _ => Err(Error::XattrPrefixTableNotHandled),
         }
     }
 
@@ -967,12 +969,6 @@ impl<'a> Erofs<'a> {
         //  think)
         // for compact I think this is right
         let start = round_up_to::<8usize>(self.inode_end(inode) as usize);
-        eprintln!(
-            "start={} {:x} {:?}",
-            start,
-            start,
-            &self.data[start..start + 128]
-        );
         MapHeader::try_ref_from_prefix(self.data.get(start..).ok_or(Error::Oob)?)
             .map_err(|_| Error::BadConversion)
             .map(|(x, _)| x)

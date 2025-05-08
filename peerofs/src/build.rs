@@ -365,6 +365,7 @@ fn make_inode(
     start_block: u32, // can be EROFS_NULL_ADDR
     meta: &Meta,
     tail: &Option<Box<[u8]>>,
+    n_links: u32,
 ) -> Result<disk::InodeExtended, Error> {
     let layout = if tail.is_some() {
         Layout::FlatInline
@@ -377,7 +378,7 @@ fn make_inode(
     i.uid = meta.uid.into();
     i.gid = meta.gid.into();
     i.mtime = meta.mtime.into();
-    i.nlink = 1.into(); // TODO!
+    i.nlink = n_links.into();
     i.info = InodeInfo::raw_block(start_block);
     i.size = size.into();
 
@@ -392,6 +393,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirInodes<'_, W> {
             dir.start_block,
             &dir.meta,
             &None,
+            1,
         )?);
 
         let disk_id = self.builder.write_inode(inode, &None, &dir.meta.xattrs)?;
@@ -413,6 +415,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             file.start_block,
             &file.meta,
             &file.tail,
+            file.n_links,
         )?);
 
         let disk_id = self
@@ -431,6 +434,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteInodes<'_, W> {
             symlink.start_block,
             &symlink.meta,
             &symlink.tail,
+            symlink.n_links,
         )?);
 
         let disk_id = self
@@ -457,7 +461,6 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
 
             for _ in 0..count {
                 let (name, child) = iter.next().expect("Missing child");
-                //eprintln!("self.parents {:?}", self.parents);
                 let disk_id = match child {
                     Dirent::File(f) => f.disk_id,
                     Dirent::Dir(d) => d.disk_id,
@@ -479,9 +482,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
                     d
                 };
 
-                //println!("writing entry for {:?}", name);
                 written += dirent.as_bytes().len();
-                written += name.as_bytes().len();
                 self.builder.writer.write_all(dirent.as_bytes())?;
                 self.builder.name_buf.extend(name.as_bytes());
 
@@ -489,6 +490,7 @@ impl<W: Write + Seek> TreeVisitor for BuilderTreeVisitorWriteDirents<'_, W> {
             }
 
             self.builder.writer.write_all(&self.builder.name_buf)?;
+            written += self.builder.name_buf.len();
             self.builder.zero_fill_block(written)?;
             self.builder.cur_data_block += 1;
 
@@ -675,6 +677,7 @@ impl Dir {
         let mut count = 0u16;
 
         for name in self.children.keys() {
+            //println!("name={:?}", name);
             let name_start = len + (std::mem::size_of::<disk::Dirent>() as u64);
             let additional_len = (std::mem::size_of::<disk::Dirent>() + name.len()) as u64;
             let next_len = len + additional_len;
@@ -696,7 +699,7 @@ impl Dir {
         }
         self.total_size = total_size;
 
-        // TODO this check will change with tail packing
+        // NOTE this check will change with tail packing
         let sum = self
             .n_dirents_per_block
             .iter()
@@ -1230,6 +1233,10 @@ mod tests {
     use rustix::fs::Mode;
     use tempfile::NamedTempFile;
 
+    // NOTE: we can't easily test links in a roundtrip fashion because links get read as normal
+    // files, the only way to detect if they are a link is to check the meta_blkaddr of the inode
+    // and even if you do, there is no distinguishing the "original" file and the hardlink
+
     #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
     enum EntryTyp {
         #[default]
@@ -1672,8 +1679,10 @@ mod tests {
         ($entries:expr) => {{
             let entries = $entries.iter().cloned().collect::<EList>();
             let got = erofs_roundtrip(&entries);
-            //println!("got {:#?}", got);
             let missing = entries.difference(&got).cloned().collect::<EList>();
+            if !missing.is_empty() {
+                eprintln!("got {:#?}", got);
+            }
             assert_eq!(EList::new(), missing);
             //assert_eq!(
             //    entries,
@@ -1698,8 +1707,6 @@ mod tests {
             E::file("/dir/x", b"foo"),
             E::file("/a/b/c/d/e/x", b"foo"),
             E::symlink("/y", "/x"),
-            E::link("/dir/link", "/x"),
-            E::file("/x", b"hi").xattr("user.attr", "value"),
         ]);
     }
 
@@ -1726,20 +1733,21 @@ mod tests {
 
     #[test]
     fn test_fsck_big_dir() {
-        // a dirent is 8 bytes, to evenly fill a whole (4096) block we can have
-        // 128 entries with name length of 24 since
-        // (128 * (24 + 8) == 4096)
-        {
-            let mut entries = vec![];
-            // start counting at 1000, this gives us names from 1000 to 1127 and then we append 20
-            // 0's to the end to get total length 24
-            let start = 1000;
-            let suffix = String::from_utf8(vec![48u8; 20]).unwrap();
-            for i in start..(start + 128) {
-                let name = format!("{}{}", i, suffix);
-                assert!(name.len() == 24);
-                entries.push(E::file(name, b"data"));
-            }
+        // a dirent is 12 bytes, there are always 2 entries for . and .. so always 2*12+3 = 27
+        // bytes, 4096 - 27 = 4069
+        // with 200 entries of name length 8, we have (12 + 88) * 40 = 4000, which leaves room for
+        // one entry with 69 - 12 = 57 bytes long to exactly fill one block
+        // start counting at 1000, this gives us names from 1000 to 1127 and then we append 20
+        // 0's to the end to get total length 24
+        //for i in start..(start + 128) {
+        for delta in [-1, 0, 1] {
+            let mut entries: Vec<_> = (0..40)
+                .map(|i| E::file(format!("/{:088}", i), b"data"))
+                .collect();
+            let width = (57 + delta) as usize;
+            // use fill character 9 so that this one is last (not necessary but easier to think
+            // about)
+            entries.push(E::file(format!("/{:z<width$}", "z"), b"data"));
             check_erofs!(entries);
         }
     }
@@ -1774,5 +1782,31 @@ mod tests {
         let Err(Error::MaxDepthExceeded) = b.into_inner() else {
             panic!("should have been MaxDepthExceeded");
         };
+    }
+
+    #[test]
+    fn test_link_count() {
+        let entries: EList = vec![E::file("/x", b"hi"), E::link("/y", "/x")]
+            .into_iter()
+            .collect();
+        let buf = into_erofs(&entries, Cursor::new(vec![]))
+            .unwrap()
+            .into_inner();
+        let erofs = disk::Erofs::new(&buf).unwrap();
+        for item in erofs
+            .get_dirents(&erofs.get_root_inode().unwrap())
+            .unwrap()
+            .iter()
+            .unwrap()
+        {
+            let item = item.unwrap();
+            match item.name {
+                b"x" => {
+                    let inode = erofs.get_inode_from_dirent(&item).unwrap();
+                    assert_eq!(inode.link_count(), 2);
+                }
+                _ => {}
+            }
+        }
     }
 }
