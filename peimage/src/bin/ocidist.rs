@@ -44,6 +44,8 @@ async fn main() {
         println!("got manifest {:#?}", res.manifest());
         println!("got configuration {:#?}", res.configuration());
 
+        println!("{:#?}", client.stats().await);
+
         client.persist().unwrap();
     } else {
         let mut client = peimage::ocidist::Client::new().unwrap();
