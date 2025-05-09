@@ -252,7 +252,6 @@ fn header_to_meta(header: &tar::Header, xattrs: XattrMap) -> Result<ErofsMeta, S
         mtime: header.mtime()?,
         mode: Mode::from_raw_mode(header.mode()?),
         xattrs,
-        ..Default::default()
     };
     Ok(meta)
 }
@@ -260,7 +259,6 @@ fn header_to_meta(header: &tar::Header, xattrs: XattrMap) -> Result<ErofsMeta, S
 // TODO the error handling here is subpar b/c everything gets funneled into SquashError
 impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
     fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
-        // TODO xattrs, mtime
         let mut xattrs = XattrMap::new();
         if let Some(extensions) = entry.pax_extensions()? {
             for extension in extensions.into_iter() {

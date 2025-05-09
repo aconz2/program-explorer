@@ -626,5 +626,8 @@ dnf install -y attr
 setfattr -n user.MYATTR -v value filename
 getfattr -m '.+' -d filename
 
-reqwest bytes_stream
-futures::StreamExt gives stream.inspect
+to get an image index for a tag (don't think you can get an index for a digest),
+curl -v -H 'Accept: application/vnd.oci.image.index.v1+json' -v https://quay.io/v2/fedora/fedora/manifests/42
+then use the digest to get the manifest
+curl -v -H 'Accept: application/vnd.oci.image.manifest.v1+json' -v https://quay.io/v2/fedora/fedora/blobs/sha256:c21a0d95f9633eabc079773cd3d160cbacfd99fd1c7c636be86
+dbfc4a96e9c4d

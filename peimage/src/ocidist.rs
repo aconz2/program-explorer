@@ -1,17 +1,18 @@
 use std::io::Cursor;
 
 use bytes::Bytes;
-use log::trace;
+use log::{error, trace};
 use oci_spec::{
     distribution::Reference,
-    image::{Digest, DigestAlgorithm, ImageConfiguration, ImageManifest},
+    image::{Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest},
+    OciSpecError,
 };
 use reqwest::{header, Method, StatusCode};
 use sha2::Sha256;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-// common for blobs to get redirected
-// we want to
+// TODO
+// - auth
 
 const DOCKER_CONTENT_DIGEST_HEADER: &str = "docker-content-digest";
 
@@ -21,8 +22,6 @@ pub enum Error {
     DigestMismatch,
     NoTagOrDigest,
     BothTagAndDigest,
-    BadManifest,
-    BadConfig,
     BadDockerContentDigest,
     Write,
     DigestAlgorithmNotHandled(DigestAlgorithm),
@@ -35,33 +34,47 @@ impl From<reqwest::Error> for Error {
     }
 }
 
+#[derive(Clone)]
 pub struct Client {
     client: reqwest::Client,
 }
 
-pub struct ManifestResponse {
+pub struct ImageManifestResponse {
     data: Bytes,
 }
 
-pub struct ConfigurationResponse {
+pub struct ImageIndexResponse {
     data: Bytes,
 }
 
-impl ManifestResponse {
+pub struct ImageConfigurationResponse {
+    data: Bytes,
+}
+
+impl ImageManifestResponse {
     pub fn data(&self) -> &Bytes {
         &self.data
     }
-    pub fn get(&self) -> Result<ImageManifest, Error> {
-        ImageManifest::from_reader(Cursor::new(&self.data)).map_err(|_| Error::BadManifest)
+    pub fn get(&self) -> Result<ImageManifest, OciSpecError> {
+        ImageManifest::from_reader(Cursor::new(&self.data))
     }
 }
 
-impl ConfigurationResponse {
+impl ImageConfigurationResponse {
     pub fn data(&self) -> &Bytes {
         &self.data
     }
-    pub fn get(&self) -> Result<ImageConfiguration, Error> {
-        ImageConfiguration::from_reader(Cursor::new(&self.data)).map_err(|_| Error::BadConfig)
+    pub fn get(&self) -> Result<ImageConfiguration, OciSpecError> {
+        ImageConfiguration::from_reader(Cursor::new(&self.data))
+    }
+}
+
+impl ImageIndexResponse {
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+    pub fn get(&self) -> Result<ImageIndex, OciSpecError> {
+        ImageIndex::from_reader(Cursor::new(&self.data))
     }
 }
 
@@ -98,45 +111,32 @@ impl Client {
         Ok(Client { client })
     }
 
-    pub async fn get_manifest(
+    pub async fn get_image_manifest(
         &mut self,
         reference: &Reference,
-    ) -> Result<Option<ManifestResponse>, Error> {
-        // handles converting docker.io to index.docker.io
-        let domain = reference.resolve_registry();
-        let repo = reference.repository();
-        let td = TagOrDigest::try_from(reference)?;
-
-        let url = format!("https://{domain}/v2/{repo}/manifests/{}", td.as_str());
-
-        trace!("GET {url}");
-        let request = self.client.request(Method::GET, &url)
-            .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json");
-
-        let response = request.send().await?;
-        trace!(
-            "domain={:?} addr={:?}",
-            response.url().domain(),
-            response.remote_addr()
-        );
-
-        match response.status() {
-            StatusCode::OK => {
-                let digest = get_docker_content_digest(&response)?;
-                let data = response.bytes().await?;
-                check_data_matches_digest(digest.as_ref(), &data)?;
-                Ok(Some(ManifestResponse { data }))
-            }
-            StatusCode::NOT_FOUND => Ok(None),
-            status => Err(Error::StatusNotOk(status)),
-        }
+    ) -> Result<Option<ImageManifestResponse>, Error> {
+        let content_type = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+        Ok(self
+            .get_manifest(reference, content_type)
+            .await?
+            .map(|data| ImageManifestResponse { data }))
     }
 
-    pub async fn get_image_config(
+    pub async fn get_image_index(
+        &mut self,
+        reference: &Reference,
+    ) -> Result<Option<ImageIndexResponse>, Error> {
+        Ok(self
+            .get_manifest(reference, "application/vnd.oci.image.index.v1+json")
+            .await?
+            .map(|data| ImageIndexResponse { data }))
+    }
+
+    pub async fn get_image_configuration(
         &mut self,
         reference: &Reference,
         digest: &Digest,
-    ) -> Result<Option<ConfigurationResponse>, Error> {
+    ) -> Result<Option<ImageConfigurationResponse>, Error> {
         let response = self.request_blob(reference, digest).await?;
         trace!(
             "domain={:?} addr={:?}",
@@ -149,7 +149,7 @@ impl Client {
                 let expected_digest = get_docker_content_digest(&response)?;
                 let data = response.bytes().await?;
                 check_data_matches_digest(expected_digest.as_ref(), &data)?;
-                Ok(Some(ConfigurationResponse { data }))
+                Ok(Some(ImageConfigurationResponse { data }))
             }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(Error::StatusNotOk(status)),
@@ -194,12 +194,48 @@ impl Client {
                 check_digest_matches(digest, hasher)?;
             }
             algo => {
+                error!("blob algo not handled {}", algo);
                 return Err(Error::DigestAlgorithmNotHandled(algo.clone()));
             }
         };
-        //println!("check {:?} {:?}", digest, hex::encode(&computed_digest));
 
         Ok(Some(len))
+    }
+
+    async fn get_manifest(
+        &mut self,
+        reference: &Reference,
+        accept: &str,
+    ) -> Result<Option<Bytes>, Error> {
+        let domain = reference.resolve_registry();
+        let repo = reference.repository();
+        let td = TagOrDigest::try_from(reference)?;
+
+        let url = format!("https://{domain}/v2/{repo}/manifests/{}", td.as_str());
+
+        trace!("GET {url}");
+        let request = self
+            .client
+            .request(Method::GET, &url)
+            .header(header::ACCEPT, accept);
+
+        let response = request.send().await?;
+        trace!(
+            "domain={:?} addr={:?}",
+            response.url().domain(),
+            response.remote_addr()
+        );
+
+        match response.status() {
+            StatusCode::OK => {
+                let digest = get_docker_content_digest(&response)?;
+                let data = response.bytes().await?;
+                check_data_matches_digest(digest.as_ref(), &data)?;
+                Ok(Some(data))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(Error::StatusNotOk(status)),
+        }
     }
 
     async fn request_blob(
@@ -261,23 +297,42 @@ fn data_matches_digest(expected: &Digest, data: &[u8]) -> Result<bool, Error> {
             hasher.update(data);
             Ok(digest_eq(expected.digest(), hasher))
         }
-        algo => Err(Error::DigestAlgorithmNotHandled(algo.clone())),
+        algo => {
+            error!("manifest algo not handled {}", algo);
+            Err(Error::DigestAlgorithmNotHandled(algo.clone()))
+        }
     }
 }
 
 // is this too weird? it checks without allocating
-// oci::image::Digest guarantees the format of the digest string
+// oci::image::Digest guarantees the format of the digest string for length and lower hex
+// instead of decoding the digest string into bytes, we encode the digest bytes into strings one
+// nibble at a time
+// requires digest_lower_hex_str to be lower hex and it was produced with an algo matching the
+// passed in Digest
 fn digest_eq(digest_lower_hex_str: &str, digest: impl sha2::Digest) -> bool {
     let digest_bytes = digest.finalize();
     let l = digest_lower_hex_str.len();
     if l != 2 * digest_bytes.len() {
         return false;
     }
-    let as_bytes = (0..l)
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&digest_lower_hex_str[i..i + 2], 16).unwrap());
-    // zip guaranteed to equal
-    as_bytes.zip(digest_bytes.iter()).all(|(l, r)| l == *r)
+
+    // table mapping nibble to lower hex ascii
+    #[rustfmt::skip]
+    const LUT: [u8; 16] = [
+        //0  1   2   3   4   5   6   7   8   9
+        48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
+        //a  b   c    d    e    f
+        97, 98, 99, 100, 101, 102,
+    ];
+    // checked length was even
+    let as_byte_pairs = <str as AsRef<[u8]>>::as_ref(digest_lower_hex_str).chunks_exact(2);
+
+    as_byte_pairs
+        .zip(digest_bytes.into_iter())
+        .all(|(pair, byte)| {
+            LUT[(byte >> 4) as usize] == pair[0] && LUT[(byte & 0xf) as usize] == pair[1]
+        })
 }
 
 #[cfg(test)]
@@ -286,52 +341,33 @@ mod tests {
 
     #[test]
     fn test_digest_eq() {
+        fn sha256_digest(data: impl AsRef<[u8]>) -> impl sha2::Digest {
+            use sha2::Digest;
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hasher
+        }
         assert_eq!(
             true,
             digest_eq(
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                [
-                    0xba, 0x78, 0x16, 0xbf, 0x8f, 0x1, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d,
-                    0xae, 0x22, 0x23, 0xb0, 0x3, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10,
-                    0xff, 0x61, 0xf2, 0x0, 0x15, 0xad
-                ]
-                .as_ref()
+                sha256_digest("abc"),
             )
         );
         assert_eq!(
             false,
             digest_eq(
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ac",
-                [
-                    0xba, 0x78, 0x16, 0xbf, 0x8f, 0x1, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d,
-                    0xae, 0x22, 0x23, 0xb0, 0x3, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10,
-                    0xff, 0x61, 0xf2, 0x0, 0x15, 0xad
-                ]
-                .as_ref()
-            )
-        );
-        assert_eq!(
-            false,
-            digest_eq(
+                // missing last char
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015a",
-                [
-                    0xba, 0x78, 0x16, 0xbf, 0x8f, 0x1, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d,
-                    0xae, 0x22, 0x23, 0xb0, 0x3, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10,
-                    0xff, 0x61, 0xf2, 0x0, 0x15, 0xad
-                ]
-                .as_ref()
+                sha256_digest("abc"),
             )
         );
         assert_eq!(
             false,
             digest_eq(
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                [
-                    0xba, 0x78, 0x16, 0xbf, 0x8f, 0x1, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d,
-                    0xae, 0x22, 0x23, 0xb0, 0x3, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10,
-                    0xff, 0x61, 0xf2, 0x0, 0x15
-                ]
-                .as_ref()
+                // wrong last char
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ae",
+                sha256_digest("abc"),
             )
         );
     }
