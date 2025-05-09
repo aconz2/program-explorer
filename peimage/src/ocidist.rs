@@ -4,7 +4,7 @@ use bytes::Bytes;
 use log::{error, trace};
 use oci_spec::{
     distribution::Reference,
-    image::{Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest},
+    image::{Arch, Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest, Os},
     OciSpecError,
 };
 use reqwest::{header, Method, StatusCode};
@@ -24,6 +24,7 @@ pub enum Error {
     BothTagAndDigest,
     BadDockerContentDigest,
     Write,
+    BadImageIndex,
     DigestAlgorithmNotHandled(DigestAlgorithm),
     StatusNotOk(StatusCode),
 }
@@ -40,6 +41,7 @@ pub struct Client {
 }
 
 pub struct ImageManifestResponse {
+    digest: Digest,
     data: Bytes,
 }
 
@@ -48,12 +50,16 @@ pub struct ImageIndexResponse {
 }
 
 pub struct ImageConfigurationResponse {
+    digest: Digest,
     data: Bytes,
 }
 
 impl ImageManifestResponse {
     pub fn data(&self) -> &Bytes {
         &self.data
+    }
+    pub fn digest(&self) -> &Digest {
+        &self.digest
     }
     pub fn get(&self) -> Result<ImageManifest, OciSpecError> {
         ImageManifest::from_reader(Cursor::new(&self.data))
@@ -63,6 +69,9 @@ impl ImageManifestResponse {
 impl ImageConfigurationResponse {
     pub fn data(&self) -> &Bytes {
         &self.data
+    }
+    pub fn digest(&self) -> &Digest {
+        &self.digest
     }
     pub fn get(&self) -> Result<ImageConfiguration, OciSpecError> {
         ImageConfiguration::from_reader(Cursor::new(&self.data))
@@ -119,7 +128,14 @@ impl Client {
         Ok(self
             .get_manifest(reference, content_type)
             .await?
-            .map(|data| ImageManifestResponse { data }))
+            .map(|(digest, data)| {
+                // this is a weird situation with the spec, the digest isn't required to be sent,
+                // but I don't think its specified what digest to use otherwise
+                // ultimately I guess this is moot when looking up in the index because you get
+                // the digest in there
+                let digest = digest.unwrap_or_else(|| digest_from_data(&data));
+                ImageManifestResponse { data, digest }
+            }))
     }
 
     pub async fn get_image_index(
@@ -129,7 +145,32 @@ impl Client {
         Ok(self
             .get_manifest(reference, "application/vnd.oci.image.index.v1+json")
             .await?
-            .map(|data| ImageIndexResponse { data }))
+            .map(|(_digest, data)| ImageIndexResponse { data }))
+    }
+
+    pub async fn lookup_image_index(
+        &mut self,
+        reference: &Reference,
+        arch: Arch,
+        os: Os,
+    ) -> Result<Option<Digest>, Error> {
+        if let Some(index) = self.get_image_index(reference).await? {
+            let index = index.get().map_err(|_| Error::BadImageIndex)?;
+            let digest = index
+                .manifests()
+                .iter()
+                .find(|descriptor| {
+                    descriptor
+                        .platform()
+                        .as_ref()
+                        .map(|platform| *platform.architecture() == arch && *platform.os() == os)
+                        .unwrap_or(false)
+                })
+                .map(|descriptor| descriptor.digest().clone());
+            Ok(digest)
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn get_image_configuration(
@@ -146,10 +187,13 @@ impl Client {
 
         match response.status() {
             StatusCode::OK => {
-                let expected_digest = get_docker_content_digest(&response)?;
+                //let expected_digest = get_docker_content_digest(&response)?;
                 let data = response.bytes().await?;
-                check_data_matches_digest(expected_digest.as_ref(), &data)?;
-                Ok(Some(ImageConfigurationResponse { data }))
+                check_data_matches_digest(Some(&digest), &data)?;
+                Ok(Some(ImageConfigurationResponse {
+                    data,
+                    digest: digest.clone(),
+                }))
             }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(Error::StatusNotOk(status)),
@@ -206,7 +250,7 @@ impl Client {
         &mut self,
         reference: &Reference,
         accept: &str,
-    ) -> Result<Option<Bytes>, Error> {
+    ) -> Result<Option<(Option<Digest>, Bytes)>, Error> {
         let domain = reference.resolve_registry();
         let repo = reference.repository();
         let td = TagOrDigest::try_from(reference)?;
@@ -231,7 +275,7 @@ impl Client {
                 let digest = get_docker_content_digest(&response)?;
                 let data = response.bytes().await?;
                 check_data_matches_digest(digest.as_ref(), &data)?;
-                Ok(Some(data))
+                Ok(Some((digest, data)))
             }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(Error::StatusNotOk(status)),
@@ -253,6 +297,14 @@ impl Client {
         trace!("GET {url}");
         Ok(self.client.request(Method::GET, &url).send().await?)
     }
+}
+
+fn digest_from_data(x: impl AsRef<[u8]>) -> Digest {
+    use sha2::Digest;
+    use std::str::FromStr;
+    oci_spec::image::Sha256Digest::from_str(&hex::encode(Sha256::digest(x)))
+        .unwrap()
+        .into()
 }
 
 fn get_docker_content_digest(response: &reqwest::Response) -> Result<Option<Digest>, Error> {

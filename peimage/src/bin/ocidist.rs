@@ -1,4 +1,5 @@
 use oci_spec::distribution::Reference;
+use std::path::Path;
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
@@ -14,16 +15,26 @@ async fn main() {
 
     println!("{:?}", image_ref);
 
-    let cache = false;
+    let cache = true;
 
     if cache {
         let peoci_cache_dir = std::env::vars()
             .find(|(k, _v)| k == "PEOCI_CACHE")
-            .map(|(_, v)| v)
-            .unwrap_or("~/.local/share/peoci".to_string());
+            .map(|(_, v)| Path::new(&v).to_owned())
+            .unwrap_or_else(|| {
+                Path::new(
+                    &std::env::vars()
+                        .find(|(k, _v)| k == "HOME")
+                        .map(|(_, v)| v)
+                        .unwrap(),
+                )
+                .join(".local/share/peoci")
+            });
         let mut client = peimage::ocidist_cache::Client::builder()
             .dir(peoci_cache_dir)
+            .load_from_disk(true)
             .build()
+            .await
             .unwrap();
 
         let res = client
@@ -32,6 +43,8 @@ async fn main() {
             .unwrap();
         println!("got manifest {:#?}", res.manifest());
         println!("got configuration {:#?}", res.configuration());
+
+        client.persist().unwrap();
     } else {
         let mut client = peimage::ocidist::Client::new().unwrap();
 
@@ -55,20 +68,19 @@ async fn main() {
         let config = configuration_response.get().unwrap();
         println!("got configuration {:#?}", config);
 
-        // different api for cache
-        //if let Some(outfile) = outfile {
-        //    let mut writer = BufWriter::new(File::create(outfile).await.unwrap());
-        //    let size = client
-        //        .get_blob(&image_ref, manifest.layers()[0].digest(), &mut writer)
-        //        .await
-        //        .unwrap()
-        //        .unwrap();
-        //    writer.flush().await.unwrap();
-        //    let file = writer.into_inner();
-        //    println!(
-        //        "wrote {size} bytes, file size is {}",
-        //        file.metadata().await.unwrap().len()
-        //    );
-        //}
+        if let Some(outfile) = outfile {
+            let mut writer = BufWriter::new(File::create(outfile).await.unwrap());
+            let size = client
+                .get_blob(&image_ref, manifest.layers()[0].digest(), &mut writer)
+                .await
+                .unwrap()
+                .unwrap();
+            writer.flush().await.unwrap();
+            let file = writer.into_inner();
+            println!(
+                "wrote {size} bytes, file size is {}",
+                file.metadata().await.unwrap().len()
+            );
+        }
     }
 }
