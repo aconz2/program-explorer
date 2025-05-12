@@ -1,9 +1,25 @@
-use oci_spec::distribution::Reference;
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use oci_spec::distribution::Reference;
+use peimage::ocidist::Auth;
+use serde::Deserialize;
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
 };
+
+#[derive(Deserialize)]
+struct AuthEntry {
+    username: String,
+    password: String,
+}
+
+type StoredAuth = BTreeMap<String, AuthEntry>;
+
+fn load_stored_auth(p: impl AsRef<Path>) -> StoredAuth {
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -12,9 +28,17 @@ async fn main() {
     let args: Vec<_> = std::env::args().collect();
     let image_ref: Reference = args.get(1).expect("give me an image ref").parse().unwrap();
 
+    let auth = if let Some(v) =
+        std::env::vars().find_map(|(k, v)| if k == "PEOCI_AUTH" { Some(v) } else { None })
+    {
+        load_stored_auth(v)
+    } else {
+        BTreeMap::new()
+    };
+
     println!("{:?}", image_ref);
 
-    let cache = true;
+    let cache = false;
 
     if cache {
         let peoci_cache_dir = std::env::vars()
@@ -35,6 +59,15 @@ async fn main() {
             .build()
             .await
             .unwrap();
+
+        for (k, entry) in auth.iter() {
+            client
+                .set_auth(
+                    k,
+                    Auth::UserPass(entry.username.clone(), entry.password.clone()),
+                )
+                .await;
+        }
 
         let res = client
             .get_image_manifest_and_configuration(&image_ref)
@@ -57,6 +90,16 @@ async fn main() {
         client.persist().unwrap();
     } else {
         let mut client = peimage::ocidist::Client::new().unwrap();
+
+        for (k, entry) in auth.iter() {
+            client
+                .set_auth(
+                    k,
+                    Auth::UserPass(entry.username.clone(), entry.password.clone()),
+                )
+                .await;
+        }
+
         let outfile = args.get(2);
 
         let manifest_response = client

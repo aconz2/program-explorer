@@ -1,18 +1,27 @@
+use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use log::{error, trace};
+use moka::{future::Cache, Expiry};
 use oci_spec::{
     distribution::Reference,
     image::{Arch, Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest, Os},
     OciSpecError,
 };
-use reqwest::{header, Method, StatusCode};
+use reqwest::{
+    header,
+    header::{HeaderMap, HeaderValue},
+    Method, StatusCode,
+};
+use serde::Deserialize;
 use sha2::Sha256;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
-
-// TODO
-// - auth
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::RwLock,
+};
 
 const DOCKER_CONTENT_DIGEST_HEADER: &str = "docker-content-digest";
 const OCI_IMAGE_INDEX_V1: &str = "application/vnd.oci.image.index.v1+json";
@@ -30,9 +39,13 @@ pub enum Error {
     BadDockerContentDigest,
     Write,
     BadImageIndex,
+    InvalidAuth,
+    Unknown,
+    DomainNotSupported(String),
     BadContentType(String),
     DigestAlgorithmNotHandled(DigestAlgorithm),
     StatusNotOk(StatusCode),
+    RegistryNotSupported(String),
 }
 
 impl From<reqwest::Error> for Error {
@@ -48,8 +61,25 @@ impl From<OciSpecError> for Error {
 }
 
 #[derive(Clone)]
+struct Token {
+    token: String,
+    expires_in: Duration,
+}
+
+#[derive(Debug)]
+pub enum Auth {
+    None,
+    UserPass(String, String),
+}
+
+#[derive(Clone)]
 pub struct Client {
     client: reqwest::Client,
+    // key is the domain name of the registry
+    // currently not keyed off a repository scope
+    token_cache: Cache<String, Token>,
+
+    auth_store: Arc<RwLock<BTreeMap<String, Auth>>>,
 }
 
 pub struct ImageManifestResponse {
@@ -124,12 +154,41 @@ impl<'a> TagOrDigest<'a> {
     }
 }
 
+#[derive(Default)]
+struct ExpireToken;
+impl Expiry<String, Token> for ExpireToken {
+    fn expire_after_create(
+        &self,
+        _key: &String,
+        value: &Token,
+        _current_time: Instant,
+    ) -> Option<Duration> {
+        Some(value.expires_in)
+    }
+}
+
 impl Client {
     pub fn new() -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(2))
+            .https_only(true)
             .build()?;
-        Ok(Client { client })
+
+        let token_cache = Cache::builder()
+            .expire_after(ExpireToken)
+            .build();
+
+        let auth_store = Arc::new(BTreeMap::new().into());
+
+        Ok(Client {
+            client,
+            token_cache,
+            auth_store,
+        })
+    }
+
+    pub async fn set_auth(&self, domain: &str, auth: Auth) {
+        self.auth_store.write().await.insert(domain.into(), auth);
     }
 
     pub async fn get_image_manifest(
@@ -285,7 +344,7 @@ impl Client {
             .request(Method::GET, &url)
             .header(header::ACCEPT, accept);
 
-        let response = request.send().await?;
+        let response = self.auth_and_retry(reference, request).await?;
         trace!(
             "domain={:?} addr={:?}",
             response.url().domain(),
@@ -322,8 +381,101 @@ impl Client {
             digest.digest()
         );
         trace!("GET {url}");
-        Ok(self.client.request(Method::GET, &url).send().await?)
+        self
+            .auth_and_retry(reference, self.client.request(Method::GET, &url))
+            .await
     }
+
+    async fn get_token_for(&self, registry: &str) -> Result<Option<Token>, Error> {
+        match self.auth_store.read().await.get(registry) {
+            Some(Auth::None) => Ok(None),
+            Some(Auth::UserPass(user, pass)) => {
+                let entry = self
+                    .token_cache
+                    .entry_by_ref(registry)
+                    .or_try_insert_with(retreive_token_user_pass(
+                        self.client.clone(),
+                        registry,
+                        user,
+                        pass,
+                    ))
+                    .await
+                    .map_err(|e| {
+                        // drop the error to go from Arc<Error> to Error
+                        // TODO do something better
+                        error!("error in retreive_token_user_pass {:?}", e);
+                        Error::Unknown
+                    })?;
+                if entry.is_fresh() {
+                    trace!("got new token for {}", registry);
+                }
+                Ok(Some(entry.into_value()))
+            }
+            None => Err(Error::RegistryNotSupported(registry.to_string())),
+        }
+    }
+
+    async fn auth_and_retry(
+        &mut self,
+        reference: &Reference,
+        mut req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, Error> {
+        let registry = reference.resolve_registry();
+
+        if let Some(token) = self.get_token_for(registry).await? {
+            req = req.headers({
+                let mut headers = HeaderMap::new();
+                let value = format!("Bearer {}", token.token);
+                headers.insert(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&value).map_err(|_| Error::InvalidAuth)?,
+                );
+                headers
+            });
+        }
+
+        Ok(req.send().await?)
+    }
+}
+
+// the right thing to do is try the url and then get a 401, inspect www-authenticate, auth, then
+// retry
+async fn retreive_token_user_pass(
+    client: reqwest::Client,
+    domain: &str,
+    user: &str,
+    pass: &str,
+) -> Result<Token, Error> {
+    #[derive(Deserialize)]
+    struct JsonToken {
+        token: String,
+        expires_in: Option<u64>,
+        //issued_at: Option<String>, // "2025-05-12T21:35:54.377188944Z" but not really useful
+    }
+
+    // ugh the real thing is to parse www-authenticate but not seeing a good crate right now
+    let realm = match domain {
+        "index.docker.io" => "auth.docker.io/token",
+        "ghcr.io" => "ghcr.io/token",
+        s => {
+            return Err(Error::DomainNotSupported(s.into()));
+        }
+    };
+    // not including service or scope right now
+
+    let url = format!("https://{}", realm);
+
+    let token = client
+        .request(Method::GET, &url)
+        .basic_auth(user, Some(pass))
+        .send()
+        .await?
+        .json::<JsonToken>()
+        .await?;
+
+    let expires_in = Duration::from_secs(token.expires_in.unwrap_or(300));
+    let token = token.token;
+    Ok(Token { token, expires_in })
 }
 
 fn digest_from_data(x: impl AsRef<[u8]>) -> Digest {

@@ -285,6 +285,10 @@ impl Client {
         ClientBuilder::default()
     }
 
+    pub async fn set_auth(&self, domain: &str, auth: crate::ocidist::Auth) {
+        self.client.set_auth(domain, auth).await;
+    }
+
     pub async fn stats(&self) -> Stats {
         self.ref_cache.run_pending_tasks().await;
         self.manifest_cache.run_pending_tasks().await;
@@ -421,7 +425,7 @@ impl Client {
         use tokio::task::JoinSet;
         let mut set = JoinSet::new();
         let n = manifest.layers().len();
-        for (i, layer) in manifest.layers().into_iter().enumerate() {
+        for (i, layer) in manifest.layers().iter().enumerate() {
             let reference = reference.clone();
             let digest = layer.digest().clone();
             let client = self.clone();
