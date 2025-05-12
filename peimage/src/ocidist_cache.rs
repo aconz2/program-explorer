@@ -3,8 +3,8 @@ use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use log::{error, info, trace};
-use moka::future::Cache;
+use log::{error, info};
+use moka::{future::Cache, notification::RemovalCause};
 use oci_spec::{
     distribution::Reference,
     image::{Arch, Digest, ImageConfiguration, ImageManifest, Os},
@@ -14,6 +14,33 @@ use rustix::{fd::OwnedFd, fs::renameat};
 use std::fs::File;
 
 use crate::ocidist;
+
+// This is a caching layer on top of ocidist that stores
+// 1) references: quay.io/fedora/fedora:42 -> sha256:ffffffff
+// 2) manifests: sha256:ffffffff -> ImageManifest and ImageConfiguration
+// 3) blobs (layers): sha256:ffffffff -> file size (stored on disk)
+// Remember that manifests store a digest pointer to the configuration, but here we store them
+// together
+// Currently references are looked up via the image index (same endpoint, different accept header)
+// to pick out one which is amd64+linux (TODO is to support multi arch)
+// Size limits are placed separately on the 3 caches and TODO is to expire reference cache entries
+// so that we support eg fetching :latest tag once per day
+// Cache persistence is mainly targeted at the always-running usecase of a service and not for
+// interactive use since persist() will write the entire ref/manifests cache key+values every time.
+// Persistence of the blobs are done with one blob per file like the ocidir layout of
+// blobs/sha256/{digest}. Loading of the blob cache from this dir just inserts the key and size
+// (necessary to limit max_capacity) and on expiry, the files are removed
+//
+// Currently the keys/values for digests are strings since they come with their multihash prefix,
+// but they are twice the bytes (64 + 7 = 71 bytes for a sha256 32 byte (ideally 1 byte prefix for
+// the multihash). moka cache has a 152 byte overhead per entry [1] so 223 vs 185 is only 80% size
+// of. So I guess right now it is maybe not worthwhile to do a more optimized key type
+// [1] https://github.com/moka-rs/moka/issues/201
+//
+
+// moka::Cache stores the capacity of each entry as u32, so for blobs which might approach 4 GB, we
+// track their size in KB so that a single blob up to 4 TB is supported
+const BLOB_SIZE_DIVISOR: u64 = 1_000;
 
 #[derive(Debug)]
 pub enum Error {
@@ -28,6 +55,8 @@ pub enum Error {
     SerError,
     DirIter,
     DigestAlgorithmNotHandled,
+    BlobMissing,
+    FdClone,
     OciSpecError(OciSpecError),
 }
 
@@ -51,10 +80,12 @@ impl From<OciSpecError> for Error {
 
 #[derive(Debug)]
 pub struct Stats {
-    // todo blob_cache_size
-    // *_cache_count
     pub ref_cache_size: u64,
     pub manifest_cache_size: u64,
+    pub blob_cache_size: u64,
+    pub ref_cache_count: u64,
+    pub manifest_cache_count: u64,
+    pub blob_cache_count: u64,
     pub ref_cache_hit: u64,
     pub ref_cache_miss: u64,
     pub manifest_cache_hit: u64,
@@ -66,9 +97,9 @@ pub struct Stats {
 pub struct ClientBuilder {
     cache_dir: Option<PathBuf>,
     load_from_disk: bool,
-    ref_capacity: u64,
-    manifest_capacity: u64,
-    blob_capacity: u64,
+    ref_capacity: u64,      // in bytes
+    manifest_capacity: u64, // in bytes
+    blob_capacity: u64,     // in bytes
 }
 
 #[derive(bincode::Encode, bincode::Decode)]
@@ -90,7 +121,7 @@ impl Default for ClientBuilder {
 }
 
 struct Dirs {
-    path: PathBuf,
+    path: PathBuf, // only storing this for fs::read_dir ...
     cache: OwnedFd,
     sha256: OwnedFd,
 }
@@ -107,12 +138,14 @@ struct Counters {
 
 pub struct Client {
     client: ocidist::Client,
-    dirs: Option<Dirs>,
+    dirs: Dirs,
 
     // stores ref quay.io/fedora/fedora:42 -> manifest sha256:digest
     ref_cache: Cache<String, String>,
 
     // stores manifest sha256:digest -> image+configuration
+    // is it okay to not include the reference? since sha, shouldn't matter
+    // but more correct would be quay.io/fedora/fedora@sha256:digest
     manifest_cache: Cache<String, Arc<PackedImageAndConfiguration>>,
 
     // stores blob sha256:digest -> filesize
@@ -161,21 +194,19 @@ impl ClientBuilder {
             return Err(Error::NoCacheDir);
         }
 
-        let dirs = self
-            .cache_dir
-            .as_ref()
-            .map(|path| -> Result<_, Error> {
-                let cache = open_or_create_dir_at(None, path)?;
-                let blobs = open_or_create_dir_at(Some(&cache), "blobs")?;
-                let sha256 = open_or_create_dir_at(Some(&blobs), "sha256")?;
-                info!("init cache dir at {path:?}");
-                Ok(Dirs {
-                    path: path.into(),
-                    cache,
-                    sha256,
-                })
-            })
-            .transpose()?;
+        let dirs = {
+            let path = self.cache_dir.ok_or(Error::NoCacheDir)?;
+            let cache = open_or_create_dir_at(None, &path)?;
+            let blobs = open_or_create_dir_at(Some(&cache), "blobs")?;
+            let sha256 = open_or_create_dir_at(Some(&blobs), "sha256")?;
+            Dirs {
+                path,
+                cache,
+                sha256,
+            }
+        };
+
+        let sha256_clone = dirs.sha256.try_clone().map_err(|_| Error::FdClone)?;
 
         let client = ocidist::Client::new()?;
 
@@ -196,11 +227,15 @@ impl ClientBuilder {
             // blobs are weighed in 1MB increments since we are limited to u32
             // TODO think about memory overhead for a given blob capacity because we can't have two
             // different limits
-            .max_capacity(self.blob_capacity / 1_000_000)
+            .max_capacity(self.blob_capacity / BLOB_SIZE_DIVISOR)
             .weigher(|_: &String, size: &u64| {
-                std::cmp::max(1, (size / 1_000_000).try_into().unwrap_or(u32::MAX))
+                std::cmp::max(1, size / BLOB_SIZE_DIVISOR)
+                    .try_into()
+                    .unwrap_or(u32::MAX)
             })
-            // TODO needs eviction listener
+            .eviction_listener(move |k, v, reason| {
+                remove_blob(&sha256_clone, k, v, reason);
+            })
             .build();
 
         let mut ret = Client {
@@ -212,8 +247,10 @@ impl ClientBuilder {
             counters: Counters::default(),
         };
         if self.load_from_disk {
+            info!("load cache from {:?}", ret.dirs.path);
             ret.load_ref_cache().await?;
             ret.load_manifest_cache().await?;
+            ret.load_blob_cache().await?;
         }
         Ok(ret)
     }
@@ -223,10 +260,123 @@ impl Client {
     pub fn builder() -> ClientBuilder {
         ClientBuilder::default()
     }
+    pub async fn stats(&mut self) -> Stats {
+        use std::mem::take;
+        self.ref_cache.run_pending_tasks().await;
+        self.manifest_cache.run_pending_tasks().await;
+        self.blob_cache.run_pending_tasks().await;
+        Stats {
+            ref_cache_size: self.ref_cache.weighted_size(),
+            manifest_cache_size: self.manifest_cache.weighted_size(),
+            blob_cache_size: self.blob_cache.weighted_size() * 1024,
+            ref_cache_count: self.ref_cache.entry_count(),
+            manifest_cache_count: self.manifest_cache.entry_count(),
+            blob_cache_count: self.blob_cache.entry_count(),
+            ref_cache_hit: take(&mut self.counters.ref_cache_hit),
+            ref_cache_miss: take(&mut self.counters.ref_cache_miss),
+            manifest_cache_hit: take(&mut self.counters.manifest_cache_hit),
+            manifest_cache_miss: take(&mut self.counters.manifest_cache_miss),
+            blob_cache_hit: take(&mut self.counters.blob_cache_hit),
+            blob_cache_miss: take(&mut self.counters.blob_cache_miss),
+        }
+    }
+
+    pub fn persist(&mut self) -> Result<(), Error> {
+        self.save_ref_cache()?;
+        self.save_manifest_cache()?;
+        // nothing to do for blob cache
+        Ok(())
+    }
+
+    pub async fn get_image_manifest_and_configuration(
+        &mut self,
+        reference: &Reference,
+    ) -> Result<Arc<PackedImageAndConfiguration>, Arc<Error>> {
+        // the digest from reference.digest() is not checked for validity in all cases, so if it is
+        // present, we first check it. retreive_ref returns a string (since that is what we store
+        // in the database, but it is derived from a Digest which has checked the validity already
+        let digest_string = if let Some(digest_str) = reference.digest() {
+            let digest: Digest = digest_str.parse().map_err(|_| Error::BadDigest)?;
+            digest.to_string()
+        } else {
+            let entry = self
+                .ref_cache
+                .entry(reference.to_string())
+                .or_try_insert_with(retreive_ref(self.client.clone(), reference))
+                .await?;
+            if entry.is_fresh() {
+                self.counters.ref_cache_miss += 1;
+                info!(
+                    "ref_cache miss ref={} digest={}",
+                    entry.key(),
+                    entry.value()
+                )
+            } else {
+                self.counters.ref_cache_hit += 1;
+                info!("ref_cache hit ref={} digest={}", entry.key(), entry.value())
+            }
+            entry.into_value()
+        };
+
+        let reference = reference.clone_with_digest(digest_string.clone());
+
+        let entry = self
+            .manifest_cache
+            .entry(digest_string)
+            .or_try_insert_with(retreive_manifest(self.client.clone(), &reference))
+            .await?;
+        if entry.is_fresh() {
+            self.counters.manifest_cache_miss += 1;
+            info!("manifest_cache miss digest={}", entry.key())
+        } else {
+            self.counters.manifest_cache_hit += 1;
+            info!("manifest_cache hit digest={}", entry.key())
+        }
+        Ok(entry.into_value())
+    }
+
+    pub async fn get_blob(
+        &mut self,
+        reference: &Reference,
+        digest: &Digest,
+    ) -> Result<OwnedFd, Arc<Error>> {
+        let entry = self
+            .blob_cache
+            .entry(digest.to_string())
+            .or_try_insert_with(retreive_blob(
+                self.client.clone(),
+                reference,
+                digest,
+                &self.dirs.sha256,
+            ))
+            .await?;
+        if entry.is_fresh() {
+            self.counters.blob_cache_miss += 1;
+            info!("blob_cache miss digest={}", entry.key())
+        } else {
+            self.counters.blob_cache_hit += 1;
+            info!("blob_cache hit digest={}", entry.key())
+        }
+
+        // b/c or_try_insert_with must return the V stored in the cache and we don't want to store
+        // the ownedfd in the cache, then we have to race here and just try opening it after
+        // checking/populating the cache. Not ideal but only way it isn't here is if it was
+        // immediately removed from the cache
+        match openat_read(&self.dirs.sha256, digest.digest()) {
+            Ok(Some(file)) => Ok(file.into()),
+            Ok(None) => {
+                error!("blob cache missing file {:?}", digest);
+                Err(Error::BlobMissing.into())
+            }
+            Err(e) => {
+                error!("error opening blob {:?}", e);
+                Err(Error::BlobMissing.into())
+            }
+        }
+    }
 
     async fn load_ref_cache(&mut self) -> Result<(), Error> {
-        let dirs = self.dirs.as_ref().ok_or(Error::NoCacheDir)?;
-        let Some(file) = openat_read(&dirs.cache, "ref")? else {
+        let Some(file) = openat_read(&self.dirs.cache, "ref")? else {
             return Ok(());
         };
         let entries: Vec<(String, String)> = match bincode::decode_from_reader(
@@ -248,8 +398,7 @@ impl Client {
     }
 
     async fn load_manifest_cache(&mut self) -> Result<(), Error> {
-        let dirs = self.dirs.as_ref().ok_or(Error::NoCacheDir)?;
-        let Some(file) = openat_read(&dirs.cache, "manifest")? else {
+        let Some(file) = openat_read(&self.dirs.cache, "manifest")? else {
             return Ok(());
         };
         let entries: Vec<(String, PackedImageAndConfiguration)> = match bincode::decode_from_reader(
@@ -273,44 +422,38 @@ impl Client {
     // bleh
     // todo handle more than sha256
     async fn load_blob_cache(&mut self) -> Result<(), Error> {
-        let dirs = self.dirs.as_ref().ok_or(Error::NoCacheDir)?;
+        fn remove(entry: std::fs::DirEntry) {
+            error!(
+                "weird path name in blobs/sha256 {:?}, removing",
+                entry.file_name()
+            );
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                error!("error removing file {:?}", e);
+            }
+        }
         let mut count = 0;
-        for entry in
-            std::fs::read_dir(dirs.path.join("blobs/sha256")).map_err(|_| Error::DirIter)?
+        for entry in std::fs::read_dir(self.dirs.path.join("blobs/sha256"))
+            .map_err(|_| Error::DirIter)?
+            .flatten() // ignore error getting entry
+            .filter(|entry| entry.file_type().map(|x| x.is_file()).unwrap_or(false))
         {
-            if let Ok(entry) = entry {
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() {
-                        if let Ok(name) = entry.file_name().into_string() {
-                            if name.len() != 64 {
-                                // also check lower hex?
-                                error!(
-                                    "weird path name in blobs/sha256 {:?}, removing",
-                                    entry.file_name()
-                                );
-                                let _ = std::fs::remove_file(entry.path());
-                                continue;
-                            }
-                            if let Ok(meta) = entry.metadata() {
-                                count += 1;
-                                self.blob_cache
-                                    .insert(format!("sha256:{}", name), meta.len())
-                                    .await;
-                            } else {
-                                error!(
-                                    "couldn't get metadata for {:?}, skipping",
-                                    entry.file_name()
-                                );
-                            }
-                        } else {
-                            error!(
-                                "weird path name in blobs/sha256 {:?}, removing",
-                                entry.file_name()
-                            );
-                            let _ = std::fs::remove_file(entry.path());
-                        }
-                    }
+            if let Ok(name) = entry.file_name().into_string() {
+                let digest_string = format!("sha256:{}", name);
+                if let Err(_) = digest_string.parse::<Digest>() {
+                    remove(entry);
+                    continue;
                 }
+                if let Ok(meta) = entry.metadata() {
+                    count += 1;
+                    self.blob_cache.insert(digest_string, meta.len()).await;
+                } else {
+                    error!(
+                        "couldn't get metadata for {:?}, skipping",
+                        entry.file_name()
+                    );
+                }
+            } else {
+                remove(entry)
             }
         }
         info!("loaded {count} entries into blob cache");
@@ -320,124 +463,30 @@ impl Client {
     // fn save_blob_cache; not needed since blobs are written as they are fetched
 
     fn save_ref_cache(&mut self) -> Result<(), Error> {
-        let dirs = self.dirs.as_ref().ok_or(Error::NoCacheDir)?;
         let entries: Vec<_> = self.ref_cache.iter().collect();
         let num_entries = entries.len();
-        let mut bw = BufWriter::new(openat_create_write(&dirs.cache, "ref.tmp")?);
+        let mut bw = BufWriter::new(openat_create_write(&self.dirs.cache, "ref.tmp")?);
         let size = bincode::encode_into_std_write(&entries, &mut bw, bincode::config::standard())
             .map_err(|_| Error::SerError)?;
-        renameat(&dirs.cache, "ref.tmp", &dirs.cache, "ref")?;
+        renameat(&self.dirs.cache, "ref.tmp", &self.dirs.cache, "ref")?;
         info!("wrote {size} bytes, {num_entries} entries to ref_cache");
         Ok(())
     }
 
     fn save_manifest_cache(&mut self) -> Result<(), Error> {
-        let dirs = self.dirs.as_ref().ok_or(Error::NoCacheDir)?;
         let entries: Vec<_> = self.manifest_cache.iter().collect();
         let num_entries = entries.len();
-        let mut bw = BufWriter::new(openat_create_write(&dirs.cache, "manifest.tmp")?);
+        let mut bw = BufWriter::new(openat_create_write(&self.dirs.cache, "manifest.tmp")?);
         let size = bincode::encode_into_std_write(&entries, &mut bw, bincode::config::standard())
             .map_err(|_| Error::SerError)?;
-        renameat(&dirs.cache, "manifest.tmp", &dirs.cache, "manifest")?;
+        renameat(
+            &self.dirs.cache,
+            "manifest.tmp",
+            &self.dirs.cache,
+            "manifest",
+        )?;
         info!("wrote {size} bytes, {num_entries} entries to manifest_cache");
         Ok(())
-    }
-
-    pub async fn stats(&mut self) -> Stats {
-        use std::mem::take;
-        self.ref_cache.run_pending_tasks().await;
-        self.manifest_cache.run_pending_tasks().await;
-        Stats {
-            ref_cache_size: self.ref_cache.weighted_size(),
-            manifest_cache_size: self.manifest_cache.weighted_size(),
-            ref_cache_hit: take(&mut self.counters.ref_cache_hit),
-            ref_cache_miss: take(&mut self.counters.ref_cache_miss),
-            manifest_cache_hit: take(&mut self.counters.manifest_cache_hit),
-            manifest_cache_miss: take(&mut self.counters.manifest_cache_miss),
-            blob_cache_hit: take(&mut self.counters.blob_cache_hit),
-            blob_cache_miss: take(&mut self.counters.blob_cache_miss),
-        }
-    }
-
-    pub fn persist(&mut self) -> Result<(), Error> {
-        self.save_ref_cache()?;
-        self.save_manifest_cache()?;
-        // nothing to do for blob cache
-        Ok(())
-    }
-
-    pub async fn get_image_manifest_and_configuration(
-        &mut self,
-        reference: &Reference,
-    ) -> Result<Arc<PackedImageAndConfiguration>, Arc<Error>> {
-        let digest_string = if let Some(digest) = reference.digest() {
-            digest
-        } else {
-            let entry = self
-                .ref_cache
-                .entry(reference.to_string())
-                .or_try_insert_with(retreive_ref(self.client.clone(), reference))
-                .await?;
-            if entry.is_fresh() {
-                self.counters.ref_cache_miss += 1;
-                info!(
-                    "ref_cache miss ref={} digest={}",
-                    entry.key(),
-                    entry.value()
-                )
-            } else {
-                self.counters.ref_cache_hit += 1;
-                info!("ref_cache hit ref={} digest={}", entry.key(), entry.value())
-            }
-            &entry.into_value()
-        };
-        use std::str::FromStr;
-        let digest = Digest::from_str(digest_string).map_err(|_| Error::BadDigest)?;
-
-        let entry = self
-            .manifest_cache
-            .entry(digest.to_string())
-            .or_try_insert_with(retreive_manifest(self.client.clone(), reference, &digest))
-            .await?;
-        if entry.is_fresh() {
-            self.counters.manifest_cache_miss += 1;
-            info!("manifest_cache miss digest={}", entry.key())
-        } else {
-            self.counters.manifest_cache_hit += 1;
-            info!("manifest_cache hit digest={}", entry.key())
-        }
-        Ok(entry.into_value())
-    }
-
-    pub async fn get_blob(
-        &mut self,
-        reference: &Reference,
-        digest: &Digest,
-    ) -> Result<OwnedFd, Arc<Error>> {
-        // TODO maybe okay to grab a tempfile
-        let dirs = self.dirs.as_ref().ok_or(Error::NoCacheDir)?;
-        // hmm we have to have retreive_blob return what we store in the cache, but I'd like to
-        // return an Fd from this so that the consumer has it guaranteed open and will remain open
-        // if we remove it from the dir, but I'd rather not have to have an open fd for every file
-        // in the cache...
-        let entry = self
-            .blob_cache
-            .entry(digest.to_string())
-            .or_try_insert_with(retreive_blob(
-                self.client.clone(),
-                reference,
-                &digest,
-                &dirs.sha256,
-            ))
-            .await?;
-        if entry.is_fresh() {
-            self.counters.blob_cache_miss += 1;
-            info!("blob_cache miss digest={}", entry.key())
-        } else {
-            self.counters.blob_cache_hit += 1;
-            info!("blob_cache hit digest={}", entry.key())
-        }
-        Ok(entry.into_value())
     }
 }
 
@@ -453,7 +502,6 @@ async fn retreive_ref(mut client: ocidist::Client, reference: &Reference) -> Res
 async fn retreive_manifest(
     mut client: ocidist::Client,
     reference: &Reference,
-    digest: &Digest,
 ) -> Result<Arc<PackedImageAndConfiguration>, Error> {
     let manifest_res = client
         .get_image_manifest(reference)
@@ -478,13 +526,24 @@ async fn retreive_blob(
     if *digest.algorithm() != DigestAlgorithm::Sha256 {
         return Err(Error::DigestAlgorithmNotHandled);
     }
-    let fd: OwnedFd = openat_create_write(blob_dir, digest.digest())?.into();
-    let mut file: tokio::fs::File = fd.into();
+    let mut bw = tokio::io::BufWriter::with_capacity(
+        32 * 1024,
+        openat_create_write_async(blob_dir, digest.digest())?,
+    );
     let size = client
-        .get_blob(reference, digest, &mut file)
+        .get_blob(reference, digest, &mut bw)
         .await?
         .ok_or(Error::BlobNotFound)?;
     Ok(size as u64)
+}
+
+fn remove_blob(blob_dir: &OwnedFd, key: Arc<String>, _value: u64, cause: RemovalCause) {
+    let key = Arc::unwrap_or_clone(key);
+    info!("blob {} removed due to {:?}", key, cause);
+
+    if let Err(e) = unlinkat(blob_dir, key) {
+        error!("blob unlinkat return error {:?}", e);
+    }
 }
 
 // I wish the std had things for at
@@ -504,7 +563,7 @@ fn open_or_create_dir_at(
         Ok(rustix::fs::openat(
             dir,
             path,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::PATH,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::PATH | OFlags::CLOEXEC,
             Mode::empty(),
         )?)
     } else {
@@ -515,7 +574,7 @@ fn open_or_create_dir_at(
         }?;
         Ok(rustix::fs::open(
             path,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::PATH,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::PATH | OFlags::CLOEXEC,
             Mode::empty(),
         )?)
     }
@@ -531,6 +590,19 @@ fn openat_create_write(
         name,
         OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
     )
+}
+
+fn openat_create_write_async(
+    dir: &OwnedFd,
+    name: impl rustix::path::Arg,
+) -> Result<tokio::fs::File, rustix::io::Errno> {
+    use rustix::fs::OFlags;
+    openat(
+        dir,
+        name,
+        OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC | OFlags::NONBLOCK,
+    )
+    .map(tokio::fs::File::from_std)
 }
 
 fn openat_read(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<Option<File>, Error> {
@@ -550,4 +622,8 @@ fn openat(
     use rustix::fs::Mode;
     let fd = rustix::fs::openat(dir, name, flags, Mode::from_bits_truncate(0o744))?;
     Ok(fd.into())
+}
+
+fn unlinkat(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<(), rustix::io::Errno> {
+    rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty())
 }

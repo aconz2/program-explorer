@@ -380,9 +380,11 @@ fn digest_eq(digest_lower_hex_str: &str, digest: impl sha2::Digest) -> bool {
     // checked length was even
     let as_byte_pairs = <str as AsRef<[u8]>>::as_ref(digest_lower_hex_str).chunks_exact(2);
 
-    as_byte_pairs.zip(digest_bytes).all(|(pair, byte)| {
-        LUT[(byte >> 4) as usize] == pair[0] && LUT[(byte & 0xf) as usize] == pair[1]
-    })
+    as_byte_pairs
+        .zip(digest_bytes)
+        .all(|(pair, byte): (&[u8], u8)| {
+            LUT[(byte >> 4) as usize] == pair[0] && LUT[(byte & 0xf) as usize] == pair[1]
+        })
 }
 
 #[cfg(test)]

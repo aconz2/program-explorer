@@ -41,8 +41,15 @@ async fn main() {
             .get_image_manifest_and_configuration(&image_ref)
             .await
             .unwrap();
+        let manifest = res.manifest().unwrap();
         println!("got manifest {:#?}", res.manifest());
         println!("got configuration {:#?}", res.configuration());
+
+        let _fd = client
+            .get_blob(&image_ref, manifest.layers()[0].digest())
+            .await
+            .unwrap();
+        println!("got blob {:?}", manifest.layers()[0].digest());
 
         println!("{:#?}", client.stats().await);
 
