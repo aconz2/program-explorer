@@ -2,7 +2,8 @@ use std::fs::File;
 use std::io::Cursor;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicU64, Arc};
+use std::time::Instant;
 
 use log::{error, info};
 use moka::{future::Cache, notification::RemovalCause};
@@ -48,6 +49,7 @@ const BLOB_SIZE_DIVISOR: u64 = 1_000;
 pub enum Error {
     ClientError(ocidist::Error),
     Errno(rustix::io::Errno),
+    OciSpecError(OciSpecError),
     NoCacheDir,
     BadDigest,
     ManifestNotFound,
@@ -60,7 +62,11 @@ pub enum Error {
     BlobMissing,
     FdClone,
     MaxConns,
-    OciSpecError(OciSpecError),
+    UnexpectedPanic,
+    Canceled,
+    Oob,
+    MissingResult,
+    Unknown,
 }
 
 impl From<ocidist::Error> for Error {
@@ -139,18 +145,19 @@ struct Dirs {
 
 #[derive(Default)]
 struct Counters {
-    ref_cache_hit: u64,
-    ref_cache_miss: u64,
-    manifest_cache_hit: u64,
-    manifest_cache_miss: u64,
-    blob_cache_hit: u64,
-    blob_cache_miss: u64,
+    ref_cache_hit: AtomicU64,
+    ref_cache_miss: AtomicU64,
+    manifest_cache_hit: AtomicU64,
+    manifest_cache_miss: AtomicU64,
+    blob_cache_hit: AtomicU64,
+    blob_cache_miss: AtomicU64,
 }
 
+#[derive(Clone)]
 pub struct Client {
     client: ocidist::Client,
-    dirs: Dirs,
-    counters: Counters,
+    dirs: Arc<Dirs>,
+    counters: Arc<Counters>,
     connection_semaphore: Arc<Semaphore>,
 
     // stores ref quay.io/fedora/fedora:42 -> manifest sha256:digest
@@ -256,11 +263,11 @@ impl ClientBuilder {
 
         let mut ret = Client {
             client,
-            dirs,
+            dirs: dirs.into(),
             ref_cache,
             manifest_cache,
             blob_cache,
-            counters: Counters::default(),
+            counters: Counters::default().into(),
             connection_semaphore: Arc::new(Semaphore::new(self.max_open_conns)),
         };
         if self.load_from_disk {
@@ -277,28 +284,28 @@ impl Client {
     pub fn builder() -> ClientBuilder {
         ClientBuilder::default()
     }
-    pub async fn stats(&mut self) -> Stats {
-        use std::mem::take;
+
+    pub async fn stats(&self) -> Stats {
         self.ref_cache.run_pending_tasks().await;
         self.manifest_cache.run_pending_tasks().await;
         self.blob_cache.run_pending_tasks().await;
         Stats {
             ref_cache_size: self.ref_cache.weighted_size(),
             manifest_cache_size: self.manifest_cache.weighted_size(),
-            blob_cache_size: self.blob_cache.weighted_size() * 1024,
+            blob_cache_size: self.blob_cache.weighted_size() * BLOB_SIZE_DIVISOR,
             ref_cache_count: self.ref_cache.entry_count(),
             manifest_cache_count: self.manifest_cache.entry_count(),
             blob_cache_count: self.blob_cache.entry_count(),
-            ref_cache_hit: take(&mut self.counters.ref_cache_hit),
-            ref_cache_miss: take(&mut self.counters.ref_cache_miss),
-            manifest_cache_hit: take(&mut self.counters.manifest_cache_hit),
-            manifest_cache_miss: take(&mut self.counters.manifest_cache_miss),
-            blob_cache_hit: take(&mut self.counters.blob_cache_hit),
-            blob_cache_miss: take(&mut self.counters.blob_cache_miss),
+            ref_cache_hit: atomic_take(&self.counters.ref_cache_hit),
+            ref_cache_miss: atomic_take(&self.counters.ref_cache_miss),
+            manifest_cache_hit: atomic_take(&self.counters.manifest_cache_hit),
+            manifest_cache_miss: atomic_take(&self.counters.manifest_cache_miss),
+            blob_cache_hit: atomic_take(&self.counters.blob_cache_hit),
+            blob_cache_miss: atomic_take(&self.counters.blob_cache_miss),
         }
     }
 
-    pub fn persist(&mut self) -> Result<(), Error> {
+    pub fn persist(&self) -> Result<(), Error> {
         self.save_ref_cache()?;
         self.save_manifest_cache()?;
         // nothing to do for blob cache
@@ -306,7 +313,7 @@ impl Client {
     }
 
     pub async fn get_image_manifest_and_configuration(
-        &mut self,
+        &self,
         reference: &Reference,
     ) -> Result<Arc<PackedImageAndConfiguration>, Arc<Error>> {
         // the digest from reference.digest() is not checked for validity in all cases, so if it is
@@ -326,14 +333,14 @@ impl Client {
                 ))
                 .await?;
             if entry.is_fresh() {
-                self.counters.ref_cache_miss += 1;
+                atomic_inc(&self.counters.ref_cache_miss);
                 info!(
                     "ref_cache miss ref={} digest={}",
                     entry.key(),
                     entry.value()
                 )
             } else {
-                self.counters.ref_cache_hit += 1;
+                atomic_inc(&self.counters.ref_cache_hit);
                 info!("ref_cache hit ref={} digest={}", entry.key(), entry.value())
             }
             entry.into_value()
@@ -351,20 +358,21 @@ impl Client {
             ))
             .await?;
         if entry.is_fresh() {
-            self.counters.manifest_cache_miss += 1;
+            atomic_inc(&self.counters.manifest_cache_miss);
             info!("manifest_cache miss digest={}", entry.key())
         } else {
-            self.counters.manifest_cache_hit += 1;
+            atomic_inc(&self.counters.manifest_cache_hit);
             info!("manifest_cache hit digest={}", entry.key())
         }
         Ok(entry.into_value())
     }
 
     pub async fn get_blob(
-        &mut self,
+        &self,
         reference: &Reference,
         digest: &Digest,
     ) -> Result<OwnedFd, Arc<Error>> {
+        let start = Instant::now();
         let entry = self
             .blob_cache
             .entry(digest.to_string())
@@ -377,10 +385,14 @@ impl Client {
             ))
             .await?;
         if entry.is_fresh() {
-            self.counters.blob_cache_miss += 1;
-            info!("blob_cache miss digest={}", entry.key())
+            atomic_inc(&self.counters.blob_cache_miss);
+            let digest = entry.key();
+            let size = *entry.value();
+            let elapsed = start.elapsed();
+            let speed = (size as f32) / 1_000_000.0 / elapsed.as_secs_f32();
+            info!("blob_cache miss digest={digest} size={size} elapsed={elapsed:?} speed={speed:.2} MB/s");
         } else {
-            self.counters.blob_cache_hit += 1;
+            atomic_inc(&self.counters.blob_cache_hit);
             info!("blob_cache hit digest={}", entry.key())
         }
 
@@ -399,6 +411,48 @@ impl Client {
                 Err(Error::BlobMissing.into())
             }
         }
+    }
+
+    pub async fn get_layers(
+        &self,
+        reference: &Reference,
+        manifest: &ImageManifest,
+    ) -> Result<Vec<OwnedFd>, Arc<Error>> {
+        use tokio::task::JoinSet;
+        let mut set = JoinSet::new();
+        let n = manifest.layers().len();
+        for (i, layer) in manifest.layers().into_iter().enumerate() {
+            let reference = reference.clone();
+            let digest = layer.digest().clone();
+            let client = self.clone();
+            set.spawn(async move { (i, client.get_blob(&reference, &digest).await) });
+        }
+        let mut ret = (0..n).map(|_| None).collect::<Vec<_>>();
+        while let Some(next) = set.join_next().await {
+            match next {
+                Ok((i, Ok(fd))) => {
+                    let _ = ret.get_mut(i).ok_or(Error::Oob)?.replace(fd);
+                }
+                Ok((_, Err(e))) => {
+                    return Err(e);
+                }
+                Err(e) if e.is_cancelled() => {
+                    return Err(Error::Canceled.into());
+                }
+                Err(e) if e.is_panic() => {
+                    return Err(Error::UnexpectedPanic.into());
+                }
+                Err(e) => {
+                    error!("unknown error {:?}", e);
+                    return Err(Error::Unknown.into());
+                }
+            }
+        }
+
+        Ok(ret
+            .into_iter()
+            .map(|x| x.ok_or(Error::MissingResult))
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     async fn load_ref_cache(&mut self) -> Result<(), Error> {
@@ -423,7 +477,7 @@ impl Client {
         Ok(())
     }
 
-    async fn load_manifest_cache(&mut self) -> Result<(), Error> {
+    async fn load_manifest_cache(&self) -> Result<(), Error> {
         let Some(file) = openat_read(&self.dirs.cache, "manifest")? else {
             return Ok(());
         };
@@ -447,7 +501,7 @@ impl Client {
 
     // bleh
     // todo handle more than sha256
-    async fn load_blob_cache(&mut self) -> Result<(), Error> {
+    async fn load_blob_cache(&self) -> Result<(), Error> {
         fn remove(entry: std::fs::DirEntry) {
             error!(
                 "weird path name in blobs/sha256 {:?}, removing",
@@ -488,7 +542,7 @@ impl Client {
 
     // fn save_blob_cache; not needed since blobs are written as they are fetched
 
-    fn save_ref_cache(&mut self) -> Result<(), Error> {
+    fn save_ref_cache(&self) -> Result<(), Error> {
         let entries: Vec<_> = self.ref_cache.iter().collect();
         let num_entries = entries.len();
         let mut bw = BufWriter::new(openat_create_write(&self.dirs.cache, "ref.tmp")?);
@@ -499,7 +553,7 @@ impl Client {
         Ok(())
     }
 
-    fn save_manifest_cache(&mut self) -> Result<(), Error> {
+    fn save_manifest_cache(&self) -> Result<(), Error> {
         let entries: Vec<_> = self.manifest_cache.iter().collect();
         let num_entries = entries.len();
         let mut bw = BufWriter::new(openat_create_write(&self.dirs.cache, "manifest.tmp")?);
@@ -655,10 +709,18 @@ fn openat(
     flags: rustix::fs::OFlags,
 ) -> Result<File, rustix::io::Errno> {
     use rustix::fs::Mode;
-    let fd = rustix::fs::openat(dir, name, flags, Mode::from_bits_truncate(0o744))?;
+    let fd = rustix::fs::openat(dir, name, flags, Mode::from_bits_truncate(0o644))?;
     Ok(fd.into())
 }
 
 fn unlinkat(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<(), rustix::io::Errno> {
     rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty())
+}
+
+fn atomic_inc(x: &AtomicU64) {
+    x.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn atomic_take(x: &AtomicU64) -> u64 {
+    x.swap(0, std::sync::atomic::Ordering::Relaxed)
 }

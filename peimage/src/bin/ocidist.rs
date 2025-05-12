@@ -11,7 +11,6 @@ async fn main() {
 
     let args: Vec<_> = std::env::args().collect();
     let image_ref: Reference = args.get(1).expect("give me an image ref").parse().unwrap();
-    let outfile = args.get(2);
 
     println!("{:?}", image_ref);
 
@@ -30,7 +29,7 @@ async fn main() {
                 )
                 .join(".local/share/peoci")
             });
-        let mut client = peimage::ocidist_cache::Client::builder()
+        let client = peimage::ocidist_cache::Client::builder()
             .dir(peoci_cache_dir)
             .load_from_disk(true)
             .build()
@@ -45,17 +44,20 @@ async fn main() {
         println!("got manifest {:#?}", res.manifest());
         println!("got configuration {:#?}", res.configuration());
 
-        let _fd = client
-            .get_blob(&image_ref, manifest.layers()[0].digest())
-            .await
-            .unwrap();
-        println!("got blob {:?}", manifest.layers()[0].digest());
+        //let _fd = client
+        //    .get_blob(&image_ref, manifest.layers()[0].digest())
+        //    .await
+        //    .unwrap();
+        //println!("got blob {:?}", manifest.layers()[0].digest());
+        let layers = client.get_layers(&image_ref, &manifest).await.unwrap();
+        println!("got layers {:?}", layers);
 
         println!("{:#?}", client.stats().await);
 
         client.persist().unwrap();
     } else {
         let mut client = peimage::ocidist::Client::new().unwrap();
+        let outfile = args.get(2);
 
         let manifest_response = client
             .get_image_manifest(&image_ref)

@@ -15,16 +15,22 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 // - auth
 
 const DOCKER_CONTENT_DIGEST_HEADER: &str = "docker-content-digest";
+const OCI_IMAGE_INDEX_V1: &str = "application/vnd.oci.image.index.v1+json";
+const OCI_IMAGE_MANIFEST_V1: &str = "application/vnd.oci.image.manifest.v1+json";
+const DOCKER_IMAGE_MANIFEST_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
+const ACCEPTED_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
 
 #[derive(Debug)]
 pub enum Error {
     Reqwest(reqwest::Error),
+    OciSpecError(OciSpecError),
     DigestMismatch,
     NoTagOrDigest,
     BothTagAndDigest,
     BadDockerContentDigest,
     Write,
     BadImageIndex,
+    BadContentType(String),
     DigestAlgorithmNotHandled(DigestAlgorithm),
     StatusNotOk(StatusCode),
 }
@@ -32,6 +38,12 @@ pub enum Error {
 impl From<reqwest::Error> for Error {
     fn from(error: reqwest::Error) -> Error {
         Error::Reqwest(error)
+    }
+}
+
+impl From<OciSpecError> for Error {
+    fn from(error: OciSpecError) -> Self {
+        Error::OciSpecError(error)
     }
 }
 
@@ -124,28 +136,38 @@ impl Client {
         &mut self,
         reference: &Reference,
     ) -> Result<Option<ImageManifestResponse>, Error> {
-        let content_type = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
-        Ok(self
-            .get_manifest(reference, content_type)
+        self.get_manifest(reference, ACCEPTED_IMAGE_MANIFEST)
             .await?
-            .map(|(digest, data)| {
-                // this is a weird situation with the spec, the digest isn't required to be sent,
-                // but I don't think its specified what digest to use otherwise
-                // ultimately I guess this is moot when looking up in the index because you get
-                // the digest in there
-                let digest = digest.unwrap_or_else(|| digest_from_data(&data));
-                ImageManifestResponse { data, digest }
-            }))
+            .map(|(content_type, digest, data)| {
+                if content_type != OCI_IMAGE_MANIFEST_V1 && content_type != DOCKER_IMAGE_MANIFEST_V2
+                {
+                    Err(Error::BadContentType(content_type))
+                } else {
+                    // this is a weird situation with the spec, the digest isn't required to be sent,
+                    // but I don't think its specified what digest to use otherwise
+                    // ultimately I guess this is moot when looking up in the index because you get
+                    // the digest in there
+                    let digest = digest.unwrap_or_else(|| digest_from_data(&data));
+                    Ok(ImageManifestResponse { data, digest })
+                }
+            })
+            .transpose()
     }
 
     pub async fn get_image_index(
         &mut self,
         reference: &Reference,
     ) -> Result<Option<ImageIndexResponse>, Error> {
-        Ok(self
-            .get_manifest(reference, "application/vnd.oci.image.index.v1+json")
+        self.get_manifest(reference, OCI_IMAGE_INDEX_V1)
             .await?
-            .map(|(_digest, data)| ImageIndexResponse { data }))
+            .map(|(content_type, _digest, data)| {
+                if content_type != OCI_IMAGE_INDEX_V1 {
+                    Err(Error::BadContentType(content_type))
+                } else {
+                    Ok(ImageIndexResponse { data })
+                }
+            })
+            .transpose()
     }
 
     pub async fn lookup_image_index(
@@ -155,7 +177,7 @@ impl Client {
         os: Os,
     ) -> Result<Option<Digest>, Error> {
         if let Some(index) = self.get_image_index(reference).await? {
-            let index = index.get().map_err(|_| Error::BadImageIndex)?;
+            let index = index.get()?;
             let digest = index
                 .manifests()
                 .iter()
@@ -250,7 +272,7 @@ impl Client {
         &mut self,
         reference: &Reference,
         accept: &str,
-    ) -> Result<Option<(Option<Digest>, Bytes)>, Error> {
+    ) -> Result<Option<(String, Option<Digest>, Bytes)>, Error> {
         let domain = reference.resolve_registry();
         let repo = reference.repository();
         let td = TagOrDigest::try_from(reference)?;
@@ -273,9 +295,14 @@ impl Client {
         match response.status() {
             StatusCode::OK => {
                 let digest = get_docker_content_digest(&response)?;
+                let content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .map(|x| x.to_str().unwrap_or("").to_string())
+                    .unwrap_or_else(String::new);
                 let data = response.bytes().await?;
                 check_data_matches_digest(digest.as_ref(), &data)?;
-                Ok(Some((digest, data)))
+                Ok(Some((content_type, digest, data)))
             }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(Error::StatusNotOk(status)),
@@ -380,11 +407,9 @@ fn digest_eq(digest_lower_hex_str: &str, digest: impl sha2::Digest) -> bool {
     // checked length was even
     let as_byte_pairs = <str as AsRef<[u8]>>::as_ref(digest_lower_hex_str).chunks_exact(2);
 
-    as_byte_pairs
-        .zip(digest_bytes)
-        .all(|(pair, byte): (&[u8], u8)| {
-            LUT[(byte >> 4) as usize] == pair[0] && LUT[(byte & 0xf) as usize] == pair[1]
-        })
+    as_byte_pairs.zip(digest_bytes).all(|(pair, byte)| {
+        LUT[(byte >> 4) as usize] == pair[0] && LUT[(byte & 0xf) as usize] == pair[1]
+    })
 }
 
 #[cfg(test)]
