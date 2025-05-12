@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::Cursor;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
@@ -11,7 +12,7 @@ use oci_spec::{
     OciSpecError,
 };
 use rustix::{fd::OwnedFd, fs::renameat};
-use std::fs::File;
+use tokio::sync::Semaphore;
 
 use crate::ocidist;
 
@@ -30,6 +31,7 @@ use crate::ocidist;
 // Persistence of the blobs are done with one blob per file like the ocidir layout of
 // blobs/sha256/{digest}. Loading of the blob cache from this dir just inserts the key and size
 // (necessary to limit max_capacity) and on expiry, the files are removed
+// Max number of concurrent downloads are metered by a semaphore
 //
 // Currently the keys/values for digests are strings since they come with their multihash prefix,
 // but they are twice the bytes (64 + 7 = 71 bytes for a sha256 32 byte (ideally 1 byte prefix for
@@ -57,6 +59,7 @@ pub enum Error {
     DigestAlgorithmNotHandled,
     BlobMissing,
     FdClone,
+    MaxConns,
     OciSpecError(OciSpecError),
 }
 
@@ -75,6 +78,12 @@ impl From<rustix::io::Errno> for Error {
 impl From<OciSpecError> for Error {
     fn from(error: OciSpecError) -> Self {
         Error::OciSpecError(error)
+    }
+}
+
+impl From<tokio::sync::AcquireError> for Error {
+    fn from(_error: tokio::sync::AcquireError) -> Self {
+        Error::MaxConns
     }
 }
 
@@ -100,6 +109,7 @@ pub struct ClientBuilder {
     ref_capacity: u64,      // in bytes
     manifest_capacity: u64, // in bytes
     blob_capacity: u64,     // in bytes
+    max_open_conns: usize,
 }
 
 #[derive(bincode::Encode, bincode::Decode)]
@@ -116,6 +126,7 @@ impl Default for ClientBuilder {
             ref_capacity: 10_000_000,
             manifest_capacity: 10_000_000,
             blob_capacity: 1_000_000_000,
+            max_open_conns: 10,
         }
     }
 }
@@ -139,6 +150,8 @@ struct Counters {
 pub struct Client {
     client: ocidist::Client,
     dirs: Dirs,
+    counters: Counters,
+    connection_semaphore: Arc<Semaphore>,
 
     // stores ref quay.io/fedora/fedora:42 -> manifest sha256:digest
     ref_cache: Cache<String, String>,
@@ -151,8 +164,6 @@ pub struct Client {
     // stores blob sha256:digest -> filesize
     // file is located at blobs/{key.replace(":", "/")}
     blob_cache: Cache<String, u64>,
-
-    counters: Counters,
 }
 
 impl PackedImageAndConfiguration {
@@ -186,6 +197,11 @@ impl ClientBuilder {
 
     pub fn load_from_disk(mut self, load_from_disk: bool) -> Self {
         self.load_from_disk = load_from_disk;
+        self
+    }
+
+    pub fn max_open_conns(mut self, conns: usize) -> Self {
+        self.max_open_conns = conns;
         self
     }
 
@@ -245,6 +261,7 @@ impl ClientBuilder {
             manifest_cache,
             blob_cache,
             counters: Counters::default(),
+            connection_semaphore: Arc::new(Semaphore::new(self.max_open_conns)),
         };
         if self.load_from_disk {
             info!("load cache from {:?}", ret.dirs.path);
@@ -302,7 +319,11 @@ impl Client {
             let entry = self
                 .ref_cache
                 .entry(reference.to_string())
-                .or_try_insert_with(retreive_ref(self.client.clone(), reference))
+                .or_try_insert_with(retreive_ref(
+                    self.client.clone(),
+                    self.connection_semaphore.clone(),
+                    reference,
+                ))
                 .await?;
             if entry.is_fresh() {
                 self.counters.ref_cache_miss += 1;
@@ -323,7 +344,11 @@ impl Client {
         let entry = self
             .manifest_cache
             .entry(digest_string)
-            .or_try_insert_with(retreive_manifest(self.client.clone(), &reference))
+            .or_try_insert_with(retreive_manifest(
+                self.client.clone(),
+                self.connection_semaphore.clone(),
+                &reference,
+            ))
             .await?;
         if entry.is_fresh() {
             self.counters.manifest_cache_miss += 1;
@@ -345,6 +370,7 @@ impl Client {
             .entry(digest.to_string())
             .or_try_insert_with(retreive_blob(
                 self.client.clone(),
+                self.connection_semaphore.clone(),
                 reference,
                 digest,
                 &self.dirs.sha256,
@@ -439,7 +465,7 @@ impl Client {
         {
             if let Ok(name) = entry.file_name().into_string() {
                 let digest_string = format!("sha256:{}", name);
-                if let Err(_) = digest_string.parse::<Digest>() {
+                if digest_string.parse::<Digest>().is_err() {
                     remove(entry);
                     continue;
                 }
@@ -490,7 +516,12 @@ impl Client {
     }
 }
 
-async fn retreive_ref(mut client: ocidist::Client, reference: &Reference) -> Result<String, Error> {
+async fn retreive_ref(
+    mut client: ocidist::Client,
+    semaphore: Arc<Semaphore>,
+    reference: &Reference,
+) -> Result<String, Error> {
+    let _permit = semaphore.acquire().await?;
     let digest = client
         .lookup_image_index(reference, Arch::Amd64, Os::Linux)
         .await?
@@ -501,8 +532,10 @@ async fn retreive_ref(mut client: ocidist::Client, reference: &Reference) -> Res
 // this will return Error if digest not found
 async fn retreive_manifest(
     mut client: ocidist::Client,
+    semaphore: Arc<Semaphore>,
     reference: &Reference,
 ) -> Result<Arc<PackedImageAndConfiguration>, Error> {
+    let _permit = semaphore.acquire().await?;
     let manifest_res = client
         .get_image_manifest(reference)
         .await?
@@ -517,6 +550,7 @@ async fn retreive_manifest(
 
 async fn retreive_blob(
     mut client: ocidist::Client,
+    semaphore: Arc<Semaphore>,
     reference: &Reference,
     digest: &Digest,
     blob_dir: &OwnedFd,
@@ -526,6 +560,7 @@ async fn retreive_blob(
     if *digest.algorithm() != DigestAlgorithm::Sha256 {
         return Err(Error::DigestAlgorithmNotHandled);
     }
+    let _permit = semaphore.acquire().await?;
     let mut bw = tokio::io::BufWriter::with_capacity(
         32 * 1024,
         openat_create_write_async(blob_dir, digest.digest())?,
