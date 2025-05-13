@@ -1151,7 +1151,7 @@ impl<W: Write + Seek> Builder<W> {
                     start_block,
                     len,
                     tail,
-                    n_links: 1,
+                    n_links: 2,
                     ..Default::default()
                 },
             )?;
@@ -1786,6 +1786,8 @@ mod tests {
 
     #[test]
     fn test_link_count() {
+        // TODO this test would fail if we added E::link("/z", "/y") which should give everyone a
+        // link count of 3, but we aren't currently handling the transitive links like this
         let entries: EList = vec![E::file("/x", b"hi"), E::link("/y", "/x")]
             .into_iter()
             .collect();
@@ -1802,6 +1804,10 @@ mod tests {
             let item = item.unwrap();
             match item.name {
                 b"x" => {
+                    let inode = erofs.get_inode_from_dirent(&item).unwrap();
+                    assert_eq!(inode.link_count(), 2);
+                }
+                b"y" => {
                     let inode = erofs.get_inode_from_dirent(&item).unwrap();
                     assert_eq!(inode.link_count(), 2);
                 }
