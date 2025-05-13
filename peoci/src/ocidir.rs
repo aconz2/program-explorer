@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use crate::squash::Compression;
+use crate::Compression;
 
 use oci_spec::image::{Descriptor, Digest, ImageIndex, ImageManifest, MediaType};
 

@@ -2,7 +2,8 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::os::fd::FromRawFd;
 
-use peimage::squash::{squash_to_tar, Compression};
+use peimage::squash::squash_to_tar;
+use peoci::Compression;
 
 fn main() {
     let mut layers: Vec<_> = std::env::args()

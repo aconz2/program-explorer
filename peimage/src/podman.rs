@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
-use crate::squash::Compression;
+use peoci::Compression;
 
 #[derive(Debug)]
 pub enum Error {

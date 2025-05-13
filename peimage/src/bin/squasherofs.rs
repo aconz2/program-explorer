@@ -1,7 +1,7 @@
 use std::env;
 
 use peimage::mkfs::squash_erofs;
-use peimage::ocidir::load_layers_from_oci;
+use peoci::ocidir::load_layers_from_oci;
 
 fn main() {
     let args: Vec<_> = env::args().collect();

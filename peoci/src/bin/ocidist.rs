@@ -5,12 +5,13 @@ use oci_spec::{
     distribution::Reference,
     image::{Arch, Os},
 };
-use peimage::ocidist::{Auth, AuthMap};
 use serde::Deserialize;
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
 };
+
+use peoci::ocidist::{Auth, AuthMap};
 
 #[derive(Deserialize)]
 struct AuthEntry {
@@ -60,7 +61,7 @@ async fn main() {
                 )
                 .join(".local/share/peoci")
             });
-        let client = peimage::ocidist_cache::Client::builder()
+        let client = peoci::ocidist_cache::Client::builder()
             .dir(peoci_cache_dir)
             .load_from_disk(true)
             .auth(auth)
@@ -88,7 +89,7 @@ async fn main() {
 
         client.persist().unwrap();
     } else {
-        let mut client = peimage::ocidist::Client::new().unwrap();
+        let mut client = peoci::ocidist::Client::new().unwrap();
 
         client.set_auth(auth).await;
 

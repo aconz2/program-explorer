@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "nocrc")]
 use flate2::bufread::DeflateDecoder;
 use flate2::bufread::GzDecoder;
-use oci_spec::image::MediaType;
 use rustix::fs::Mode;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
+
+use peoci::Compression;
 
 use peerofs::build::{
     Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats, XattrMap,
@@ -43,25 +44,6 @@ impl From<io::Error> for SquashError {
 impl From<ErofsError> for SquashError {
     fn from(e: ErofsError) -> Self {
         SquashError::Erofs(e)
-    }
-}
-
-#[derive(Debug)]
-pub enum Compression {
-    None,
-    Gzip,
-    Zstd,
-}
-
-impl TryFrom<&MediaType> for Compression {
-    type Error = ();
-    fn try_from(x: &MediaType) -> Result<Compression, Self::Error> {
-        match x {
-            MediaType::ImageLayer => Ok(Compression::None),
-            MediaType::ImageLayerGzip => Ok(Compression::Gzip),
-            MediaType::ImageLayerZstd => Ok(Compression::Zstd),
-            _ => Err(()),
-        }
     }
 }
 
