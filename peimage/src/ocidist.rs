@@ -11,11 +11,7 @@ use oci_spec::{
     image::{Arch, Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest, Os},
     OciSpecError,
 };
-use reqwest::{
-    header,
-    header::{HeaderMap, HeaderValue},
-    Method, StatusCode,
-};
+use reqwest::{header, header::HeaderValue, Method, StatusCode};
 use serde::Deserialize;
 use sha2::Sha256;
 use tokio::{
@@ -64,10 +60,41 @@ impl From<OciSpecError> for Error {
     }
 }
 
+// our key is index.docker.io/library/gcc for example
+// does not include scope because we are always just pulling
+// annoyingly ghcr.io for example doesn't care and if you get a token without scope it will work on
+// everything, so we don't have to get one token per repo, but just doing it
+#[derive(PartialEq, Eq, Hash)]
+struct TokenCacheKey(String);
+
+impl From<&Reference> for TokenCacheKey {
+    fn from(reference: &Reference) -> Self {
+        Self(format!(
+            "{}/{}",
+            reference.resolve_registry(),
+            reference.repository()
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct Token {
     token: String,
     expires_in: Duration,
+}
+
+#[derive(Default)]
+struct ExpireToken;
+
+impl Expiry<TokenCacheKey, Token> for ExpireToken {
+    fn expire_after_create(
+        &self,
+        _key: &TokenCacheKey,
+        value: &Token,
+        _current_time: Instant,
+    ) -> Option<Duration> {
+        Some(value.expires_in)
+    }
 }
 
 #[derive(Debug)]
@@ -81,7 +108,7 @@ pub struct Client {
     client: reqwest::Client,
     // key is the domain name of the registry
     // currently not keyed off a repository scope
-    token_cache: Cache<String, Token>,
+    token_cache: Cache<TokenCacheKey, Token>,
 
     auth_store: Arc<RwLock<BTreeMap<String, Auth>>>,
 }
@@ -158,19 +185,6 @@ impl<'a> TagOrDigest<'a> {
     }
 }
 
-#[derive(Default)]
-struct ExpireToken;
-impl Expiry<String, Token> for ExpireToken {
-    fn expire_after_create(
-        &self,
-        _key: &String,
-        value: &Token,
-        _current_time: Instant,
-    ) -> Option<Duration> {
-        Some(value.expires_in)
-    }
-}
-
 impl Client {
     pub fn new() -> Result<Self, Error> {
         let client = reqwest::Client::builder()
@@ -178,7 +192,13 @@ impl Client {
             .https_only(true)
             .build()?;
 
-        let token_cache = Cache::builder().expire_after(ExpireToken).build();
+        let token_cache = Cache::builder()
+            .max_capacity(10_000_000)
+            .weigher(|k: &TokenCacheKey, v: &Token| {
+                (k.0.len() + v.token.len()).try_into().unwrap_or(u32::MAX)
+            })
+            .expire_after(ExpireToken)
+            .build();
 
         let auth_store = Arc::new(BTreeMap::new().into());
 
@@ -407,16 +427,24 @@ impl Client {
             .await
     }
 
-    async fn get_token_for(&self, registry: &str) -> Result<Option<Token>, Error> {
+    // not the greatest since we check the auth map everytime to see if one of the registries is
+    // unathenticated, if it is we then check the map
+    async fn get_token_for(
+        &self,
+        reference: &Reference,
+        www_auth: &WWWAuthenticateBearerRealmService<'_>,
+    ) -> Result<Option<Token>, Error> {
+        let registry = reference.resolve_registry();
         match self.auth_store.read().await.get(registry) {
             Some(Auth::None) => Ok(None),
             Some(Auth::UserPass(user, pass)) => {
                 let entry = self
                     .token_cache
-                    .entry_by_ref(registry)
+                    .entry(reference.into())
                     .or_try_insert_with(retreive_token_user_pass(
                         self.client.clone(),
-                        registry,
+                        reference,
+                        www_auth,
                         user,
                         pass,
                     ))
@@ -428,7 +456,7 @@ impl Client {
                         Error::Unknown
                     })?;
                 if entry.is_fresh() {
-                    trace!("got new token for {}", registry);
+                    trace!("got new token for {}", entry.key().0);
                 }
                 Ok(Some(entry.into_value()))
             }
@@ -441,21 +469,41 @@ impl Client {
         reference: &Reference,
         mut req: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, Error> {
-        let registry = reference.resolve_registry();
+        // this is safe because we are only doing GET's
+        let req_copy = req.try_clone().unwrap();
 
-        if let Some(token) = self.get_token_for(registry).await? {
-            req = req.headers({
-                let mut headers = HeaderMap::new();
-                let value = format!("Bearer {}", token.token);
-                headers.insert(
-                    header::AUTHORIZATION,
-                    HeaderValue::from_str(&value).map_err(|_| Error::InvalidAuth)?,
-                );
-                headers
-            });
+        if let Some(token) = self.token_cache.get(&reference.into()).await {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {}", token.token));
         }
 
-        Ok(req.send().await?)
+        let res = req.send().await?;
+        if res.status() == StatusCode::UNAUTHORIZED {
+            let www_auth = {
+                if let Some(www_auth) = res
+                    .headers()
+                    .get(header::WWW_AUTHENTICATE)
+                    .and_then(parse_www_authenticate_bearer_header)
+                {
+                    www_auth
+                } else {
+                    error!(
+                        "bad auth but couldn't get www-authenticate header {:?}",
+                        res.headers().get(header::WWW_AUTHENTICATE)
+                    );
+                    return Err(Error::StatusNotOk(StatusCode::UNAUTHORIZED));
+                }
+            };
+            if let Some(token) = self.get_token_for(reference, &www_auth).await? {
+                Ok(req_copy
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
+                    .send()
+                    .await?)
+            } else {
+                Err(Error::StatusNotOk(StatusCode::UNAUTHORIZED))
+            }
+        } else {
+            Ok(res)
+        }
     }
 }
 
@@ -463,7 +511,8 @@ impl Client {
 // retry
 async fn retreive_token_user_pass(
     client: reqwest::Client,
-    domain: &str,
+    reference: &Reference,
+    www_auth: &WWWAuthenticateBearerRealmService<'_>,
     user: &str,
     pass: &str,
 ) -> Result<Token, Error> {
@@ -474,27 +523,20 @@ async fn retreive_token_user_pass(
         //issued_at: Option<String>, // "2025-05-12T21:35:54.377188944Z" but not really useful
     }
 
-    // ugh the real thing is to parse www-authenticate but not seeing a good crate right now
-    let realm = match domain {
-        "index.docker.io" => "auth.docker.io/token",
-        "ghcr.io" => "ghcr.io/token",
-        s => {
-            return Err(Error::DomainNotSupported(s.into()));
-        }
-    };
-    // not including service or scope right now
-
-    let url = format!("https://{}", realm);
+    let scope = format!("repository:{}:pull", reference.repository());
 
     let token = client
-        .request(Method::GET, &url)
+        .request(Method::GET, www_auth.realm)
+        .query(&[("scope", scope), ("service", www_auth.service.to_string())])
         .basic_auth(user, Some(pass))
         .send()
         .await?
         .json::<JsonToken>()
         .await?;
 
-    let expires_in = Duration::from_secs(token.expires_in.unwrap_or(300));
+    // https://distribution.github.io/distribution/spec/auth/token/#token-response-fields
+    // gives the default as 60 seconds
+    let expires_in = Duration::from_secs(token.expires_in.unwrap_or(60));
     let token = token.token;
     Ok(Token { token, expires_in })
 }
@@ -585,6 +627,64 @@ fn digest_eq(digest_lower_hex_str: &str, digest: impl sha2::Digest) -> bool {
     })
 }
 
+#[derive(Default)]
+struct WWWAuthenticateBearer<'a> {
+    realm: Option<&'a str>,
+    service: Option<&'a str>,
+    scope: Option<&'a str>,
+}
+
+struct WWWAuthenticateBearerRealmService<'a> {
+    realm: &'a str,
+    service: &'a str,
+}
+
+fn parse_www_authenticate_bearer_header(
+    input: &HeaderValue,
+) -> Option<WWWAuthenticateBearerRealmService<'_>> {
+    let res = parse_www_authenticate_bearer_str(input.to_str().ok()?)?;
+    Some(WWWAuthenticateBearerRealmService {
+        realm: res.realm?,
+        service: res.service?,
+    })
+}
+
+fn parse_www_authenticate_bearer_str(input: &str) -> Option<WWWAuthenticateBearer<'_>> {
+    use nom::{
+        bytes::{complete::tag, take_until1},
+        character::complete::{alpha1, char},
+        multi::{many0, many1, separated_list0},
+        sequence::{delimited, preceded, separated_pair, terminated},
+        IResult, Parser,
+    };
+    fn parser(input: &str) -> IResult<&str, Vec<(&str, &str)>> {
+        let (input, matches) = preceded(
+            terminated(tag("Bearer"), many1(tag(" "))),
+            separated_list0(
+                terminated(tag(","), many0(tag(" "))),
+                separated_pair(
+                    alpha1,
+                    tag("="),
+                    delimited(char('"'), take_until1("\""), char('"')),
+                ),
+            ),
+        )
+        .parse(input)?;
+        Ok((input, matches))
+    }
+    let (_, matches) = parser(input).ok()?;
+    let mut ret = WWWAuthenticateBearer::default();
+    for (k, v) in matches.into_iter() {
+        match k {
+            "realm" => ret.realm = Some(v),
+            "service" => ret.service = Some(v),
+            "scope" => ret.scope = Some(v),
+            _ => {}
+        }
+    }
+    Some(ret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,5 +720,28 @@ mod tests {
                 sha256_digest("abc"),
             )
         );
+    }
+
+    #[test]
+    fn test_www_authenticate() {
+        // example from https://distribution.github.io/distribution/spec/auth/token/#how-to-authenticate
+        let cases = [
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:samalba/my-app:pull,push""#,
+            r#"Bearer realm="https://auth.docker.io/token", service="registry.docker.io",scope="repository:samalba/my-app:pull,push""#,
+            r#"Bearer realm="https://auth.docker.io/token", service="registry.docker.io", scope="repository:samalba/my-app:pull,push""#,
+            r#"Bearer    realm="https://auth.docker.io/token",   service="registry.docker.io", scope="repository:samalba/my-app:pull,push""#,
+            r#"Bearer   service="registry.docker.io", scope="repository:samalba/my-app:pull,push",realm="https://auth.docker.io/token""#,
+        ];
+        for case in cases.iter() {
+            let x = parse_www_authenticate_bearer_str(case).unwrap();
+            assert_eq!(x.realm, Some("https://auth.docker.io/token"), "{}", case);
+            assert_eq!(x.service, Some("registry.docker.io"), "{}", case);
+            assert_eq!(
+                x.scope,
+                Some("repository:samalba/my-app:pull,push"),
+                "{}",
+                case
+            );
+        }
     }
 }
