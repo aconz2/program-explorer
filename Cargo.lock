@@ -1632,22 +1632,6 @@ dependencies = [
 
 [[package]]
 name = "oci-spec"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da406e58efe2eb5986a6139626d611ce426e5324a824133d76367c765cf0b882"
-dependencies = [
- "derive_builder",
- "getset",
- "regex",
- "serde",
- "serde_json",
- "strum 0.26.3",
- "strum_macros 0.26.4",
- "thiserror 2.0.12",
-]
-
-[[package]]
-name = "oci-spec"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57e9beda9d92fac7bf4904c34c83340ef1024159faee67179a04e0277523da33"
@@ -1790,7 +1774,7 @@ dependencies = [
  "base16ct",
  "byteorder",
  "flate2",
- "oci-spec 0.8.1",
+ "oci-spec",
  "peerofs",
  "peinit",
  "peoci",
@@ -1830,7 +1814,7 @@ dependencies = [
  "log",
  "moka",
  "nom",
- "oci-spec 0.8.1",
+ "oci-spec",
  "reqwest",
  "rustix 1.0.7",
  "serde",
@@ -1858,7 +1842,7 @@ dependencies = [
  "log",
  "memmap2",
  "nix 0.29.0",
- "oci-spec 0.7.1",
+ "oci-spec",
  "once_cell",
  "pearchive",
  "peimage",
@@ -1891,7 +1875,7 @@ dependencies = [
  "http",
  "log",
  "nix 0.29.0",
- "oci-spec 0.7.1",
+ "oci-spec",
  "once_cell",
  "pearchive",
  "peimage",
