@@ -581,7 +581,7 @@ async fn retreive_ref(
 ) -> Result<String, Error> {
     let _permit = semaphore.acquire().await?;
     let digest = client
-        .lookup_image_index(reference, Arch::Amd64, Os::Linux)
+        .get_matching_digest_from_index(reference, Arch::Amd64, Os::Linux)
         .await?
         .ok_or(Error::NoMatchingManifest)?;
     Ok(digest.to_string())
@@ -712,12 +712,22 @@ fn openat(
     name: impl rustix::path::Arg,
     flags: rustix::fs::OFlags,
 ) -> Result<File, rustix::io::Errno> {
-    use rustix::fs::Mode;
-    let fd = rustix::fs::openat(dir, name, flags, Mode::from_bits_truncate(0o644))?;
+    use rustix::fs::{Mode, ResolveFlags};
+    let fd = rustix::fs::openat2(
+        dir,
+        name,
+        flags,
+        Mode::from_bits_truncate(0o644),
+        ResolveFlags::BENEATH,
+    )?;
     Ok(fd.into())
 }
 
+// wish there was unlinkat2 with BENEATH
 fn unlinkat(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<(), rustix::io::Errno> {
+    if name.as_str()?.contains("/") {
+        return Err(rustix::io::Errno::ACCESS);
+    }
     rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty())
 }
 

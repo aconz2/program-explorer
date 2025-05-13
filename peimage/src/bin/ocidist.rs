@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use oci_spec::distribution::Reference;
+use oci_spec::{
+    distribution::Reference,
+    image::{Arch, Os},
+};
 use peimage::ocidist::Auth;
 use serde::Deserialize;
 use tokio::{
@@ -102,17 +105,17 @@ async fn main() {
 
         let outfile = args.get(2);
 
+        let index_response = client.get_image_index(&image_ref).await.unwrap().unwrap();
+        let index = index_response.get().unwrap();
+        println!("got index {:#?}", index);
+
         let manifest_response = client
-            .get_image_manifest(&image_ref)
+            .get_matching_manifest_from_index(&image_ref, Arch::Amd64, Os::Linux)
             .await
             .unwrap()
             .unwrap();
         let manifest = manifest_response.get().unwrap();
         println!("got manifest {:#?}", manifest);
-
-        let index_response = client.get_image_index(&image_ref).await.unwrap().unwrap();
-        let index = index_response.get().unwrap();
-        println!("got index {:#?}", index);
 
         let configuration_response = client
             .get_image_configuration(&image_ref, manifest.config().digest())

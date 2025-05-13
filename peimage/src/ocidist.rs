@@ -27,7 +27,11 @@ const DOCKER_CONTENT_DIGEST_HEADER: &str = "docker-content-digest";
 const OCI_IMAGE_INDEX_V1: &str = "application/vnd.oci.image.index.v1+json";
 const OCI_IMAGE_MANIFEST_V1: &str = "application/vnd.oci.image.manifest.v1+json";
 const DOCKER_IMAGE_MANIFEST_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
+const DOCKER_IMAGE_MANIFEST_LIST_V2: &str =
+    "application/vnd.docker.distribution.manifest.list.v2+json";
+
 const ACCEPTED_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+const ACCEPTED_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json";
 
 #[derive(Debug)]
 pub enum Error {
@@ -174,9 +178,7 @@ impl Client {
             .https_only(true)
             .build()?;
 
-        let token_cache = Cache::builder()
-            .expire_after(ExpireToken)
-            .build();
+        let token_cache = Cache::builder().expire_after(ExpireToken).build();
 
         let auth_store = Arc::new(BTreeMap::new().into());
 
@@ -200,6 +202,7 @@ impl Client {
             .map(|(content_type, digest, data)| {
                 if content_type != OCI_IMAGE_MANIFEST_V1 && content_type != DOCKER_IMAGE_MANIFEST_V2
                 {
+                    error!("{}", String::from_utf8(data.into()).unwrap());
                     Err(Error::BadContentType(content_type))
                 } else {
                     // this is a weird situation with the spec, the digest isn't required to be sent,
@@ -217,10 +220,12 @@ impl Client {
         &mut self,
         reference: &Reference,
     ) -> Result<Option<ImageIndexResponse>, Error> {
-        self.get_manifest(reference, OCI_IMAGE_INDEX_V1)
+        self.get_manifest(reference, ACCEPTED_IMAGE_INDEX)
             .await?
             .map(|(content_type, _digest, data)| {
-                if content_type != OCI_IMAGE_INDEX_V1 {
+                if content_type != OCI_IMAGE_INDEX_V1
+                    && content_type != DOCKER_IMAGE_MANIFEST_LIST_V2
+                {
                     Err(Error::BadContentType(content_type))
                 } else {
                     Ok(ImageIndexResponse { data })
@@ -229,7 +234,7 @@ impl Client {
             .transpose()
     }
 
-    pub async fn lookup_image_index(
+    pub async fn get_matching_digest_from_index(
         &mut self,
         reference: &Reference,
         arch: Arch,
@@ -249,6 +254,23 @@ impl Client {
                 })
                 .map(|descriptor| descriptor.digest().clone());
             Ok(digest)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn get_matching_manifest_from_index(
+        &mut self,
+        reference: &Reference,
+        arch: Arch,
+        os: Os,
+    ) -> Result<Option<ImageManifestResponse>, Error> {
+        if let Some(digest) = self
+            .get_matching_digest_from_index(reference, arch, os)
+            .await?
+        {
+            self.get_image_manifest(&reference.clone_with_digest(digest.to_string()))
+                .await
         } else {
             Ok(None)
         }
@@ -381,8 +403,7 @@ impl Client {
             digest.digest()
         );
         trace!("GET {url}");
-        self
-            .auth_and_retry(reference, self.client.request(Method::GET, &url))
+        self.auth_and_retry(reference, self.client.request(Method::GET, &url))
             .await
     }
 
