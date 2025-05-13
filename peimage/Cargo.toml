@@ -47,5 +47,9 @@ path = "src/bin/squasherofs.rs"
 name = "tardiff"
 path = "src/bin/tardiff.rs"
 
+[[bin]]
+name = "peimage-serivce"
+path = "src/bin/service.rs"
+
 [lints]
 workspace = true

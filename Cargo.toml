@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["pearchive", "peerofs", "peimage", "peinit", "peoci", "perunner", "peserver", "waitid_timeout"]
+members = ["pearchive", "peerofs", "peimage", "peimage-service", "peinit", "peoci", "perunner", "peserver", "waitid_timeout"]
 
 [workspace.lints.clippy]
 redundant_field_names = "allow"

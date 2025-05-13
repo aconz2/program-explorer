@@ -761,6 +761,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "filedesc"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4960c866d9cf4c48f64f11ef0020c98900d0cb32e9b019c000ed838470daa1d"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1786,6 +1795,22 @@ dependencies = [
  "tar",
  "tempfile",
  "zstd",
+]
+
+[[package]]
+name = "peimage-service"
+version = "0.1.0"
+dependencies = [
+ "bincode 2.0.1",
+ "log",
+ "oci-spec",
+ "peimage",
+ "peoci",
+ "rustix 1.0.7",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-seqpacket",
 ]
 
 [[package]]
@@ -3064,6 +3089,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e727b36a1a0e8b74c376ac2211e40c2c8af09fb4013c60d910495810f008e9b"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-seqpacket"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6eb09d9a154bede1fafb3a9b13f4347de87e1ec07fa6fb42f52041800f18fe06"
+dependencies = [
+ "filedesc",
+ "libc",
  "tokio",
 ]
 

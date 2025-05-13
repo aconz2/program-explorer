@@ -327,6 +327,7 @@ impl Client {
         Ok(())
     }
 
+    // TODO I Think this should return the digest of the manifest as well
     pub async fn get_image_manifest_and_configuration(
         &self,
         reference: &Reference,
