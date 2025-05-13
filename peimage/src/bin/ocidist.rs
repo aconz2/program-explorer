@@ -5,7 +5,7 @@ use oci_spec::{
     distribution::Reference,
     image::{Arch, Os},
 };
-use peimage::ocidist::Auth;
+use peimage::ocidist::{Auth, AuthMap};
 use serde::Deserialize;
 use tokio::{
     fs::File,
@@ -20,8 +20,12 @@ struct AuthEntry {
 
 type StoredAuth = BTreeMap<String, AuthEntry>;
 
-fn load_stored_auth(p: impl AsRef<Path>) -> StoredAuth {
-    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+fn load_stored_auth(p: impl AsRef<Path>) -> AuthMap {
+    let stored: StoredAuth = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    stored
+        .into_iter()
+        .map(|(k, v)| (k, Auth::UserPass(v.username, v.password)))
+        .collect()
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -41,7 +45,7 @@ async fn main() {
 
     println!("{:?}", image_ref);
 
-    let cache = false;
+    let cache = true;
 
     if cache {
         let peoci_cache_dir = std::env::vars()
@@ -59,18 +63,10 @@ async fn main() {
         let client = peimage::ocidist_cache::Client::builder()
             .dir(peoci_cache_dir)
             .load_from_disk(true)
+            .auth(auth)
             .build()
             .await
             .unwrap();
-
-        for (k, entry) in auth.iter() {
-            client
-                .set_auth(
-                    k,
-                    Auth::UserPass(entry.username.clone(), entry.password.clone()),
-                )
-                .await;
-        }
 
         let res = client
             .get_image_manifest_and_configuration(&image_ref)
@@ -94,14 +90,7 @@ async fn main() {
     } else {
         let mut client = peimage::ocidist::Client::new().unwrap();
 
-        for (k, entry) in auth.iter() {
-            client
-                .set_auth(
-                    k,
-                    Auth::UserPass(entry.username.clone(), entry.password.clone()),
-                )
-                .await;
-        }
+        client.set_auth(auth).await;
 
         let outfile = args.get(2);
 

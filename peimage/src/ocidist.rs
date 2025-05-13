@@ -103,6 +103,8 @@ pub enum Auth {
     UserPass(String, String),
 }
 
+pub type AuthMap = BTreeMap<String, Auth>;
+
 #[derive(Clone)]
 pub struct Client {
     client: reqwest::Client,
@@ -110,7 +112,7 @@ pub struct Client {
     // currently not keyed off a repository scope
     token_cache: Cache<TokenCacheKey, Token>,
 
-    auth_store: Arc<RwLock<BTreeMap<String, Auth>>>,
+    auth_store: Arc<RwLock<AuthMap>>,
 }
 
 pub struct ImageManifestResponse {
@@ -209,8 +211,8 @@ impl Client {
         })
     }
 
-    pub async fn set_auth(&self, domain: &str, auth: Auth) {
-        self.auth_store.write().await.insert(domain.into(), auth);
+    pub async fn set_auth(&self, auth: AuthMap) {
+        *self.auth_store.write().await = auth;
     }
 
     pub async fn get_image_manifest(
@@ -358,6 +360,7 @@ impl Client {
                     hasher.update(&chunk);
                     writer.write_all(&chunk).await.map_err(|_| Error::Write)?;
                 }
+                writer.flush().await.map_err(|_| Error::Write)?;
                 check_digest_matches(digest, hasher)?;
             }
             algo => {
@@ -427,8 +430,6 @@ impl Client {
             .await
     }
 
-    // not the greatest since we check the auth map everytime to see if one of the registries is
-    // unathenticated, if it is we then check the map
     async fn get_token_for(
         &self,
         reference: &Reference,
@@ -464,51 +465,58 @@ impl Client {
         }
     }
 
+    // when sending a request, we first check the token cache if we have a token for the
+    // registry+repo and add it if so. We then send the request and (even with an added token that
+    // could have expired) there is a possibility we get 401. If so, we have to look at the
+    // WWW_AUTHENTICATE header for the realm (url) and service so that we can try requesting (or
+    // updating) a token. Once we get that token, we can retry the request
+    // this isn't really ideal b/c we could get concurrent requests that use a stale token, but
+    // then they will retry and correctly have one get the new token (assuming it has expired in
+    // the cache correctly); but we have to fail the request to properly get the www-auth so idk
+    // what else to do. Maybe we cache the www-auth per domain? idk
     async fn auth_and_retry(
         &mut self,
         reference: &Reference,
         mut req: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, Error> {
         // this is safe because we are only doing GET's
+        // not sure if there is a better way to retry than cloning up front
         let req_copy = req.try_clone().unwrap();
 
         if let Some(token) = self.token_cache.get(&reference.into()).await {
-            req = req.header(header::AUTHORIZATION, format!("Bearer {}", token.token));
+            req = req.bearer_auth(token.token);
         }
 
         let res = req.send().await?;
-        if res.status() == StatusCode::UNAUTHORIZED {
-            let www_auth = {
-                if let Some(www_auth) = res
-                    .headers()
-                    .get(header::WWW_AUTHENTICATE)
-                    .and_then(parse_www_authenticate_bearer_header)
-                {
-                    www_auth
-                } else {
-                    error!(
-                        "bad auth but couldn't get www-authenticate header {:?}",
-                        res.headers().get(header::WWW_AUTHENTICATE)
-                    );
-                    return Err(Error::StatusNotOk(StatusCode::UNAUTHORIZED));
-                }
-            };
-            if let Some(token) = self.get_token_for(reference, &www_auth).await? {
-                Ok(req_copy
-                    .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
-                    .send()
-                    .await?)
-            } else {
-                Err(Error::StatusNotOk(StatusCode::UNAUTHORIZED))
-            }
-        } else {
-            Ok(res)
+        if res.status() != StatusCode::UNAUTHORIZED {
+            return Ok(res);
         }
+
+        let www_auth = res
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(parse_www_authenticate_bearer_header)
+            .ok_or_else(|| {
+                error!(
+                    "bad auth but couldn't get www-authenticate header {:?}",
+                    res.headers().get(header::WWW_AUTHENTICATE)
+                );
+                Error::StatusNotOk(StatusCode::UNAUTHORIZED)
+            })?;
+
+        let token = self
+            .get_token_for(reference, &www_auth)
+            .await?
+            .ok_or(Error::StatusNotOk(StatusCode::UNAUTHORIZED))?;
+
+        req_copy
+            .bearer_auth(token.token)
+            .send()
+            .await
+            .map_err(Into::into)
     }
 }
 
-// the right thing to do is try the url and then get a 401, inspect www-authenticate, auth, then
-// retry
 async fn retreive_token_user_pass(
     client: reqwest::Client,
     reference: &Reference,

@@ -116,6 +116,7 @@ pub struct ClientBuilder {
     manifest_capacity: u64, // in bytes
     blob_capacity: u64,     // in bytes
     max_open_conns: usize,
+    auth: Option<ocidist::AuthMap>,
 }
 
 #[derive(bincode::Encode, bincode::Decode)]
@@ -133,6 +134,7 @@ impl Default for ClientBuilder {
             manifest_capacity: 10_000_000,
             blob_capacity: 1_000_000_000,
             max_open_conns: 10,
+            auth: None,
         }
     }
 }
@@ -173,6 +175,7 @@ pub struct Client {
     blob_cache: Cache<String, u64>,
 }
 
+// TODO maybe remove the history section from configuration to save some space
 impl PackedImageAndConfiguration {
     pub fn new(manifest: impl AsRef<[u8]>, configuration: impl AsRef<[u8]>) -> Self {
         let manifest = manifest.as_ref();
@@ -209,6 +212,11 @@ impl ClientBuilder {
 
     pub fn max_open_conns(mut self, conns: usize) -> Self {
         self.max_open_conns = conns;
+        self
+    }
+
+    pub fn auth(mut self, auth: ocidist::AuthMap) -> Self {
+        self.auth = Some(auth);
         self
     }
 
@@ -270,6 +278,9 @@ impl ClientBuilder {
             counters: Counters::default().into(),
             connection_semaphore: Arc::new(Semaphore::new(self.max_open_conns)),
         };
+        if let Some(auth) = self.auth {
+            ret.set_auth(auth).await;
+        }
         if self.load_from_disk {
             info!("load cache from {:?}", ret.dirs.path);
             ret.load_ref_cache().await?;
@@ -285,8 +296,8 @@ impl Client {
         ClientBuilder::default()
     }
 
-    pub async fn set_auth(&self, domain: &str, auth: crate::ocidist::Auth) {
-        self.client.set_auth(domain, auth).await;
+    pub async fn set_auth(&self, auth: ocidist::AuthMap) {
+        self.client.set_auth(auth).await;
     }
 
     pub async fn stats(&self) -> Stats {
@@ -619,14 +630,17 @@ async fn retreive_blob(
         return Err(Error::DigestAlgorithmNotHandled);
     }
     let _permit = semaphore.acquire().await?;
+    let tmpname = format!("{}.tmp", digest.digest());
     let mut bw = tokio::io::BufWriter::with_capacity(
         32 * 1024,
-        openat_create_write_async(blob_dir, digest.digest())?,
+        openat_create_write_async(blob_dir, &tmpname)?,
     );
     let size = client
         .get_blob(reference, digest, &mut bw)
         .await?
         .ok_or(Error::BlobNotFound)?;
+
+    renameat(blob_dir, tmpname, blob_dir, digest.digest())?;
     Ok(size as u64)
 }
 
@@ -677,10 +691,11 @@ fn openat_create_write(
     dir: &OwnedFd,
     name: impl rustix::path::Arg,
 ) -> Result<File, rustix::io::Errno> {
-    use rustix::fs::OFlags;
+    use rustix::fs::{Mode, OFlags};
     openat(
         dir,
         name,
+        Mode::from_bits_truncate(0o644),
         OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
     )
 }
@@ -689,18 +704,19 @@ fn openat_create_write_async(
     dir: &OwnedFd,
     name: impl rustix::path::Arg,
 ) -> Result<tokio::fs::File, rustix::io::Errno> {
-    use rustix::fs::OFlags;
+    use rustix::fs::{Mode, OFlags};
     openat(
         dir,
         name,
+        Mode::from_bits_truncate(0o644),
         OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC | OFlags::NONBLOCK,
     )
     .map(tokio::fs::File::from_std)
 }
 
 fn openat_read(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<Option<File>, Error> {
-    use rustix::fs::OFlags;
-    match openat(dir, name, OFlags::RDONLY | OFlags::CLOEXEC) {
+    use rustix::fs::{Mode, OFlags};
+    match openat(dir, name, Mode::empty(), OFlags::RDONLY | OFlags::CLOEXEC) {
         Ok(f) => Ok(Some(f)),
         Err(e) if e == rustix::io::Errno::NOENT => Ok(None),
         Err(e) => Err(e.into()),
@@ -710,16 +726,11 @@ fn openat_read(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<Option<Fil
 fn openat(
     dir: &OwnedFd,
     name: impl rustix::path::Arg,
+    mode: rustix::fs::Mode,
     flags: rustix::fs::OFlags,
 ) -> Result<File, rustix::io::Errno> {
-    use rustix::fs::{Mode, ResolveFlags};
-    let fd = rustix::fs::openat2(
-        dir,
-        name,
-        flags,
-        Mode::from_bits_truncate(0o644),
-        ResolveFlags::BENEATH,
-    )?;
+    use rustix::fs::ResolveFlags;
+    let fd = rustix::fs::openat2(dir, name, flags, mode, ResolveFlags::BENEATH)?;
     Ok(fd.into())
 }
 
