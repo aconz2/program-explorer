@@ -18,4 +18,3 @@ impl TryFrom<&MediaType> for Compression {
         }
     }
 }
-

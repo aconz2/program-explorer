@@ -70,6 +70,7 @@ async fn handle_conn(
 
     let erofs_fd: OwnedFd = {
         let _guard = worker_lock.lock().await;
+        // I think this can be tokio::task::spawn_blocking
         let handle = std::thread::spawn(move || {
             // TODO this should be gotten from a cache
             let mut outfile = File::create("/tmp/foo").unwrap(); // Todo

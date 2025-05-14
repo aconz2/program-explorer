@@ -5,13 +5,16 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use log::{error, trace};
-use moka::{future::Cache, Expiry};
+use moka::{Expiry, future::Cache};
 use oci_spec::{
-    distribution::Reference,
-    image::{Arch, Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest, Os},
     OciSpecError,
+    distribution::Reference,
+    image::{
+        Arch, Descriptor, Digest, DigestAlgorithm, ImageConfiguration, ImageIndex, ImageManifest,
+        Os,
+    },
 };
-use reqwest::{header, header::HeaderValue, Method, StatusCode};
+use reqwest::{Method, StatusCode, header, header::HeaderValue};
 use serde::Deserialize;
 use sha2::Sha256;
 use tokio::{
@@ -34,6 +37,7 @@ pub enum Error {
     Reqwest(reqwest::Error),
     OciSpecError(OciSpecError),
     DigestMismatch,
+    SizeMismatch,
     NoTagOrDigest,
     BothTagAndDigest,
     BadDockerContentDigest,
@@ -224,7 +228,6 @@ impl Client {
             .map(|(content_type, digest, data)| {
                 if content_type != OCI_IMAGE_MANIFEST_V1 && content_type != DOCKER_IMAGE_MANIFEST_V2
                 {
-                    error!("{}", String::from_utf8(data.into()).unwrap());
                     Err(Error::BadContentType(content_type))
                 } else {
                     // this is a weird situation with the spec, the digest isn't required to be sent,
@@ -301,9 +304,9 @@ impl Client {
     pub async fn get_image_configuration(
         &mut self,
         reference: &Reference,
-        digest: &Digest,
+        descriptor: &Descriptor,
     ) -> Result<Option<ImageConfigurationResponse>, Error> {
-        let response = self.request_blob(reference, digest).await?;
+        let response = self.request_blob(reference, descriptor).await?;
         trace!(
             "domain={:?} addr={:?}",
             response.url().domain(),
@@ -312,12 +315,11 @@ impl Client {
 
         match response.status() {
             StatusCode::OK => {
-                //let expected_digest = get_docker_content_digest(&response)?;
                 let data = response.bytes().await?;
-                check_data_matches_digest(Some(digest), &data)?;
+                check_data_matches_descriptor(descriptor, &data)?;
                 Ok(Some(ImageConfigurationResponse {
                     data,
-                    digest: digest.clone(),
+                    digest: descriptor.digest().clone(),
                 }))
             }
             StatusCode::NOT_FOUND => Ok(None),
@@ -328,10 +330,10 @@ impl Client {
     pub async fn get_blob(
         &mut self,
         reference: &Reference,
-        digest: &Digest,
+        descriptor: &Descriptor,
         writer: &mut (impl AsyncWrite + std::marker::Unpin),
     ) -> Result<Option<usize>, Error> {
-        let mut response = self.request_blob(reference, digest).await?;
+        let mut response = self.request_blob(reference, descriptor).await?;
         trace!(
             "domain={:?} addr={:?}",
             response.url().domain(),
@@ -351,7 +353,7 @@ impl Client {
         let mut len = 0;
 
         // how to be polymorphic over algo better?
-        match digest.algorithm() {
+        match descriptor.digest().algorithm() {
             DigestAlgorithm::Sha256 => {
                 use sha2::Digest;
                 let mut hasher = Sha256::new();
@@ -361,7 +363,10 @@ impl Client {
                     writer.write_all(&chunk).await.map_err(|_| Error::Write)?;
                 }
                 writer.flush().await.map_err(|_| Error::Write)?;
-                check_digest_matches(digest, hasher)?;
+                if descriptor.size() != len as u64 {
+                    return Err(Error::SizeMismatch);
+                }
+                check_digest_matches(descriptor.digest(), hasher)?;
             }
             algo => {
                 error!("blob algo not handled {}", algo);
@@ -404,6 +409,7 @@ impl Client {
                     .get(header::CONTENT_TYPE)
                     .map(|x| x.to_str().unwrap_or("").to_string())
                     .unwrap_or_else(String::new);
+                // better to hash incrementally?
                 let data = response.bytes().await?;
                 check_data_matches_digest(digest.as_ref(), &data)?;
                 Ok(Some((content_type, digest, data)))
@@ -416,14 +422,14 @@ impl Client {
     async fn request_blob(
         &mut self,
         reference: &Reference,
-        digest: &Digest,
+        descriptor: &Descriptor,
     ) -> Result<reqwest::Response, Error> {
         let domain = reference.resolve_registry();
         let repo = reference.repository();
         let url = format!(
             "https://{domain}/v2/{repo}/blobs/{}:{}",
-            digest.algorithm().as_ref(),
-            digest.digest()
+            descriptor.digest().algorithm().as_ref(),
+            descriptor.digest().digest()
         );
         trace!("GET {url}");
         self.auth_and_retry(reference, self.client.request(Method::GET, &url))
@@ -579,6 +585,16 @@ fn check_digest_matches(expected: &Digest, digest: impl sha2::Digest) -> Result<
     }
 }
 
+fn check_data_matches_descriptor(expected: &Descriptor, data: &[u8]) -> Result<(), Error> {
+    if expected.size() != data.len() as u64 {
+        Err(Error::SizeMismatch)
+    } else if !data_matches_digest(expected.digest(), data)? {
+        Err(Error::DigestMismatch)
+    } else {
+        Ok(())
+    }
+}
+
 fn check_data_matches_digest(expected: Option<&Digest>, data: &[u8]) -> Result<(), Error> {
     if let Some(expected) = expected {
         if data_matches_digest(expected, data)? {
@@ -659,11 +675,11 @@ fn parse_www_authenticate_bearer_header(
 
 fn parse_www_authenticate_bearer_str(input: &str) -> Option<WWWAuthenticateBearer<'_>> {
     use nom::{
+        IResult, Parser,
         bytes::{complete::tag, take_until1},
         character::complete::{alpha1, char},
         multi::{many0, many1, separated_list0},
         sequence::{delimited, preceded, separated_pair, terminated},
-        IResult, Parser,
     };
     fn parser(input: &str) -> IResult<&str, Vec<(&str, &str)>> {
         let (input, matches) = preceded(

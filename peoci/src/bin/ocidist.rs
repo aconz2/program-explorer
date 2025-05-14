@@ -108,7 +108,7 @@ async fn main() {
         println!("got manifest {:#?}", manifest);
 
         let configuration_response = client
-            .get_image_configuration(&image_ref, manifest.config().digest())
+            .get_image_configuration(&image_ref, manifest.config())
             .await
             .unwrap()
             .unwrap();
@@ -118,7 +118,7 @@ async fn main() {
         if let Some(outfile) = outfile {
             let mut writer = BufWriter::new(File::create(outfile).await.unwrap());
             let size = client
-                .get_blob(&image_ref, manifest.layers()[0].digest(), &mut writer)
+                .get_blob(&image_ref, &manifest.layers()[0], &mut writer)
                 .await
                 .unwrap()
                 .unwrap();

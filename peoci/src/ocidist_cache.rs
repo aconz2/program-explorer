@@ -2,15 +2,15 @@ use std::fs::File;
 use std::io::Cursor;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Instant;
 
 use log::{error, info};
 use moka::{future::Cache, notification::RemovalCause};
 use oci_spec::{
-    distribution::Reference,
-    image::{Arch, Digest, ImageConfiguration, ImageManifest, Os},
     OciSpecError,
+    distribution::Reference,
+    image::{Arch, Descriptor, Digest, ImageConfiguration, ImageManifest, Os},
 };
 use rustix::{fd::OwnedFd, fs::renameat};
 use tokio::sync::Semaphore;
@@ -386,17 +386,17 @@ impl Client {
     pub async fn get_blob(
         &self,
         reference: &Reference,
-        digest: &Digest,
+        descriptor: &Descriptor,
     ) -> Result<OwnedFd, Arc<Error>> {
         let start = Instant::now();
         let entry = self
             .blob_cache
-            .entry(digest.to_string())
+            .entry(descriptor.digest().to_string())
             .or_try_insert_with(retreive_blob(
                 self.client.clone(),
                 self.connection_semaphore.clone(),
                 reference,
-                digest,
+                descriptor,
                 &self.dirs.sha256,
             ))
             .await?;
@@ -406,7 +406,9 @@ impl Client {
             let size = *entry.value();
             let elapsed = start.elapsed();
             let speed = (size as f32) / 1_000_000.0 / elapsed.as_secs_f32();
-            info!("blob_cache miss digest={digest} size={size} elapsed={elapsed:?} speed={speed:.2} MB/s");
+            info!(
+                "blob_cache miss digest={digest} size={size} elapsed={elapsed:?} speed={speed:.2} MB/s"
+            );
         } else {
             atomic_inc(&self.counters.blob_cache_hit);
             info!("blob_cache hit digest={}", entry.key())
@@ -416,10 +418,10 @@ impl Client {
         // the ownedfd in the cache, then we have to race here and just try opening it after
         // checking/populating the cache. Not ideal but only way it isn't here is if it was
         // immediately removed from the cache
-        match openat_read(&self.dirs.sha256, digest.digest()) {
+        match openat_read(&self.dirs.sha256, descriptor.digest().digest()) {
             Ok(Some(file)) => Ok(file.into()),
             Ok(None) => {
-                error!("blob cache missing file {:?}", digest);
+                error!("blob cache missing file {:?}", descriptor.digest());
                 Err(Error::BlobMissing.into())
             }
             Err(e) => {
@@ -439,9 +441,9 @@ impl Client {
         let n = manifest.layers().len();
         for (i, layer) in manifest.layers().iter().enumerate() {
             let reference = reference.clone();
-            let digest = layer.digest().clone();
+            let descriptor = layer.clone();
             let client = self.clone();
-            set.spawn(async move { (i, client.get_blob(&reference, &digest).await) });
+            set.spawn(async move { (i, client.get_blob(&reference, &descriptor).await) });
         }
         let mut ret = (0..n).map(|_| None).collect::<Vec<_>>();
         while let Some(next) = set.join_next().await {
@@ -612,7 +614,7 @@ async fn retreive_manifest(
         .ok_or(Error::ManifestNotFound)?;
     let manifest = manifest_res.get()?;
     let configuration_res = client
-        .get_image_configuration(reference, manifest.config().digest())
+        .get_image_configuration(reference, manifest.config())
         .await?
         .ok_or(Error::ConfigurationNotFound)?;
     Ok(PackedImageAndConfiguration::new(manifest_res.data(), configuration_res.data()).into())
@@ -622,26 +624,26 @@ async fn retreive_blob(
     mut client: ocidist::Client,
     semaphore: Arc<Semaphore>,
     reference: &Reference,
-    digest: &Digest,
+    descriptor: &Descriptor,
     blob_dir: &OwnedFd,
 ) -> Result<u64, Error> {
     use oci_spec::image::DigestAlgorithm;
     // todo support more
-    if *digest.algorithm() != DigestAlgorithm::Sha256 {
+    if descriptor.digest().algorithm() != &DigestAlgorithm::Sha256 {
         return Err(Error::DigestAlgorithmNotHandled);
     }
     let _permit = semaphore.acquire().await?;
-    let tmpname = format!("{}.tmp", digest.digest());
+    let tmpname = format!("{}.tmp", descriptor.digest().digest());
     let mut bw = tokio::io::BufWriter::with_capacity(
         32 * 1024,
         openat_create_write_async(blob_dir, &tmpname)?,
     );
     let size = client
-        .get_blob(reference, digest, &mut bw)
+        .get_blob(reference, descriptor, &mut bw)
         .await?
         .ok_or(Error::BlobNotFound)?;
 
-    renameat(blob_dir, tmpname, blob_dir, digest.digest())?;
+    renameat(blob_dir, tmpname, blob_dir, descriptor.digest().digest())?;
     Ok(size as u64)
 }
 
