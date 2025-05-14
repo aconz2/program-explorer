@@ -40,11 +40,13 @@ pub enum Error {
     SizeMismatch,
     NoTagOrDigest,
     BothTagAndDigest,
+    BadDigest,
     BadDockerContentDigest,
     Write,
     BadImageIndex,
     InvalidAuth,
     Unknown,
+    NoImageIndexForRefWithDigest,
     DomainNotSupported(String),
     BadContentType(String),
     DigestAlgorithmNotHandled(DigestAlgorithm),
@@ -112,10 +114,7 @@ pub type AuthMap = BTreeMap<String, Auth>;
 #[derive(Clone)]
 pub struct Client {
     client: reqwest::Client,
-    // key is the domain name of the registry
-    // currently not keyed off a repository scope
     token_cache: Cache<TokenCacheKey, Token>,
-
     auth_store: Arc<RwLock<AuthMap>>,
 }
 
@@ -175,12 +174,14 @@ impl<'a> TagOrDigest<'a> {
     fn try_from(r: &'a Reference) -> Result<Self, Error> {
         match (r.tag(), r.digest()) {
             (Some(tag), None) => Ok(TagOrDigest::Tag(tag)),
-            (None, Some(digest)) => Ok(TagOrDigest::Digest(digest)),
+            // quay.io/fedora/fedora:latest@sha256:fff will get parsed with both tag and digest
+            // but when requesting from the registry, we can only supply one. I think this choice
+            // makes sense but is maybe iffy
+            (Some(_), Some(digest)) | (None, Some(digest)) => Ok(TagOrDigest::Digest(digest)),
             // from looking at the current code, this is unreachable as tag will get filled win
             // with latest
             (None, None) => Err(Error::NoTagOrDigest),
             // this is also not reachable I don't think
-            (Some(_), Some(_)) => Err(Error::BothTagAndDigest),
         }
     }
     fn as_str(&'a self) -> &'a str {
@@ -234,6 +235,8 @@ impl Client {
                     // but I don't think its specified what digest to use otherwise
                     // ultimately I guess this is moot when looking up in the index because you get
                     // the digest in there
+                    // in get_manifest, digest will be either from the reference or from the
+                    // header, so only if both of those are absent do we compute from the data
                     let digest = digest.unwrap_or_else(|| digest_from_data(&data));
                     Ok(ImageManifestResponse { data, digest })
                 }
@@ -245,6 +248,9 @@ impl Client {
         &mut self,
         reference: &Reference,
     ) -> Result<Option<ImageIndexResponse>, Error> {
+        if reference.digest().is_some() {
+            return Err(Error::NoImageIndexForRefWithDigest);
+        }
         self.get_manifest(reference, ACCEPTED_IMAGE_INDEX)
             .await?
             .map(|(content_type, _digest, data)| {
@@ -259,15 +265,15 @@ impl Client {
             .transpose()
     }
 
-    pub async fn get_matching_digest_from_index(
+    pub async fn get_matching_descriptor_from_index(
         &mut self,
         reference: &Reference,
         arch: Arch,
         os: Os,
-    ) -> Result<Option<Digest>, Error> {
+    ) -> Result<Option<Descriptor>, Error> {
         if let Some(index) = self.get_image_index(reference).await? {
             let index = index.get()?;
-            let digest = index
+            index
                 .manifests()
                 .iter()
                 .find(|descriptor| {
@@ -277,25 +283,8 @@ impl Client {
                         .map(|platform| *platform.architecture() == arch && *platform.os() == os)
                         .unwrap_or(false)
                 })
-                .map(|descriptor| descriptor.digest().clone());
-            Ok(digest)
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn get_matching_manifest_from_index(
-        &mut self,
-        reference: &Reference,
-        arch: Arch,
-        os: Os,
-    ) -> Result<Option<ImageManifestResponse>, Error> {
-        if let Some(digest) = self
-            .get_matching_digest_from_index(reference, arch, os)
-            .await?
-        {
-            self.get_image_manifest(&reference.clone_with_digest(digest.to_string()))
-                .await
+                .map(|descriptor| Ok(descriptor.clone()))
+                .transpose()
         } else {
             Ok(None)
         }
@@ -321,6 +310,54 @@ impl Client {
                     data,
                     digest: descriptor.digest().clone(),
                 }))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(Error::StatusNotOk(status)),
+        }
+    }
+
+    // one nagging thing here is that ideally we could take Reference or Reference+Digest or
+    // Reference+Descriptor
+    async fn get_manifest(
+        &mut self,
+        reference: &Reference,
+        accept: &str,
+    ) -> Result<Option<(String, Option<Digest>, Bytes)>, Error> {
+        let domain = reference.resolve_registry();
+        let repo = reference.repository();
+        let td = TagOrDigest::try_from(reference)?;
+
+        let url = format!("https://{domain}/v2/{repo}/manifests/{}", td.as_str());
+
+        trace!("GET {url}");
+        let request = self
+            .client
+            .request(Method::GET, &url)
+            .header(header::ACCEPT, accept);
+
+        let response = self.auth_and_retry(reference, request).await?;
+        trace!(
+            "domain={:?} addr={:?}",
+            response.url().domain(),
+            response.remote_addr()
+        );
+
+        match response.status() {
+            StatusCode::OK => {
+                let digest = if let TagOrDigest::Digest(s) = td {
+                    Some(s.parse().map_err(|_| Error::BadDigest)?)
+                } else {
+                    get_docker_content_digest(&response)?
+                };
+                let content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .map(|x| x.to_str().unwrap_or("").to_string())
+                    .unwrap_or_else(String::new);
+                // better to hash incrementally?
+                let data = response.bytes().await?;
+                check_data_matches_digest(digest.as_ref(), &data)?;
+                Ok(Some((content_type, digest, data)))
             }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(Error::StatusNotOk(status)),
@@ -375,48 +412,6 @@ impl Client {
         };
 
         Ok(Some(len))
-    }
-
-    async fn get_manifest(
-        &mut self,
-        reference: &Reference,
-        accept: &str,
-    ) -> Result<Option<(String, Option<Digest>, Bytes)>, Error> {
-        let domain = reference.resolve_registry();
-        let repo = reference.repository();
-        let td = TagOrDigest::try_from(reference)?;
-
-        let url = format!("https://{domain}/v2/{repo}/manifests/{}", td.as_str());
-
-        trace!("GET {url}");
-        let request = self
-            .client
-            .request(Method::GET, &url)
-            .header(header::ACCEPT, accept);
-
-        let response = self.auth_and_retry(reference, request).await?;
-        trace!(
-            "domain={:?} addr={:?}",
-            response.url().domain(),
-            response.remote_addr()
-        );
-
-        match response.status() {
-            StatusCode::OK => {
-                let digest = get_docker_content_digest(&response)?;
-                let content_type = response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .map(|x| x.to_str().unwrap_or("").to_string())
-                    .unwrap_or_else(String::new);
-                // better to hash incrementally?
-                let data = response.bytes().await?;
-                check_data_matches_digest(digest.as_ref(), &data)?;
-                Ok(Some((content_type, digest, data)))
-            }
-            StatusCode::NOT_FOUND => Ok(None),
-            status => Err(Error::StatusNotOk(status)),
-        }
     }
 
     async fn request_blob(

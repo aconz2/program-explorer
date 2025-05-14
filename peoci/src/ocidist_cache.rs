@@ -588,17 +588,18 @@ impl Client {
     }
 }
 
+// TODO this is hardcoded to amd64+Linux
 async fn retreive_ref(
     mut client: ocidist::Client,
     semaphore: Arc<Semaphore>,
     reference: &Reference,
 ) -> Result<String, Error> {
     let _permit = semaphore.acquire().await?;
-    let digest = client
-        .get_matching_digest_from_index(reference, Arch::Amd64, Os::Linux)
+    let descriptor = client
+        .get_matching_descriptor_from_index(reference, Arch::Amd64, Os::Linux)
         .await?
         .ok_or(Error::NoMatchingManifest)?;
-    Ok(digest.to_string())
+    Ok(descriptor.digest().to_string())
 }
 
 // this will return Error if digest not found

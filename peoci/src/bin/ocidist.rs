@@ -46,7 +46,7 @@ async fn main() {
 
     println!("{:?}", image_ref);
 
-    let cache = true;
+    let cache = false;
 
     if cache {
         let peoci_cache_dir = std::env::vars()
@@ -95,12 +95,19 @@ async fn main() {
 
         let outfile = args.get(2);
 
-        let index_response = client.get_image_index(&image_ref).await.unwrap().unwrap();
-        let index = index_response.get().unwrap();
-        println!("got index {:#?}", index);
+        let image_ref = if image_ref.digest().is_some() {
+            image_ref
+        } else {
+            let manifest_descriptor = client
+                .get_matching_descriptor_from_index(&image_ref, Arch::Amd64, Os::Linux)
+                .await
+                .unwrap()
+                .unwrap();
+            image_ref.clone_with_digest(manifest_descriptor.digest().to_string())
+        };
 
         let manifest_response = client
-            .get_matching_manifest_from_index(&image_ref, Arch::Amd64, Os::Linux)
+            .get_image_manifest(&image_ref)
             .await
             .unwrap()
             .unwrap();
