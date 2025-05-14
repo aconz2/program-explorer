@@ -48,6 +48,7 @@ pub enum Error {
     OciSpecError(OciSpecError),
     NoCacheDir,
     BadDigest,
+    MissingDigest,
     ManifestNotFound,
     NoMatchingManifest,
     CachedFileSizeMismatch,
@@ -118,6 +119,8 @@ pub struct ClientBuilder {
 
 #[derive(bincode::Encode, bincode::Decode)]
 pub struct PackedImageAndConfiguration {
+    // ideally we would actually store this all in a single buffer but leaving for now
+    digest: String,
     offset: usize, // offset of configuration
     data: Box<[u8]>,
 }
@@ -174,7 +177,12 @@ pub struct Client {
 
 // TODO maybe remove the history section from configuration to save some space
 impl PackedImageAndConfiguration {
-    pub fn new(manifest: impl AsRef<[u8]>, configuration: impl AsRef<[u8]>) -> Self {
+    pub fn new(
+        digest: &Digest,
+        manifest: impl AsRef<[u8]>,
+        configuration: impl AsRef<[u8]>,
+    ) -> Self {
+        let digest = digest.to_string();
         let manifest = manifest.as_ref();
         let configuration = configuration.as_ref();
         let offset = manifest.len();
@@ -182,9 +190,14 @@ impl PackedImageAndConfiguration {
         data.extend(manifest);
         data.extend(configuration);
         Self {
+            digest,
             offset,
             data: data.into(),
         }
+    }
+
+    pub fn digest(&self) -> Result<Digest, OciSpecError> {
+        self.digest.parse()
     }
 
     pub fn manifest(&self) -> Result<ImageManifest, OciSpecError> {
@@ -581,11 +594,18 @@ async fn retreive_ref(
     Ok(descriptor.digest().to_string())
 }
 
+// this reference must have a digest (and we go from string to Digest back to String in the packed
+// representation, but idk what else to do
 async fn retreive_manifest(
     mut client: ocidist::Client,
     semaphore: Arc<Semaphore>,
     reference: &Reference,
 ) -> Result<Arc<PackedImageAndConfiguration>, Error> {
+    let digest: Digest = reference
+        .digest()
+        .ok_or(Error::MissingDigest)?
+        .parse()
+        .map_err(|_| Error::BadDigest)?;
     let _permit = semaphore.acquire().await?;
     let manifest_res = client
         .get_image_manifest(reference)
@@ -596,7 +616,10 @@ async fn retreive_manifest(
         .get_image_configuration(reference, manifest.config())
         .await?
         .ok_or(Error::ConfigurationNotFound)?;
-    Ok(PackedImageAndConfiguration::new(manifest_res.data(), configuration_res.data()).into())
+    Ok(
+        PackedImageAndConfiguration::new(&digest, manifest_res.data(), configuration_res.data())
+            .into(),
+    )
 }
 
 async fn retreive_blob(

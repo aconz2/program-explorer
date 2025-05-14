@@ -46,7 +46,7 @@ impl Request {
 struct WireResponse {}
 
 pub struct Response {
-    fd: OwnedFd,
+    pub fd: OwnedFd,
 }
 
 pub async fn request(socket_addr: impl AsRef<Path>, req: Request) -> Result<Response, Error> {
@@ -63,7 +63,8 @@ pub async fn request(socket_addr: impl AsRef<Path>, req: Request) -> Result<Resp
 
     // TODO read WireResponse
 
-    if let Some(OwnedAncillaryMessage::FileDescriptors(mut fds)) = ancillary.into_messages().next() {
+    if let Some(OwnedAncillaryMessage::FileDescriptors(mut fds)) = ancillary.into_messages().next()
+    {
         if let Some(fd) = fds.next() {
             return Ok(Response { fd });
         }

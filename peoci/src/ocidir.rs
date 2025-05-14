@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::Compression;
 
-use oci_spec::image::{Descriptor, Digest, ImageIndex, ImageManifest, MediaType};
+use oci_spec::image::{Descriptor, Digest, ImageIndex, ImageManifest};
 
 #[derive(Debug)]
 pub enum Error {
@@ -35,24 +35,7 @@ fn load_blob(blobs: &Path, layer: &Descriptor) -> Result<(Compression, File), Er
     // grr the image spec is a bit complicated with old stuff, there is both mediaType and
     // artifactType and we have to handle the docker ones in mediaType and the OCI ones in artifact
     // type
-    let compression = match layer.media_type() {
-        // is this a thing? I don't think so
-        //MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar" => Compression::None,
-        MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
-            Compression::Gzip
-        }
-        // I don't think this ever made its way into the wild?
-        //MediaType::Other(s) if s == "application/vnd.docker.image.rootfs.diff.tar.zstd" => Compression::Zstd,
-        MediaType::ImageManifest => layer
-            .artifact_type()
-            .as_ref()
-            .ok_or(Error::NoMediaType)?
-            .try_into()
-            .map_err(|_| Error::BadMediaType)?,
-        _ => {
-            return Err(Error::BadMediaType);
-        }
-    };
+    let compression = layer.try_into().map_err(|_| Error::BadMediaType)?;
     let file = File::open(blobs.join(digest_path(layer.digest()))).map_err(Into::<Error>::into)?;
     Ok((compression, file))
 }
