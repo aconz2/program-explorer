@@ -46,7 +46,7 @@ async fn main() {
 
     println!("{:?}", image_ref);
 
-    let cache = false;
+    let cache = true;
 
     if cache {
         let peoci_cache_dir = std::env::vars()

@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::Cursor;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
@@ -6,16 +5,16 @@ use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Instant;
 
 use log::{error, info};
-use moka::{future::Cache, notification::RemovalCause};
+use moka::future::Cache;
 use oci_spec::{
     OciSpecError,
     distribution::Reference,
     image::{Arch, Descriptor, Digest, ImageConfiguration, ImageManifest, Os},
 };
-use rustix::{fd::OwnedFd, fs::renameat};
+use rustix::fd::OwnedFd;
 use tokio::sync::Semaphore;
 
-use crate::ocidist;
+use crate::{blobcache, blobcache::BlobKey, ocidist};
 
 // This is a caching layer on top of ocidist that stores
 // 1) references: quay.io/fedora/fedora:42 -> sha256:ffffffff
@@ -40,10 +39,7 @@ use crate::ocidist;
 // of. So I guess right now it is maybe not worthwhile to do a more optimized key type
 // [1] https://github.com/moka-rs/moka/issues/201
 //
-
-// moka::Cache stores the capacity of each entry as u32, so for blobs which might approach 4 GB, we
-// track their size in KB so that a single blob up to 4 TB is supported
-const BLOB_SIZE_DIVISOR: u64 = 1_000;
+// TODO should we really return Arc<Error>
 
 #[derive(Debug)]
 pub enum Error {
@@ -54,9 +50,10 @@ pub enum Error {
     BadDigest,
     ManifestNotFound,
     NoMatchingManifest,
+    CachedFileSizeMismatch,
     ConfigurationNotFound,
     BlobNotFound,
-    SerError,
+    Ser,
     DirIter,
     DigestAlgorithmNotHandled,
     BlobMissing,
@@ -142,7 +139,7 @@ impl Default for ClientBuilder {
 struct Dirs {
     path: PathBuf, // only storing this for fs::read_dir ...
     cache: OwnedFd,
-    sha256: OwnedFd,
+    blobs: OwnedFd,
 }
 
 #[derive(Default)]
@@ -172,7 +169,7 @@ pub struct Client {
 
     // stores blob sha256:digest -> filesize
     // file is located at blobs/{key.replace(":", "/")}
-    blob_cache: Cache<String, u64>,
+    blob_cache: Cache<BlobKey, u64>,
 }
 
 // TODO maybe remove the history section from configuration to save some space
@@ -227,17 +224,12 @@ impl ClientBuilder {
 
         let dirs = {
             let path = self.cache_dir.ok_or(Error::NoCacheDir)?;
-            let cache = open_or_create_dir_at(None, &path)?;
-            let blobs = open_or_create_dir_at(Some(&cache), "blobs")?;
-            let sha256 = open_or_create_dir_at(Some(&blobs), "sha256")?;
-            Dirs {
-                path,
-                cache,
-                sha256,
-            }
+            let cache = blobcache::open_or_create_dir_at(None, &path)?;
+            let blobs = blobcache::open_or_create_dir_at(Some(&cache), "blobs")?;
+            Dirs { path, cache, blobs }
         };
 
-        let sha256_clone = dirs.sha256.try_clone().map_err(|_| Error::FdClone)?;
+        let blobs_clone = dirs.blobs.try_clone().map_err(|_| Error::FdClone)?;
 
         let client = ocidist::Client::new()?;
 
@@ -258,14 +250,10 @@ impl ClientBuilder {
             // blobs are weighed in 1MB increments since we are limited to u32
             // TODO think about memory overhead for a given blob capacity because we can't have two
             // different limits
-            .max_capacity(self.blob_capacity / BLOB_SIZE_DIVISOR)
-            .weigher(|_: &String, size: &u64| {
-                std::cmp::max(1, size / BLOB_SIZE_DIVISOR)
-                    .try_into()
-                    .unwrap_or(u32::MAX)
-            })
+            .max_capacity(blobcache::max_capacity(self.blob_capacity))
+            .weigher(blobcache::weigher)
             .eviction_listener(move |k, v, reason| {
-                remove_blob(&sha256_clone, k, v, reason);
+                blobcache::remove_blob("ocidist_cache", &blobs_clone, k, v, reason);
             })
             .build();
 
@@ -307,7 +295,7 @@ impl Client {
         Stats {
             ref_cache_size: self.ref_cache.weighted_size(),
             manifest_cache_size: self.manifest_cache.weighted_size(),
-            blob_cache_size: self.blob_cache.weighted_size() * BLOB_SIZE_DIVISOR,
+            blob_cache_size: self.blob_cache.weighted_size() * blobcache::BLOB_SIZE_DIVISOR,
             ref_cache_count: self.ref_cache.entry_count(),
             manifest_cache_count: self.manifest_cache.entry_count(),
             blob_cache_count: self.blob_cache.entry_count(),
@@ -389,17 +377,20 @@ impl Client {
         descriptor: &Descriptor,
     ) -> Result<OwnedFd, Arc<Error>> {
         let start = Instant::now();
+        let key = BlobKey::new(descriptor.digest().to_string()).ok_or(Error::BadDigest)?;
         let entry = self
             .blob_cache
-            .entry(descriptor.digest().to_string())
+            .entry_by_ref(&key)
             .or_try_insert_with(retreive_blob(
                 self.client.clone(),
                 self.connection_semaphore.clone(),
                 reference,
                 descriptor,
-                &self.dirs.sha256,
+                &self.dirs.blobs,
+                &key,
             ))
             .await?;
+
         if entry.is_fresh() {
             atomic_inc(&self.counters.blob_cache_miss);
             let digest = entry.key();
@@ -418,8 +409,22 @@ impl Client {
         // the ownedfd in the cache, then we have to race here and just try opening it after
         // checking/populating the cache. Not ideal but only way it isn't here is if it was
         // immediately removed from the cache
-        match openat_read(&self.dirs.sha256, descriptor.digest().digest()) {
-            Ok(Some(file)) => Ok(file.into()),
+        match blobcache::openat_read_key(&self.dirs.blobs, &key) {
+            Ok(Some(file)) => {
+                let stat = rustix::fs::fstat(&file).map_err(|e| Arc::new(e.into()))?;
+                let size: u64 = stat.st_size.try_into().unwrap_or(0);
+                if size != descriptor.size() {
+                    error!(
+                        "file size mismatch for blob {}, descriptor={} file={}",
+                        descriptor.digest(),
+                        descriptor.size(),
+                        size
+                    );
+                    Err(Error::CachedFileSizeMismatch.into())
+                } else {
+                    Ok(file.into())
+                }
+            }
             Ok(None) => {
                 error!("blob cache missing file {:?}", descriptor.digest());
                 Err(Error::BlobMissing.into())
@@ -474,7 +479,7 @@ impl Client {
     }
 
     async fn load_ref_cache(&mut self) -> Result<(), Error> {
-        let Some(file) = openat_read(&self.dirs.cache, "ref")? else {
+        let Some(file) = blobcache::openat_read(&self.dirs.cache, "ref")? else {
             return Ok(());
         };
         let entries: Vec<(String, String)> = match bincode::decode_from_reader(
@@ -496,7 +501,7 @@ impl Client {
     }
 
     async fn load_manifest_cache(&self) -> Result<(), Error> {
-        let Some(file) = openat_read(&self.dirs.cache, "manifest")? else {
+        let Some(file) = blobcache::openat_read(&self.dirs.cache, "manifest")? else {
             return Ok(());
         };
         let entries: Vec<(String, PackedImageAndConfiguration)> = match bincode::decode_from_reader(
@@ -517,42 +522,15 @@ impl Client {
         Ok(())
     }
 
-    // bleh
-    // todo handle more than sha256
     async fn load_blob_cache(&self) -> Result<(), Error> {
-        fn remove(entry: std::fs::DirEntry) {
-            error!(
-                "weird path name in blobs/sha256 {:?}, removing",
-                entry.file_name()
-            );
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                error!("error removing file {:?}", e);
-            }
-        }
-        let mut count = 0;
-        for entry in std::fs::read_dir(self.dirs.path.join("blobs/sha256"))
-            .map_err(|_| Error::DirIter)?
-            .flatten() // ignore error getting entry
-            .filter(|entry| entry.file_type().map(|x| x.is_file()).unwrap_or(false))
-        {
-            if let Ok(name) = entry.file_name().into_string() {
-                let digest_string = format!("sha256:{}", name);
-                if digest_string.parse::<Digest>().is_err() {
-                    remove(entry);
-                    continue;
-                }
-                if let Ok(meta) = entry.metadata() {
-                    count += 1;
-                    self.blob_cache.insert(digest_string, meta.len()).await;
-                } else {
-                    error!(
-                        "couldn't get metadata for {:?}, skipping",
-                        entry.file_name()
-                    );
-                }
-            } else {
-                remove(entry)
-            }
+        // annoying we have to store them but we have to await the insert
+        let mut acc = Vec::with_capacity(1024);
+        blobcache::read_from_disk(&self.dirs.blobs, |key, size| {
+            acc.push((key, size));
+        })?;
+        let count = acc.len();
+        for (key, size) in acc.into_iter() {
+            self.blob_cache.insert(key, size).await;
         }
         info!("loaded {count} entries into blob cache");
         Ok(())
@@ -563,10 +541,13 @@ impl Client {
     fn save_ref_cache(&self) -> Result<(), Error> {
         let entries: Vec<_> = self.ref_cache.iter().collect();
         let num_entries = entries.len();
-        let mut bw = BufWriter::new(openat_create_write(&self.dirs.cache, "ref.tmp")?);
+        let name = blobcache::GenericName::new("ref").unwrap();
+        let (file, guard) =
+            blobcache::openat_create_write_with_generic_guard(&self.dirs.cache, &name)?;
+        let mut bw = BufWriter::new(file);
         let size = bincode::encode_into_std_write(&entries, &mut bw, bincode::config::standard())
-            .map_err(|_| Error::SerError)?;
-        renameat(&self.dirs.cache, "ref.tmp", &self.dirs.cache, "ref")?;
+            .map_err(|_| Error::Ser)?;
+        guard.success()?;
         info!("wrote {size} bytes, {num_entries} entries to ref_cache");
         Ok(())
     }
@@ -574,15 +555,13 @@ impl Client {
     fn save_manifest_cache(&self) -> Result<(), Error> {
         let entries: Vec<_> = self.manifest_cache.iter().collect();
         let num_entries = entries.len();
-        let mut bw = BufWriter::new(openat_create_write(&self.dirs.cache, "manifest.tmp")?);
+        let name = blobcache::GenericName::new("manifest").unwrap();
+        let (file, guard) =
+            blobcache::openat_create_write_with_generic_guard(&self.dirs.cache, &name)?;
+        let mut bw = BufWriter::new(file);
         let size = bincode::encode_into_std_write(&entries, &mut bw, bincode::config::standard())
-            .map_err(|_| Error::SerError)?;
-        renameat(
-            &self.dirs.cache,
-            "manifest.tmp",
-            &self.dirs.cache,
-            "manifest",
-        )?;
+            .map_err(|_| Error::Ser)?;
+        guard.success()?;
         info!("wrote {size} bytes, {num_entries} entries to manifest_cache");
         Ok(())
     }
@@ -602,7 +581,6 @@ async fn retreive_ref(
     Ok(descriptor.digest().to_string())
 }
 
-// this will return Error if digest not found
 async fn retreive_manifest(
     mut client: ocidist::Client,
     semaphore: Arc<Semaphore>,
@@ -627,123 +605,18 @@ async fn retreive_blob(
     reference: &Reference,
     descriptor: &Descriptor,
     blob_dir: &OwnedFd,
+    key: &BlobKey,
 ) -> Result<u64, Error> {
-    use oci_spec::image::DigestAlgorithm;
-    // todo support more
-    if descriptor.digest().algorithm() != &DigestAlgorithm::Sha256 {
-        return Err(Error::DigestAlgorithmNotHandled);
-    }
     let _permit = semaphore.acquire().await?;
-    let tmpname = format!("{}.tmp", descriptor.digest().digest());
-    let mut bw = tokio::io::BufWriter::with_capacity(
-        32 * 1024,
-        openat_create_write_async(blob_dir, &tmpname)?,
-    );
+    //let tmpname = format!("{}.tmp", descriptor.digest().digest());
+    let (file, guard) = blobcache::openat_create_write_async_with_guard(blob_dir, key)?;
+    let mut bw = tokio::io::BufWriter::with_capacity(32 * 1024, file);
     let size = client
         .get_blob(reference, descriptor, &mut bw)
         .await?
         .ok_or(Error::BlobNotFound)?;
-
-    renameat(blob_dir, tmpname, blob_dir, descriptor.digest().digest())?;
+    guard.success()?;
     Ok(size as u64)
-}
-
-fn remove_blob(blob_dir: &OwnedFd, key: Arc<String>, _value: u64, cause: RemovalCause) {
-    let key = Arc::unwrap_or_clone(key);
-    info!("blob {} removed due to {:?}", key, cause);
-
-    if let Err(e) = unlinkat(blob_dir, key) {
-        error!("blob unlinkat return error {:?}", e);
-    }
-}
-
-// I wish the std had things for at
-
-fn open_or_create_dir_at(
-    dir: Option<&OwnedFd>,
-    path: impl rustix::path::Arg + Copy,
-) -> Result<OwnedFd, Error> {
-    use rustix::fs::{Mode, OFlags};
-    use rustix::io::Errno;
-    if let Some(dir) = dir {
-        match rustix::fs::mkdirat(dir, path, Mode::from_bits_truncate(0o744)) {
-            Ok(_) => Ok(()),
-            Err(e) if e == Errno::EXIST => Ok(()),
-            e => e,
-        }?;
-        Ok(rustix::fs::openat(
-            dir,
-            path,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::PATH | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?)
-    } else {
-        match rustix::fs::mkdir(path, Mode::from_bits_truncate(0o744)) {
-            Ok(_) => Ok(()),
-            Err(e) if e == Errno::EXIST => Ok(()),
-            e => e,
-        }?;
-        Ok(rustix::fs::open(
-            path,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::PATH | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?)
-    }
-}
-
-fn openat_create_write(
-    dir: &OwnedFd,
-    name: impl rustix::path::Arg,
-) -> Result<File, rustix::io::Errno> {
-    use rustix::fs::{Mode, OFlags};
-    openat(
-        dir,
-        name,
-        Mode::from_bits_truncate(0o644),
-        OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
-    )
-}
-
-fn openat_create_write_async(
-    dir: &OwnedFd,
-    name: impl rustix::path::Arg,
-) -> Result<tokio::fs::File, rustix::io::Errno> {
-    use rustix::fs::{Mode, OFlags};
-    openat(
-        dir,
-        name,
-        Mode::from_bits_truncate(0o644),
-        OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC | OFlags::NONBLOCK,
-    )
-    .map(tokio::fs::File::from_std)
-}
-
-fn openat_read(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<Option<File>, Error> {
-    use rustix::fs::{Mode, OFlags};
-    match openat(dir, name, Mode::empty(), OFlags::RDONLY | OFlags::CLOEXEC) {
-        Ok(f) => Ok(Some(f)),
-        Err(e) if e == rustix::io::Errno::NOENT => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn openat(
-    dir: &OwnedFd,
-    name: impl rustix::path::Arg,
-    mode: rustix::fs::Mode,
-    flags: rustix::fs::OFlags,
-) -> Result<File, rustix::io::Errno> {
-    use rustix::fs::ResolveFlags;
-    let fd = rustix::fs::openat2(dir, name, flags, mode, ResolveFlags::BENEATH)?;
-    Ok(fd.into())
-}
-
-// wish there was unlinkat2 with BENEATH
-fn unlinkat(dir: &OwnedFd, name: impl rustix::path::Arg) -> Result<(), rustix::io::Errno> {
-    if name.as_str()?.contains("/") {
-        return Err(rustix::io::Errno::ACCESS);
-    }
-    rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty())
 }
 
 fn atomic_inc(x: &AtomicU64) {
