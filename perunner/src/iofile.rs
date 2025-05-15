@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 
 use rustix::fd::AsFd;
 use rustix::fs::{
-    fcntl_add_seals, ftruncate, memfd_create, statat, AtFlags, MemfdFlags, SealFlags,
+    fcntl_add_seals, ftruncate, memfd_create, fstat, MemfdFlags, SealFlags,
 };
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
@@ -88,8 +88,8 @@ fn round_up_to<const N: u64>(x: u64) -> u64 {
     ((x + (N - 1)) / N) * N
 }
 
-fn round_up_file_to_pmem_size<F: AsFd>(f: F) -> rustix::io::Result<u64> {
-    let stat = statat(&f, "", AtFlags::EMPTY_PATH)?;
+pub fn round_up_file_to_pmem_size<F: AsFd>(f: F) -> rustix::io::Result<u64> {
+    let stat = fstat(&f)?;
     let cur = stat.st_size as u64;
     let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
     if cur != newlen {

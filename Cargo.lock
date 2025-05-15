@@ -1817,6 +1817,7 @@ dependencies = [
  "oci-spec",
  "peimage",
  "peoci",
+ "perunner",
  "rustix 1.0.7",
  "serde",
  "serde_json",

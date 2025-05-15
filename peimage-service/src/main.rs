@@ -8,19 +8,23 @@ use std::time::Instant;
 
 use log::{error, info, trace};
 use moka::future::Cache;
-use oci_spec::{distribution::Reference, image::ImageManifest};
+use oci_spec::{
+    distribution::Reference,
+    image::{Digest, ImageManifest},
+};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener, ancillary::AncillaryMessageWriter};
 
 use peimage::squash::squash_to_erofs;
-use peimage_service::Request;
+use peimage_service::{Request, WireResponse};
 use peoci::{
     Compression, blobcache,
     blobcache::BlobKey,
     ocidist::{Auth, AuthMap},
     ocidist_cache::Client,
 };
+use perunner::iofile::round_up_file_to_pmem_size;
 
 #[derive(Deserialize)]
 struct AuthEntry {
@@ -46,12 +50,12 @@ impl std::fmt::Display for Error {
 type StoredAuth = BTreeMap<String, AuthEntry>;
 type ImageCache = Cache<BlobKey, u64>;
 
-fn load_stored_auth(p: impl AsRef<Path>) -> AuthMap {
-    let stored: StoredAuth = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-    stored
+fn load_stored_auth(p: impl AsRef<Path>) -> anyhow::Result<AuthMap> {
+    let stored: StoredAuth = serde_json::from_str(&std::fs::read_to_string(p)?)?;
+    Ok(stored
         .into_iter()
         .map(|(k, v)| (k, Auth::UserPass(v.username, v.password)))
-        .collect()
+        .collect::<AuthMap>())
 }
 
 async fn handle_conn(
@@ -60,7 +64,7 @@ async fn handle_conn(
     client: Client,
     img_cache: ImageCache,
     imgs_dir: Arc<OwnedFd>,
-) -> anyhow::Result<OwnedFd> {
+) -> anyhow::Result<(Digest, OwnedFd)> {
     let mut buf = [0; 1024];
     let len = conn.recv(&mut buf).await?;
     let (req, _) =
@@ -75,7 +79,6 @@ async fn handle_conn(
     let digest = image_and_config.digest()?;
     let manifest = image_and_config.manifest()?;
 
-    let start = Instant::now();
     let key = BlobKey::new(digest.to_string()).ok_or(Error::BadDigest)?;
     let entry = img_cache
         .entry_by_ref(&key)
@@ -94,11 +97,7 @@ async fn handle_conn(
         //atomic_inc(&self.counters.blob_cache_miss);
         let digest = entry.key();
         let size = *entry.value();
-        let elapsed = start.elapsed();
-        let speed = (size as f32) / 1_000_000.0 / elapsed.as_secs_f32();
-        info!(
-            "img_cache miss digest={digest} size={size} elapsed={elapsed:?} speed={speed:.2} MB/s"
-        );
+        info!("img_cache miss digest={digest} size={size}");
     } else {
         //atomic_inc(&self.counters.blob_cache_hit);
         info!("img_cache hit digest={}", entry.key())
@@ -109,7 +108,7 @@ async fn handle_conn(
     // checking/populating the cache. Not ideal but only way it isn't here is if it was
     // immediately removed from the cache
     match blobcache::openat_read_key(&imgs_dir, &key) {
-        Ok(Some(file)) => Ok(file.into()),
+        Ok(Some(file)) => Ok((digest, file.into())),
         Ok(None) => {
             error!("blob cache missing file {}", digest);
             Err(Error::MissingFile.into())
@@ -131,8 +130,6 @@ async fn make_erofs_image(
 ) -> anyhow::Result<u64> {
     let key = key.clone();
     let manifest = manifest.clone();
-
-    // ugh really don't want to do stderr
     let fds = client.get_layers(&reference, &manifest).await.unwrap();
 
     let _guard = worker_lock.lock().await;
@@ -144,17 +141,19 @@ async fn make_erofs_image(
             .iter()
             .zip(fds.into_iter())
             .map(|(descriptor, fd)| -> Result<_, Error> {
-                // todo handle docker media type
-                //let c: Compression = info.media_type().try_into().unwrap();
-                let c: Compression = descriptor.try_into().unwrap();
+                let comp: Compression = descriptor.try_into().unwrap();
                 let reader: File = fd.into();
-                Ok((c, reader))
+                Ok((comp, reader))
             })
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        squash_to_erofs(&mut layers, &mut file).unwrap();
+        let t0 = Instant::now();
+        let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, &mut file)?;
+        let elapsed = t0.elapsed().as_secs_f32();
+        info!("Built image for {key} {squash_stats:?} {erofs_stats:?} in {elapsed:.2}s");
         guard.success()?;
+        round_up_file_to_pmem_size(&file)?;
         // ftruncate up to the right size
         let size = file.metadata()?.len();
         Ok(size)
@@ -188,21 +187,31 @@ async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedF
     Ok((image_cache, imgs_dir))
 }
 
-async fn respond_fd(_conn: UnixSeqpacket, _fd: OwnedFd) -> Result<(), Error> {
-    //let mut ancillary_buffer = [0; 128];
-    //let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buffer);
-    //ancillary.add_fds(&[&erofs_fd]).unwrap();
-    //
-    //// todo write the WireResponse into buf
-    //let bufs = [IoSlice::new(&buf)];
-    //conn.send_vectored_with_ancillary(&bufs, &mut ancillary)
-    //    .await
-    //    .unwrap();
-    todo!()
+async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> anyhow::Result<()> {
+    let wire_response = WireResponse::Ok {
+        manifest_digest: digest.to_string(),
+    };
+    let mut buf = [0; 1024];
+    let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
+
+    let mut ancillary_buffer = [0; 1];
+    let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buffer);
+    ancillary.add_fds(&[&erofs_fd])?;
+
+    conn.send_vectored_with_ancillary(&[IoSlice::new(&buf[..n])], &mut ancillary)
+        .await?;
+    Ok(())
 }
 
-async fn respond_error(_conn: UnixSeqpacket, error: anyhow::Error) -> Result<(), Error> {
-    todo!()
+async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Result<()> {
+    error!("responding_err {}", error);
+    let wire_response = WireResponse::Err {
+        message: "unexpected error".to_string(),
+    };
+    let mut buf = [0; 1024];
+    let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
+    conn.send(&buf[..n]).await?;
+    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -212,7 +221,7 @@ async fn main() {
     let auth = if let Some(v) =
         std::env::vars().find_map(|(k, v)| if k == "PEOCI_AUTH" { Some(v) } else { None })
     {
-        load_stored_auth(v)
+        load_stored_auth(v).unwrap()
     } else {
         BTreeMap::new()
     };
@@ -256,13 +265,13 @@ async fn main() {
                 let imgs_dir_ = imgs_dir.clone();
                 tokio::spawn(async move {
                     match handle_conn(worker_lock_, &conn, client_, cache_, imgs_dir_).await {
-                        Ok(fd) => match respond_fd(conn, fd).await {
+                        Ok((digest, fd)) => match respond_ok(conn, digest, fd).await {
                             Ok(_) => {}
                             Err(e) => {
                                 error!("error sending fd {:?}", e);
                             }
                         },
-                        Err(e) => match respond_error(conn, e).await {
+                        Err(e) => match respond_err(conn, e).await {
                             Ok(_) => {}
                             Err(e) => {
                                 error!("error sending error {:?}", e);
