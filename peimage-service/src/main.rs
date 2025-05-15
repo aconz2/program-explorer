@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::IoSlice;
+use std::io::Seek;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use oci_spec::{
     image::{Digest, ImageManifest},
 };
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener, ancillary::AncillaryMessageWriter};
 
 use peimage::squash::squash_to_erofs;
@@ -38,8 +39,10 @@ enum Error {
     BadDigest,
     BadReference,
     BadLayerType(#[from] peoci::compression::Error),
-    MissingFile,
-    OpenBlob,
+    OneshotSend,
+    // not sure a better way to handle this
+    #[error(transparent)]
+    Arc(#[from] Arc<anyhow::Error>),
 }
 
 // how wrong is this?
@@ -61,7 +64,7 @@ fn load_stored_auth(p: impl AsRef<Path>) -> anyhow::Result<AuthMap> {
 }
 
 async fn handle_conn(
-    worker_lock: Arc<Mutex<()>>,
+    worker_semaphore: Arc<Semaphore>,
     conn: &UnixSeqpacket,
     client: Client,
     img_cache: ImageCache,
@@ -76,24 +79,26 @@ async fn handle_conn(
 
     let image_and_config = client
         .get_image_manifest_and_configuration(&reference)
-        .await
-        .unwrap();
+        .await?;
     let digest = image_and_config.digest()?;
     let manifest = image_and_config.manifest()?;
+
+    let (fd_tx, fd_rx) = tokio::sync::oneshot::channel();
 
     let key = BlobKey::new(digest.to_string()).ok_or(Error::BadDigest)?;
     let entry = img_cache
         .entry_by_ref(&key)
         .or_try_insert_with(make_erofs_image(
-            worker_lock.clone(),
+            worker_semaphore.clone(),
             client.clone(),
             &reference,
             &manifest,
             imgs_dir.clone(),
             &key,
+            fd_tx,
         ))
         .await
-        .unwrap();
+        .map_err(Error::Arc)?;
 
     if entry.is_fresh() {
         //atomic_inc(&self.counters.blob_cache_miss);
@@ -105,36 +110,25 @@ async fn handle_conn(
         info!("img_cache hit digest={}", entry.key())
     }
 
-    // b/c or_try_insert_with must return the V stored in the cache and we don't want to store
-    // the ownedfd in the cache, then we have to race here and just try opening it after
-    // checking/populating the cache. Not ideal but only way it isn't here is if it was
-    // immediately removed from the cache
-    match blobcache::openat_read_key(&imgs_dir, &key) {
-        Ok(Some(file)) => Ok((digest, file.into())),
-        Ok(None) => {
-            error!("image cache missing file {}", key);
-            Err(Error::MissingFile.into())
-        }
-        Err(e) => {
-            error!("error opening blob {:?}", e);
-            Err(Error::OpenBlob.into())
-        }
-    }
+    let fd = fd_rx.await?;
+
+    Ok((digest, fd))
 }
 
 async fn make_erofs_image(
-    worker_lock: Arc<Mutex<()>>,
+    worker_semaphore: Arc<Semaphore>,
     client: Client,
     reference: &Reference,
     manifest: &ImageManifest,
     imgs_dir: Arc<OwnedFd>,
     key: &BlobKey,
+    fd_tx: tokio::sync::oneshot::Sender<OwnedFd>,
 ) -> anyhow::Result<u64> {
     let key = key.clone();
     let manifest = manifest.clone();
-    let fds = client.get_layers(reference, &manifest).await.unwrap();
+    let fds = client.get_layers(reference, &manifest).await?;
 
-    let _guard = worker_lock.lock().await;
+    let _guard = worker_semaphore.acquire().await;
     tokio::task::spawn_blocking(move || {
         let (mut file, guard) = blobcache::openat_create_write_with_guard(&imgs_dir, &key)?;
 
@@ -147,8 +141,7 @@ async fn make_erofs_image(
                 let reader: File = fd.into();
                 Ok((comp, reader))
             })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let t0 = Instant::now();
         let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, &mut file)?;
@@ -157,22 +150,26 @@ async fn make_erofs_image(
         round_up_file_to_pmem_size(&file)?;
         // ftruncate up to the right size
         let size = file.metadata()?.len();
+        file.rewind()?;
         info!("built image for {key} size={size} Squash{squash_stats:?} Erofs{erofs_stats:?} in {elapsed:.2}s");
+        if fd_tx.send(file.into()).is_err() {
+            return Err(Error::OneshotSend.into());
+        }
         Ok(size)
     })
     .await?
 }
 
 async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedFd)> {
-    let cache_dir = blobcache::open_or_create_dir_at(None, dir.as_ref()).unwrap();
-    let imgs_dir = blobcache::open_or_create_dir_at(Some(&cache_dir), "imgs").unwrap();
-    let imgs_dir_clone = imgs_dir.try_clone().unwrap();
+    let cache_dir = blobcache::open_or_create_dir_at(None, dir.as_ref())?;
+    let imgs_dir = blobcache::open_or_create_dir_at(Some(&cache_dir), "imgs")?;
+    let imgs_dir_clone = imgs_dir.try_clone()?;
 
     let image_cache = Cache::builder()
         .max_capacity(blobcache::max_capacity(5_000_000_000))
         .weigher(blobcache::weigher)
         .eviction_listener(move |k, v, reason| {
-            blobcache::remove_blob("peimage-service", &imgs_dir_clone, k, v, reason);
+            blobcache::remove_blob("img", &imgs_dir_clone, k, v, reason);
         })
         .build();
 
@@ -255,7 +252,7 @@ async fn main() {
         .await
         .unwrap();
 
-    let worker_lock = Arc::new(Mutex::new(()));
+    let worker_semaphore = Arc::new(Semaphore::new(1));
 
     std::fs::remove_file(socket_path).unwrap();
     let mut socket = UnixSeqpacketListener::bind_with_backlog(socket_path, 10).unwrap();
@@ -263,12 +260,12 @@ async fn main() {
     loop {
         match socket.accept().await {
             Ok(conn) => {
-                let worker_lock_ = worker_lock.clone();
+                let worker_semaphore_ = worker_semaphore.clone();
                 let client_ = client.clone();
                 let cache_ = cache.clone();
                 let imgs_dir_ = imgs_dir.clone();
                 tokio::spawn(async move {
-                    match handle_conn(worker_lock_, &conn, client_, cache_, imgs_dir_).await {
+                    match handle_conn(worker_semaphore_, &conn, client_, cache_, imgs_dir_).await {
                         Ok((digest, fd)) => match respond_ok(conn, digest, fd).await {
                             Ok(_) => {}
                             Err(e) => {

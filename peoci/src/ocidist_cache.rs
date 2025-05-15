@@ -13,6 +13,7 @@ use oci_spec::{
 };
 use rustix::fd::OwnedFd;
 use tokio::sync::Semaphore;
+use tokio::io::AsyncSeekExt;
 
 use crate::{blobcache, blobcache::BlobKey, ocidist};
 
@@ -44,9 +45,12 @@ use crate::{blobcache, blobcache::BlobKey, ocidist};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     ClientError(#[from] ocidist::Error),
+    Io(#[from] std::io::Error),
     Errno(#[from] rustix::io::Errno),
     OciSpecError(#[from] OciSpecError),
     AcquireError(#[from] tokio::sync::AcquireError),
+    OneshotRx,
+    OneshotTx,
     NoCacheDir,
     BadDigest,
     MissingDigest,
@@ -375,6 +379,7 @@ impl Client {
     ) -> Result<OwnedFd, Arc<Error>> {
         let start = Instant::now();
         let key = BlobKey::new(descriptor.digest().to_string()).ok_or(Error::BadDigest)?;
+        let (fd_tx, fd_rx) = tokio::sync::oneshot::channel();
         let entry = self
             .blob_cache
             .entry_by_ref(&key)
@@ -385,6 +390,7 @@ impl Client {
                 descriptor,
                 &self.dirs.blobs,
                 &key,
+                fd_tx,
             ))
             .await?;
 
@@ -402,34 +408,19 @@ impl Client {
             info!("blob_cache hit digest={}", entry.key())
         }
 
-        // b/c or_try_insert_with must return the V stored in the cache and we don't want to store
-        // the ownedfd in the cache, then we have to race here and just try opening it after
-        // checking/populating the cache. Not ideal but only way it isn't here is if it was
-        // immediately removed from the cache
-        match blobcache::openat_read_key(&self.dirs.blobs, &key) {
-            Ok(Some(file)) => {
-                let stat = rustix::fs::fstat(&file).map_err(|e| Arc::new(e.into()))?;
-                let size: u64 = stat.st_size.try_into().unwrap_or(0);
-                if size != descriptor.size() {
-                    error!(
-                        "file size mismatch for blob {}, descriptor={} file={}",
-                        descriptor.digest(),
-                        descriptor.size(),
-                        size
-                    );
-                    Err(Error::CachedFileSizeMismatch.into())
-                } else {
-                    Ok(file.into())
-                }
-            }
-            Ok(None) => {
-                error!("blob cache missing file {:?}", descriptor.digest());
-                Err(Error::BlobMissing.into())
-            }
-            Err(e) => {
-                error!("error opening blob {:?}", e);
-                Err(Error::BlobMissing.into())
-            }
+        let fd = fd_rx.await.map_err(|_| Error::OneshotRx)?;
+        let stat = rustix::fs::fstat(&fd).map_err(|e| Arc::new(e.into()))?;
+        let size: u64 = stat.st_size.try_into().unwrap_or(0);
+        if size != descriptor.size() {
+            error!(
+                "file size mismatch for blob {}, descriptor={} file={}",
+                descriptor.digest(),
+                descriptor.size(),
+                size
+            );
+            Err(Error::CachedFileSizeMismatch.into())
+        } else {
+            Ok(fd)
         }
     }
 
@@ -613,16 +604,22 @@ async fn retreive_blob(
     descriptor: &Descriptor,
     blob_dir: &OwnedFd,
     key: &BlobKey,
+    fd_tx: tokio::sync::oneshot::Sender<OwnedFd>,
 ) -> Result<u64, Error> {
     let _permit = semaphore.acquire().await?;
-    //let tmpname = format!("{}.tmp", descriptor.digest().digest());
-    let (file, guard) = blobcache::openat_create_write_async_with_guard(blob_dir, key)?;
-    let mut bw = tokio::io::BufWriter::with_capacity(32 * 1024, file);
+    let (mut file, guard) = blobcache::openat_create_write_async_with_guard(blob_dir, key)?;
+    let mut bw = tokio::io::BufWriter::with_capacity(32 * 1024, &mut file);
     let size = client
         .get_blob(reference, descriptor, &mut bw)
         .await?
         .ok_or(Error::BlobNotFound)?;
+    // get_blob flushes
     guard.success()?;
+    file.rewind().await?;
+    let fd = file.into_std().await.into();
+    if fd_tx.send(fd).is_err() {
+        return Err(Error::OneshotTx);
+    }
     Ok(size as u64)
 }
 
