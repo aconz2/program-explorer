@@ -7,7 +7,7 @@ use tar::Archive;
 use tempfile::NamedTempFile;
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
-use peoci::Compression;
+use peoci::compression::Compression;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

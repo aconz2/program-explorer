@@ -31,6 +31,14 @@ pub struct Request {
 }
 
 impl Request {
+    pub fn new(reference: &Reference) -> Self {
+        Request {
+            reference: reference.to_string(),
+        }
+    }
+}
+
+impl Request {
     pub fn parse_reference(&self) -> Option<Reference> {
         self.reference.parse().ok()
     }
@@ -48,13 +56,16 @@ pub struct Response {
     pub fd: OwnedFd,
 }
 
-pub async fn request(socket_addr: impl AsRef<Path>, req: Request) -> Result<Response, Error> {
+pub async fn request_erofs_image(
+    socket_addr: impl AsRef<Path>,
+    req: Request,
+) -> Result<Response, Error> {
     let socket = UnixSeqpacket::connect(socket_addr).await?;
     let mut buf = [0; 1024];
     let n = bincode::encode_into_slice(&req, &mut buf, bincode::config::standard())?;
     let _ = socket.send(&buf[..n]).await?;
 
-    let mut ancillary_buffer = [0; 1];
+    let mut ancillary_buffer = [0; 128];
     let (n, ancillary) = socket
         .recv_vectored_with_ancillary(&mut [IoSliceMut::new(&mut buf)], &mut ancillary_buffer)
         .await?;
@@ -75,7 +86,7 @@ pub async fn request(socket_addr: impl AsRef<Path>, req: Request) -> Result<Resp
             manifest_digest: manifest_digest.parse().map_err(|_| Error::BadDigest)?,
             fd,
         }),
-        (None, _) => Err(Error::MissingFd),
         (_, WireResponse::Err { message }) => Err(Error::ServerError(message)),
+        (None, _) => Err(Error::MissingFd),
     }
 }

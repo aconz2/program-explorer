@@ -85,7 +85,7 @@ fn round_up_to<const N: u64>(x: u64) -> u64 {
     if x == 0 {
         return N;
     }
-    ((x + (N - 1)) / N) * N
+    x.div_ceil(N) * N
 }
 
 pub fn round_up_file_to_pmem_size<F: AsFd>(f: F) -> rustix::io::Result<u64> {

@@ -13,7 +13,7 @@ use rustix::fs::Mode;
 use tar::{Archive, Builder as ArchiveBuilder, Entry, EntryType};
 use zstd::stream::Decoder as ZstdDecoder;
 
-use peoci::Compression;
+use peoci::compression::Compression;
 
 use peerofs::build::{
     Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats, XattrMap,
@@ -31,6 +31,7 @@ pub enum Error {
     Erofs(#[from] ErofsError),
 }
 
+// how wrong is this?
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)

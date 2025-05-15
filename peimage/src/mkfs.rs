@@ -7,7 +7,7 @@ use std::process::Command;
 use rustix::fs::{mknodat, open, FileType, Mode, OFlags};
 
 use crate::squash::{squash_to_tar, Stats};
-use peoci::Compression;
+use peoci::compression::Compression;
 
 // TODO allow passing more args into mkfs.erofs, wait with timeout
 //

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{error, info, trace};
+use log::{error, info};
 use moka::future::Cache;
 use oci_spec::{
     distribution::Reference,
@@ -19,8 +19,9 @@ use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener, ancillary::Ancillary
 use peimage::squash::squash_to_erofs;
 use peimage_service::{Request, WireResponse};
 use peoci::{
-    Compression, blobcache,
+    blobcache,
     blobcache::BlobKey,
+    compression::Compression,
     ocidist::{Auth, AuthMap},
     ocidist_cache::Client,
 };
@@ -36,6 +37,7 @@ struct AuthEntry {
 enum Error {
     BadDigest,
     BadReference,
+    BadLayerType(#[from] peoci::compression::Error),
     MissingFile,
     OpenBlob,
 }
@@ -110,7 +112,7 @@ async fn handle_conn(
     match blobcache::openat_read_key(&imgs_dir, &key) {
         Ok(Some(file)) => Ok((digest, file.into())),
         Ok(None) => {
-            error!("blob cache missing file {}", digest);
+            error!("image cache missing file {}", key);
             Err(Error::MissingFile.into())
         }
         Err(e) => {
@@ -130,7 +132,7 @@ async fn make_erofs_image(
 ) -> anyhow::Result<u64> {
     let key = key.clone();
     let manifest = manifest.clone();
-    let fds = client.get_layers(&reference, &manifest).await.unwrap();
+    let fds = client.get_layers(reference, &manifest).await.unwrap();
 
     let _guard = worker_lock.lock().await;
     tokio::task::spawn_blocking(move || {
@@ -141,7 +143,7 @@ async fn make_erofs_image(
             .iter()
             .zip(fds.into_iter())
             .map(|(descriptor, fd)| -> Result<_, Error> {
-                let comp: Compression = descriptor.try_into().unwrap();
+                let comp: Compression = descriptor.try_into()?;
                 let reader: File = fd.into();
                 Ok((comp, reader))
             })
@@ -151,11 +153,11 @@ async fn make_erofs_image(
         let t0 = Instant::now();
         let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, &mut file)?;
         let elapsed = t0.elapsed().as_secs_f32();
-        info!("Built image for {key} {squash_stats:?} {erofs_stats:?} in {elapsed:.2}s");
         guard.success()?;
         round_up_file_to_pmem_size(&file)?;
         // ftruncate up to the right size
         let size = file.metadata()?.len();
+        info!("built image for {key} size={size} Squash{squash_stats:?} Erofs{erofs_stats:?} in {elapsed:.2}s");
         Ok(size)
     })
     .await?
@@ -167,10 +169,10 @@ async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedF
     let imgs_dir_clone = imgs_dir.try_clone().unwrap();
 
     let image_cache = Cache::builder()
-        .max_capacity(blobcache::max_capacity(1_000_000_000))
+        .max_capacity(blobcache::max_capacity(5_000_000_000))
         .weigher(blobcache::weigher)
         .eviction_listener(move |k, v, reason| {
-            blobcache::remove_blob("ocidist_cache", &imgs_dir_clone, k, v, reason);
+            blobcache::remove_blob("peimage-service", &imgs_dir_clone, k, v, reason);
         })
         .build();
 
@@ -182,7 +184,8 @@ async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedF
     for (key, size) in acc.into_iter() {
         image_cache.insert(key, size).await;
     }
-    info!("loaded {count} entries into blob cache");
+    info!("loaded {count} entries into img cache");
+    image_cache.run_pending_tasks().await;
 
     Ok((image_cache, imgs_dir))
 }
@@ -194,7 +197,7 @@ async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> a
     let mut buf = [0; 1024];
     let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
 
-    let mut ancillary_buffer = [0; 1];
+    let mut ancillary_buffer = [0; 128];
     let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buffer);
     ancillary.add_fds(&[&erofs_fd])?;
 
@@ -216,7 +219,9 @@ async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Resul
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    env_logger::init();
     let args: Vec<_> = std::env::args().collect();
+    let socket_path = args.get(1).expect("give me a listening socket");
 
     let auth = if let Some(v) =
         std::env::vars().find_map(|(k, v)| if k == "PEOCI_AUTH" { Some(v) } else { None })
@@ -252,8 +257,7 @@ async fn main() {
 
     let worker_lock = Arc::new(Mutex::new(()));
 
-    let socket_path = args.get(1).expect("give me a listening socket");
-
+    std::fs::remove_file(socket_path).unwrap();
     let mut socket = UnixSeqpacketListener::bind_with_backlog(socket_path, 10).unwrap();
 
     loop {
@@ -281,7 +285,7 @@ async fn main() {
                 });
             }
             Err(e) => {
-                trace!("error accept {:?}", e);
+                error!("accept {}", e);
             }
         }
     }

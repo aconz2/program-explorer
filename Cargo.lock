@@ -1812,9 +1812,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
+ "env_logger",
  "log",
+ "memmap2",
  "moka",
  "oci-spec",
+ "peerofs",
  "peimage",
  "peoci",
  "perunner",
