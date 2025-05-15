@@ -6,7 +6,7 @@ use std::process::Command;
 
 use rustix::fs::{mknodat, open, FileType, Mode, OFlags};
 
-use crate::squash::{squash_to_tar, SquashError, Stats};
+use crate::squash::{squash_to_tar, Stats};
 use peoci::Compression;
 
 // TODO allow passing more args into mkfs.erofs, wait with timeout
@@ -78,12 +78,12 @@ use peoci::Compression;
 pub fn squash_erofs<R, P>(
     layer_readers: &mut [(Compression, R)],
     outfile: P,
-) -> Result<Stats, SquashError>
+) -> Result<Stats, anyhow::Error>
 where
     R: Read,
     P: AsRef<Path>,
 {
-    let fifo = mkfifo().map_err(|_| SquashError::Mkfifo)?;
+    let fifo = mkfifo()?;
 
     let mut child = Command::new("mkfs.erofs")
         .arg("--quiet")
@@ -96,8 +96,7 @@ where
     // Linux fifo size is 16 pages, should we match that?
     let fifo_file = OpenOptions::new()
         .write(true)
-        .open(&fifo)
-        .map_err(|_| SquashError::FifoOpen)?;
+        .open(&fifo)?;
     let _fifo_file_remover = UnlinkFile { path: fifo.clone() };
 
     let mut out = BufWriter::with_capacity(4096 * 8, fifo_file);
@@ -109,7 +108,7 @@ where
     if status.success() {
         Ok(stats)
     } else {
-        Err(SquashError::MkfsFailed)
+        Err(anyhow::anyhow!("mkfs.erofs non-zero exit"))
     }
 }
 

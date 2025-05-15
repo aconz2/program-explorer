@@ -19,31 +19,21 @@ use peerofs::build::{
     Builder as ErofsBuilder, Error as ErofsError, Meta as ErofsMeta, Stats as ErofsStats, XattrMap,
 };
 
-#[derive(Debug)]
-pub enum SquashError {
-    Io(io::Error),
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    Io(#[from] io::Error),
     OpaqueWhiteoutNoParent,
     HardlinkNoLink,
-    Finish,
-    Utf8Error,
-    MkfsFailed,
-    Mkfifo,
-    FifoOpen,
+    XattrKeyUtf8Error,
     UidTooBig,
     GidTooBig,
     UnhandledEntryType(EntryType),
-    Erofs(ErofsError),
+    Erofs(#[from] ErofsError),
 }
 
-impl From<io::Error> for SquashError {
-    fn from(e: io::Error) -> Self {
-        SquashError::Io(e)
-    }
-}
-
-impl From<ErofsError> for SquashError {
-    fn from(e: ErofsError) -> Self {
-        SquashError::Erofs(e)
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
@@ -111,7 +101,7 @@ pub struct Stats {
 }
 
 pub trait EntryCallback {
-    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError>;
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), Error>;
 }
 
 // Important notes about the OCI spec
@@ -162,7 +152,7 @@ struct SquashToTar<W: Write> {
 }
 
 impl<W: Write> EntryCallback for SquashToTar<W> {
-    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), Error> {
         // TODO should / do we need to exclude "path" and "link" extensions since
         // the append_{link,data} calls will emit those for us
         // and just doing the pax extension alone didn't seem to be enough to make long paths
@@ -175,7 +165,7 @@ impl<W: Write> EntryCallback for SquashToTar<W> {
             let mut acc = vec![];
             for extension in extensions.into_iter() {
                 let extension = extension?;
-                let key = extension.key().map_err(|_| SquashError::Utf8Error)?;
+                let key = extension.key().map_err(|_| Error::XattrKeyUtf8Error)?;
                 let value = extension.value_bytes();
                 acc.push((key, value));
             }
@@ -188,7 +178,7 @@ impl<W: Write> EntryCallback for SquashToTar<W> {
         match entry.header().entry_type() {
             EntryType::Link | EntryType::Symlink => {
                 let path = entry.path()?;
-                let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                let link = entry.link_name()?.ok_or(Error::HardlinkNoLink)?;
                 self.archive.append_link(&mut header, path, link)?;
             }
             _ => {
@@ -203,7 +193,7 @@ impl<W: Write> EntryCallback for SquashToTar<W> {
 pub fn squash_to_tar<W, R>(
     layer_readers: &mut [(Compression, R)],
     out: &mut W,
-) -> Result<Stats, SquashError>
+) -> Result<Stats, Error>
 where
     W: Write,
     R: Read,
@@ -212,7 +202,7 @@ where
         archive: ArchiveBuilder::new(out),
     };
     let stats = squash_cb(layer_readers, &mut helper)?;
-    helper.archive.finish().map_err(|_| SquashError::Finish)?;
+    helper.archive.finish()?;
 
     Ok(stats)
 }
@@ -221,16 +211,16 @@ struct SquashToErofs<W: Write + Seek> {
     builder: ErofsBuilder<W>,
 }
 
-fn header_to_meta(header: &tar::Header, xattrs: XattrMap) -> Result<ErofsMeta, SquashError> {
+fn header_to_meta(header: &tar::Header, xattrs: XattrMap) -> Result<ErofsMeta, Error> {
     let meta = ErofsMeta {
         uid: header
             .uid()?
             .try_into()
-            .map_err(|_| SquashError::UidTooBig)?,
+            .map_err(|_| Error::UidTooBig)?,
         gid: header
             .gid()?
             .try_into()
-            .map_err(|_| SquashError::GidTooBig)?,
+            .map_err(|_| Error::GidTooBig)?,
         mtime: header.mtime()?,
         mode: Mode::from_raw_mode(header.mode()?),
         xattrs,
@@ -238,9 +228,9 @@ fn header_to_meta(header: &tar::Header, xattrs: XattrMap) -> Result<ErofsMeta, S
     Ok(meta)
 }
 
-// TODO the error handling here is subpar b/c everything gets funneled into SquashError
+// TODO the error handling here is subpar b/c everything gets funneled into Error
 impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
-    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), SquashError> {
+    fn on_entry<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), Error> {
         let mut xattrs = XattrMap::new();
         if let Some(extensions) = entry.pax_extensions()? {
             for extension in extensions.into_iter() {
@@ -268,16 +258,16 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
             }
             EntryType::Symlink => {
                 let path = entry.path()?;
-                let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                let link = entry.link_name()?.ok_or(Error::HardlinkNoLink)?;
                 self.builder.add_symlink(path, link, meta)?;
             }
             EntryType::Link => {
                 let path = entry.path()?;
-                let link = entry.link_name()?.ok_or(SquashError::HardlinkNoLink)?;
+                let link = entry.link_name()?.ok_or(Error::HardlinkNoLink)?;
                 self.builder.add_link(path, link, meta)?;
             }
             t => {
-                return Err(SquashError::UnhandledEntryType(t));
+                return Err(Error::UnhandledEntryType(t));
             }
         }
         Ok(())
@@ -287,7 +277,7 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
 pub fn squash_to_erofs<W, R>(
     layer_readers: &mut [(Compression, R)],
     out: &mut W,
-) -> Result<(Stats, ErofsStats), SquashError>
+) -> Result<(Stats, ErofsStats), Error>
 where
     W: Write + Seek,
     R: Read,
@@ -307,7 +297,7 @@ fn squash_layer<R, D, F>(
     stats: &mut Stats,
     deletions: &mut D,
     mut layer: Archive<R>,
-) -> Result<(), SquashError>
+) -> Result<(), Error>
 where
     R: Read,
     D: Deletions,
@@ -338,7 +328,7 @@ where
         //    if let Some(link) = entry.link_name()? {
         //        hardlinks.insert(link.into());
         //    } else {
-        //        return Err(SquashError::HardlinkNoLink);
+        //        return Err(Error::HardlinkNoLink);
         //    }
         //}
 
@@ -386,7 +376,7 @@ where
 pub fn squash_cb<R, F>(
     layer_readers: &mut [(Compression, R)],
     cb: &mut F,
-) -> Result<Stats, SquashError>
+) -> Result<Stats, Error>
 where
     R: Read,
     F: EntryCallback,
@@ -630,7 +620,7 @@ impl Deletions for DeletionsPathBuf {
     }
 }
 
-fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> {
+fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, Error> {
     // this should be true but idk if universal
     //if entry.header.entry_type() != EntryType::Regular {
     //    return Ok(None)
@@ -650,7 +640,7 @@ fn whiteout<R: Read>(entry: &Entry<R>) -> Result<Option<Whiteout>, SquashError> 
             return Ok(Some(Whiteout::Opaque(parent.into())));
         } else {
             // I don't think this should happend
-            return Err(SquashError::OpaqueWhiteoutNoParent);
+            return Err(Error::OpaqueWhiteoutNoParent);
         }
     }
     if let Some(trimmed) = name.strip_prefix(b".wh.") {
@@ -1001,7 +991,7 @@ mod tests {
         assert_eq!(entries.into_iter().collect::<EList>(), deserialize(&buf));
     }
 
-    fn squash_layers_vec(layers: Vec<Vec<E>>) -> Result<EList, SquashError> {
+    fn squash_layers_vec(layers: Vec<Vec<E>>) -> Result<EList, Error> {
         let mut readers: Vec<_> = layers
             .into_iter()
             .map(|x| (Compression::Gzip, Cursor::new(serialize_gz(&x))))

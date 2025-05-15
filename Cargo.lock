@@ -1779,6 +1779,7 @@ dependencies = [
  "memmap2",
  "rustix 1.0.7",
  "tempfile",
+ "thiserror 2.0.12",
  "zerocopy 0.8.24",
 ]
 
@@ -1786,6 +1787,7 @@ dependencies = [
 name = "peimage"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base16ct",
  "byteorder",
  "flate2",
@@ -1800,6 +1802,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "thiserror 2.0.12",
  "zstd",
 ]
 
@@ -1854,6 +1857,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror 2.0.12",
  "tokio",
 ]
 

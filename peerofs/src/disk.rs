@@ -71,7 +71,7 @@ pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 // - take a pass through field names and rename them (I guess retaining a comment to the original
 // field name)
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     BadSuperblock,
     BadMagic,
@@ -91,6 +91,13 @@ pub enum Error {
     BuiltinPrefixTooBig,
     XattrPrefixTableNotHandled,
     LayoutNotHandled(Layout),
+}
+
+// how wrong is this?
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Immutable, KnownLayout, FromZeros, IntoBytes)]

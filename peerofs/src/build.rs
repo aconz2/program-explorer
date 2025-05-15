@@ -81,7 +81,7 @@ const MAX_DEPTH: usize = 32; // TODO could be configurable
 // - link count, do they actually matter?
 // - tail pack dirents
 
-#[derive(Debug, PartialEq)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     FileExists,
     BadFilename,
@@ -120,12 +120,12 @@ pub enum Error {
     DirDiskIdMismatch { expected: Option<u32>, got: u32 },
     Oob,
     Other(String),
-    Io(std::io::ErrorKind),
+    Io(#[from] std::io::Error),
 }
 
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Io(e.kind())
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
@@ -1171,7 +1171,7 @@ impl<W: Write + Seek> Builder<W> {
         self.finalize()?;
         self.writer
             .into_inner()
-            .map_err(|e| Error::Io(e.error().kind()))
+            .map_err(|e| e.into_error().into())
             .map(|w| (self.stats, w))
     }
 }

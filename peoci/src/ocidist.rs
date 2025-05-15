@@ -32,10 +32,10 @@ const DOCKER_IMAGE_MANIFEST_LIST_V2: &str =
 const ACCEPTED_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
 const ACCEPTED_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json";
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    Reqwest(reqwest::Error),
-    OciSpecError(OciSpecError),
+    Reqwest(#[from] reqwest::Error),
+    OciSpecError(#[from] OciSpecError),
     DigestMismatch,
     SizeMismatch,
     NoTagOrDigest,
@@ -54,15 +54,10 @@ pub enum Error {
     RegistryNotSupported(String),
 }
 
-impl From<reqwest::Error> for Error {
-    fn from(error: reqwest::Error) -> Error {
-        Error::Reqwest(error)
-    }
-}
-
-impl From<OciSpecError> for Error {
-    fn from(error: OciSpecError) -> Self {
-        Error::OciSpecError(error)
+// how wrong is this?
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

@@ -5,24 +5,19 @@ use crate::Compression;
 
 use oci_spec::image::{Descriptor, Digest, ImageIndex, ImageManifest};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     NoMatchingManifest,
-    OciSpec,
+    OciSpec(#[from] oci_spec::OciSpecError),
     NoMediaType,
     BadMediaType,
-    Io,
+    Io(#[from] std::io::Error),
 }
 
-impl From<std::io::Error> for Error {
-    fn from(_: std::io::Error) -> Self {
-        Error::Io
-    }
-}
-
-impl From<oci_spec::OciSpecError> for Error {
-    fn from(_: oci_spec::OciSpecError) -> Self {
-        Error::OciSpec
+// how wrong is this?
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

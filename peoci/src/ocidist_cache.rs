@@ -41,11 +41,12 @@ use crate::{blobcache, blobcache::BlobKey, ocidist};
 //
 // TODO should we really return Arc<Error>
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    ClientError(ocidist::Error),
-    Errno(rustix::io::Errno),
-    OciSpecError(OciSpecError),
+    ClientError(#[from] ocidist::Error),
+    Errno(#[from] rustix::io::Errno),
+    OciSpecError(#[from] OciSpecError),
+    AcquireError(#[from] tokio::sync::AcquireError),
     NoCacheDir,
     BadDigest,
     MissingDigest,
@@ -67,27 +68,10 @@ pub enum Error {
     Unknown,
 }
 
-impl From<ocidist::Error> for Error {
-    fn from(error: ocidist::Error) -> Self {
-        Error::ClientError(error)
-    }
-}
-
-impl From<rustix::io::Errno> for Error {
-    fn from(error: rustix::io::Errno) -> Self {
-        Error::Errno(error)
-    }
-}
-
-impl From<OciSpecError> for Error {
-    fn from(error: OciSpecError) -> Self {
-        Error::OciSpecError(error)
-    }
-}
-
-impl From<tokio::sync::AcquireError> for Error {
-    fn from(_error: tokio::sync::AcquireError) -> Self {
-        Error::MaxConns
+// how wrong is this?
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

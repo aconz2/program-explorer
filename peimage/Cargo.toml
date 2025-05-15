@@ -19,6 +19,8 @@ rustix = "1.0.5"
 zstd = "0.13.3"
 peerofs = { version = "0.1.0", path = "../peerofs" }
 peoci = { version = "0.1.0", path = "../peoci" }
+thiserror = "2.0.12"
+anyhow = "1.0.98"
 
 [features]
 # skip CRC32 calculation when reading from gzip files, not sure this is a good idea or not
@@ -46,10 +48,6 @@ path = "src/bin/squasherofs.rs"
 [[bin]]
 name = "tardiff"
 path = "src/bin/tardiff.rs"
-
-[[bin]]
-name = "peimage-serivce"
-path = "src/bin/service.rs"
 
 [lints]
 workspace = true

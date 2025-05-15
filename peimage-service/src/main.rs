@@ -6,7 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Error;
 use log::{error, info, trace};
 use moka::future::Cache;
 use oci_spec::{distribution::Reference, image::ImageManifest};
@@ -30,15 +29,18 @@ struct AuthEntry {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum Er {
-    #[error("do you reall have to do this for each variant")]
+enum Error {
     BadDigest,
-    #[error("do you reall have to do this for each variant")]
     BadReference,
-    #[error("do you reall have to do this for each variant")]
     MissingFile,
-    #[error("do you reall have to do this for each variant")]
     OpenBlob,
+}
+
+// how wrong is this?
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 type StoredAuth = BTreeMap<String, AuthEntry>;
@@ -58,13 +60,13 @@ async fn handle_conn(
     client: Client,
     img_cache: ImageCache,
     imgs_dir: Arc<OwnedFd>,
-) -> Result<OwnedFd, Error> {
+) -> anyhow::Result<OwnedFd> {
     let mut buf = [0; 1024];
     let len = conn.recv(&mut buf).await?;
     let (req, _) =
         bincode::decode_from_slice::<Request, _>(&buf[..len], bincode::config::standard())?;
 
-    let reference = req.parse_reference().ok_or(Er::BadReference)?;
+    let reference = req.parse_reference().ok_or(Error::BadReference)?;
 
     let image_and_config = client
         .get_image_manifest_and_configuration(&reference)
@@ -74,7 +76,7 @@ async fn handle_conn(
     let manifest = image_and_config.manifest()?;
 
     let start = Instant::now();
-    let key = BlobKey::new(digest.to_string()).ok_or(Er::BadDigest)?;
+    let key = BlobKey::new(digest.to_string()).ok_or(Error::BadDigest)?;
     let entry = img_cache
         .entry_by_ref(&key)
         .or_try_insert_with(make_erofs_image(
@@ -110,11 +112,11 @@ async fn handle_conn(
         Ok(Some(file)) => Ok(file.into()),
         Ok(None) => {
             error!("blob cache missing file {}", digest);
-            Err(Er::MissingFile.into())
+            Err(Error::MissingFile.into())
         }
         Err(e) => {
             error!("error opening blob {:?}", e);
-            Err(Er::OpenBlob.into())
+            Err(Error::OpenBlob.into())
         }
     }
 }
@@ -126,7 +128,7 @@ async fn make_erofs_image(
     manifest: &ImageManifest,
     imgs_dir: Arc<OwnedFd>,
     key: &BlobKey,
-) -> Result<u64, Error> {
+) -> anyhow::Result<u64> {
     let key = key.clone();
     let manifest = manifest.clone();
 
@@ -160,7 +162,7 @@ async fn make_erofs_image(
     .await?
 }
 
-async fn make_cache(dir: impl AsRef<Path>) -> Result<(ImageCache, OwnedFd), Error> {
+async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedFd)> {
     let cache_dir = blobcache::open_or_create_dir_at(None, dir.as_ref()).unwrap();
     let imgs_dir = blobcache::open_or_create_dir_at(Some(&cache_dir), "imgs").unwrap();
     let imgs_dir_clone = imgs_dir.try_clone().unwrap();
@@ -199,7 +201,7 @@ async fn respond_fd(_conn: UnixSeqpacket, _fd: OwnedFd) -> Result<(), Error> {
     todo!()
 }
 
-async fn respond_error(_conn: UnixSeqpacket) -> Result<(), Error> {
+async fn respond_error(_conn: UnixSeqpacket, error: anyhow::Error) -> Result<(), Error> {
     todo!()
 }
 
@@ -260,7 +262,7 @@ async fn main() {
                                 error!("error sending fd {:?}", e);
                             }
                         },
-                        Err(e) => match respond_error(conn).await {
+                        Err(e) => match respond_error(conn, e).await {
                             Ok(_) => {}
                             Err(e) => {
                                 error!("error sending error {:?}", e);

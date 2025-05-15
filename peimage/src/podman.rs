@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{Cursor, Read, Write};
 use std::process::{Command, Stdio};
+
 use tar::Archive;
 use tempfile::NamedTempFile;
-
 use oci_spec::image::{Digest, ImageIndex, ImageManifest};
 
 use peoci::Compression;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     NoManifest,
     NoIndex,
@@ -22,19 +22,14 @@ pub enum Error {
     PodmanCreate,
     PodmanCreateId,
     Tempfile,
-    OciSpec,
-    Io,
+    OciSpec(#[from] oci_spec::OciSpecError),
+    Io(#[from] std::io::Error),
 }
 
-impl From<std::io::Error> for Error {
-    fn from(_: std::io::Error) -> Self {
-        Error::Io
-    }
-}
-
-impl From<oci_spec::OciSpecError> for Error {
-    fn from(_: oci_spec::OciSpecError) -> Self {
-        Error::OciSpec
+// how wrong is this?
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
@@ -102,7 +97,7 @@ pub struct Rootfs {
 }
 
 pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
-    let mut id_file = NamedTempFile::new().map_err(|_| Error::Tempfile)?;
+    let mut id_file = NamedTempFile::new()?;
     let mut child = Command::new("podman")
         .arg("build")
         .arg("--file=-")
@@ -116,16 +111,14 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| Error::PodmanBuild)?;
+        .spawn()?;
 
     let mut stdin = child.stdin.take().expect("handle present");
     stdin
-        .write_all(containerfile.as_bytes())
-        .map_err(|_| Error::Io)?;
+        .write_all(containerfile.as_bytes())?;
     drop(stdin);
 
-    let _ = child.wait().map_err(|_| Error::PodmanBuild)?;
+    let _ = child.wait()?;
 
     let iid = {
         let mut buf = String::new();
@@ -139,8 +132,8 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
         let output = Command::new("podman")
             .arg("create")
             .arg(&iid)
-            .output()
-            .map_err(|_| Error::PodmanCreate)?;
+            .output()?;
+
         String::from_utf8(output.stdout)
             .map_err(|_| Error::PodmanCreateId)?
             .trim()
@@ -151,8 +144,7 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
         let output = Command::new("podman")
             .arg("export")
             .arg(&cid)
-            .output()
-            .map_err(|_| Error::PodmanExport)?;
+            .output()?;
         output.stdout
     };
 
@@ -161,8 +153,7 @@ pub fn build_with_podman(containerfile: &str) -> Result<Rootfs, Error> {
         .arg(cid)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map_err(|_| Error::PodmanRm)?;
+        .status()?;
 
     let _ = Command::new("podman")
         .arg("rmi")
