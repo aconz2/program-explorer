@@ -41,6 +41,8 @@ use crate::{blobcache, blobcache::BlobKey, ocidist};
 // [1] https://github.com/moka-rs/moka/issues/201
 //
 // TODO should we really return Arc<Error>
+// rate limits!
+// should we cache 404's for some time?
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -394,7 +396,7 @@ impl Client {
             ))
             .await?;
 
-        if entry.is_fresh() {
+        let fd = if entry.is_fresh() {
             atomic_inc(&self.counters.blob_cache_miss);
             let digest = entry.key();
             let size = *entry.value();
@@ -403,12 +405,16 @@ impl Client {
             info!(
                 "blob_cache miss digest={digest} size={size} elapsed={elapsed:?} speed={speed:.2} MB/s"
             );
+            fd_rx.await.map_err(|_| Error::OneshotRx)?
         } else {
             atomic_inc(&self.counters.blob_cache_hit);
-            info!("blob_cache hit digest={}", entry.key())
-        }
+            info!("blob_cache hit digest={}", entry.key());
+            blobcache::openat_read_key(&self.dirs.blobs, &key)
+                .map_err(|e| Arc::new(e.into()))?
+                .ok_or(Error::BlobMissing)?
+                .into()
+        };
 
-        let fd = fd_rx.await.map_err(|_| Error::OneshotRx)?;
         let stat = rustix::fs::fstat(&fd).map_err(|e| Arc::new(e.into()))?;
         let size: u64 = stat.st_size.try_into().unwrap_or(0);
         if size != descriptor.size() {

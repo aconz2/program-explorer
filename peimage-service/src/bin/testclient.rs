@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use memmap2::MmapOptions;
 use peerofs::disk::Erofs;
 use peimage_service::{Request, request_erofs_image};
@@ -8,7 +10,10 @@ async fn main_() -> anyhow::Result<()> {
     let reference = args.get(2).expect("give me an image reference").parse()?;
 
     let request = Request::new(&reference);
+    let t0 = Instant::now();
     let response = request_erofs_image(socket_path, request).await?;
+    let elapsed = t0.elapsed().as_secs_f32();
+    println!("got response in {elapsed:.3}s");
 
     let mmap = unsafe { MmapOptions::new().map(&response.fd)? };
     let erofs = Erofs::new(&mmap)?;

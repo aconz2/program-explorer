@@ -12,6 +12,7 @@ pub enum Error {
     Decode(#[from] bincode::error::DecodeError),
     BadDigest,
     MissingFd,
+    NoMatchingManifest,
     ServerError(String),
     Unknown,
 }
@@ -48,6 +49,7 @@ impl Request {
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub enum WireResponse {
     Ok { manifest_digest: String },
+    NoMatchingManifest,
     Err { message: String },
 }
 
@@ -86,6 +88,7 @@ pub async fn request_erofs_image(
             manifest_digest: manifest_digest.parse().map_err(|_| Error::BadDigest)?,
             fd,
         }),
+        (_, WireResponse::NoMatchingManifest) => Err(Error::NoMatchingManifest),
         (_, WireResponse::Err { message }) => Err(Error::ServerError(message)),
         (None, _) => Err(Error::MissingFd),
     }

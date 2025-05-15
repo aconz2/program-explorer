@@ -24,9 +24,19 @@ use peoci::{
     blobcache::BlobKey,
     compression::Compression,
     ocidist::{Auth, AuthMap},
+    ocidist_cache,
     ocidist_cache::Client,
 };
 use perunner::iofile::round_up_file_to_pmem_size;
+
+// TODO
+// can we bound/check up front how large the image will be and error out if too big?
+// when looking at the layers individually, we can determinte
+// - total size for ImageLayer
+// - total size mod u32 for ImageLayerGzip by reading the gzip header
+// - nothing for ImageLayerZstd if they are compressed in frames
+// the erofs::Builder could take in a max file size and error out once that limit is reached,
+// that wouldn't (easily) include the dirents overhead but shouldn't be a problem
 
 #[derive(Deserialize)]
 struct AuthEntry {
@@ -40,6 +50,8 @@ enum Error {
     BadReference,
     BadLayerType(#[from] peoci::compression::Error),
     OneshotSend,
+    MissingFile,
+    OpenFile,
     // not sure a better way to handle this
     #[error(transparent)]
     Arc(#[from] Arc<anyhow::Error>),
@@ -102,17 +114,27 @@ async fn handle_conn(
 
     if entry.is_fresh() {
         //atomic_inc(&self.counters.blob_cache_miss);
-        let digest = entry.key();
         let size = *entry.value();
         info!("img_cache miss digest={digest} size={size}");
+        let fd = fd_rx.await?;
+        Ok((digest, fd))
     } else {
         //atomic_inc(&self.counters.blob_cache_hit);
-        info!("img_cache hit digest={}", entry.key())
+        info!("img_cache hit digest={digest}");
+        match blobcache::openat_read_key(&imgs_dir, &key) {
+            Ok(Some(file)) => Ok((digest, file.into())),
+            Ok(None) => {
+                error!("image cache missing file {}", key);
+                Err(Error::MissingFile.into())
+            }
+            Err(e) => {
+                error!("error opening blob {:?}", e);
+                Err(Error::OpenFile.into())
+            }
+        }
     }
 
-    let fd = fd_rx.await?;
 
-    Ok((digest, fd))
 }
 
 async fn make_erofs_image(
@@ -205,8 +227,20 @@ async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> a
 
 async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Result<()> {
     error!("responding_err {}", error);
-    let wire_response = WireResponse::Err {
-        message: "unexpected error".to_string(),
+    let wire_response = {
+        // TODO this isn't working, I want a few errors to be propagated so that the api can return
+        // something helpful when possible, basically
+        // - your reference doesn't exist
+        // - your reference exists but not for amd64+linux
+        // - your image was too big
+        // maybe we shouldn't take in anyhow here
+        if let Some(&ocidist_cache::Error::NoMatchingManifest) = error.downcast_ref::<ocidist_cache::Error>() {
+            WireResponse::NoMatchingManifest
+        } else {
+            WireResponse::Err {
+                message: "unexpected error".to_string(),
+            }
+        }
     };
     let mut buf = [0; 1024];
     let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
