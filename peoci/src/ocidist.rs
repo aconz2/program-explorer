@@ -66,7 +66,7 @@ impl std::fmt::Display for Error {
 // does not include scope because we are always just pulling
 // annoyingly ghcr.io for example doesn't care and if you get a token without scope it will work on
 // everything, so we don't have to get one token per repo, but just doing it
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Debug)]
 struct TokenCacheKey(String);
 
 impl From<&Reference> for TokenCacheKey {
@@ -95,6 +95,7 @@ impl Expiry<TokenCacheKey, Token> for ExpireToken {
         value: &Token,
         _current_time: Instant,
     ) -> Option<Duration> {
+        trace!("{_key:?} expires in {:?}", value.expires_in);
         Some(value.expires_in)
     }
 }
@@ -200,6 +201,9 @@ impl Client {
             .weigher(|k: &TokenCacheKey, v: &Token| {
                 (k.0.len() + v.token.len()).try_into().unwrap_or(u32::MAX)
             })
+            .eviction_listener(move |k, _v, reason| {
+                trace!("token eviction {k:?} {reason:?}");
+            })
             .expire_after(ExpireToken)
             .build();
 
@@ -269,19 +273,16 @@ impl Client {
     ) -> Result<Option<Descriptor>, Error> {
         if let Some(index) = self.get_image_index(reference).await? {
             let index = index.get()?;
-            let descriptor = index
-                .manifests()
-                .iter()
-                .find(|descriptor| {
-                    descriptor
-                        .platform()
-                        .as_ref()
-                        .map(|platform| *platform.architecture() == arch && *platform.os() == os)
-                        .unwrap_or(false)
-                });
-                //.map(|descriptor| Ok(descriptor.clone()))
-                //.map(|descriptor| descriptor.clone())
-                //.transpose()
+            let descriptor = index.manifests().iter().find(|descriptor| {
+                descriptor
+                    .platform()
+                    .as_ref()
+                    .map(|platform| *platform.architecture() == arch && *platform.os() == os)
+                    .unwrap_or(false)
+            });
+            //.map(|descriptor| Ok(descriptor.clone()))
+            //.map(|descriptor| descriptor.clone())
+            //.transpose()
             if let Some(descriptor) = descriptor {
                 Ok(Some(descriptor.clone()))
             } else {

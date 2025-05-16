@@ -2,7 +2,10 @@ use std::io::IoSliceMut;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 
-use oci_spec::{distribution::Reference, image::Digest};
+use oci_spec::{
+    distribution::Reference,
+    image::{Arch, Digest, Os},
+};
 use tokio_seqpacket::{UnixSeqpacket, ancillary::OwnedAncillaryMessage};
 
 #[derive(Debug, thiserror::Error)]
@@ -31,14 +34,18 @@ impl std::fmt::Display for Error {
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct Request {
     reference: String,
+    //arch: Arch,
+    //os: Os,
     // TODO I think this has to take a duration since we'd rather not have the requester do a
     // timeout and cancel the request
 }
 
 impl Request {
-    pub fn new(reference: &Reference) -> Self {
+    pub fn new(reference: &Reference, _arch: Arch, _os: Os) -> Self {
         Request {
             reference: reference.to_string(),
+            //arch,
+            //os,
         }
     }
 }

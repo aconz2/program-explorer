@@ -27,6 +27,5 @@ path = "src/lib.rs"
 name = "oci-dist"
 path = "src/bin/ocidist.rs"
 
-
 [lints]
 workspace = true

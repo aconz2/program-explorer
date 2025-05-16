@@ -1,3 +1,4 @@
+use crate::spec;
 use oci_spec::image::{Descriptor, MediaType};
 
 #[derive(Debug)]
@@ -61,6 +62,17 @@ impl TryFrom<&Descriptor> for Compression {
                 media_type: media_type.clone(),
                 artifact_type: artifact_type.clone(),
             }),
+        }
+    }
+}
+
+impl From<&spec::LayerDescriptor> for Compression {
+    fn from(x: &spec::LayerDescriptor) -> Self {
+        match x.media_type {
+            spec::MediaType::ImageLayer => Compression::None,
+            spec::MediaType::ImageLayerGzip => Compression::Gzip,
+            spec::MediaType::DockerImageLayerGzip => Compression::Gzip,
+            spec::MediaType::ImageLayerZstd => Compression::Zstd,
         }
     }
 }

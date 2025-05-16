@@ -70,19 +70,26 @@ async fn main() {
             .unwrap();
 
         let res = client
-            .get_image_manifest_and_configuration(&image_ref)
+            .get_image_manifest_and_configuration(&image_ref, Arch::Amd64, Os::Linux)
             .await
             .unwrap();
-        let manifest = res.manifest().unwrap();
-        println!("got manifest {:#?}", res.manifest());
-        println!("got configuration {:#?}", res.configuration());
+        let manifest_config = res.get().unwrap();
+        println!("got manifest {:#?}", manifest_config.manifest);
+        println!("got configuration {:#?}", manifest_config.configuration);
+
+        //let manifest: oci_spec::image::ImageManifest = manifest_config.manifest.try_into().unwrap();
+        //let configuration: oci_spec::image::ImageConfiguration = manifest_config.configuration.try_into().unwrap();
 
         //let _fd = client
         //    .get_blob(&image_ref, manifest.layers()[0].digest())
         //    .await
         //    .unwrap();
         //println!("got blob {:?}", manifest.layers()[0].digest());
-        let layers = client.get_layers(&image_ref, &manifest).await.unwrap();
+
+        let layers = client
+            .get_layers(&image_ref, &manifest_config.manifest)
+            .await
+            .unwrap();
         println!("got layers {:?}", layers);
 
         println!("{:#?}", client.stats().await);

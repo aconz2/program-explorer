@@ -1,5 +1,5 @@
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use log::{error, info};
 use moka::notification::RemovalCause;
@@ -377,4 +377,12 @@ fn openat_key(
 // wish there was unlinkat2 with BENEATH
 fn unlinkat(dir: &OwnedFd, key: &BlobKey) -> Result<(), Errno> {
     rustix::fs::unlinkat(dir, key.as_path(), AtFlags::empty())
+}
+
+pub fn atomic_inc(x: &AtomicU64) {
+    x.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn atomic_take(x: &AtomicU64) -> u64 {
+    x.swap(0, std::sync::atomic::Ordering::Relaxed)
 }

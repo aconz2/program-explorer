@@ -4,14 +4,14 @@ use std::io::IoSlice;
 use std::io::Seek;
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Instant;
 
 use log::{error, info};
 use moka::future::Cache;
 use oci_spec::{
     distribution::Reference,
-    image::{Digest, ImageManifest},
+    image::{Arch, Digest, Os},
 };
 use serde::Deserialize;
 use tokio::sync::Semaphore;
@@ -21,7 +21,7 @@ use peimage::squash::squash_to_erofs;
 use peimage_service::{Request, WireResponse};
 use peoci::{
     blobcache,
-    blobcache::BlobKey,
+    blobcache::{BlobKey, atomic_inc, atomic_take},
     compression::Compression,
     ocidist::{Auth, AuthMap},
     ocidist_cache,
@@ -29,17 +29,10 @@ use peoci::{
 };
 use perunner::iofile::round_up_file_to_pmem_size;
 
+// max sum of compressed layer sizes
+const MAX_TOTAL_LAYER_SIZE: u64 = 2_000_000_000;
 // this is the max erofs image size (of just the file data portion)
 const MAX_IMAGE_SIZE: u64 = 3_000_000_000;
-
-// TODO
-// can we bound/check up front how large the image will be and error out if too big?
-// when looking at the layers individually, we can determinte
-// - total size for ImageLayer
-// - total size mod u32 for ImageLayerGzip by reading the gzip header
-// - nothing for ImageLayerZstd if they are compressed in frames
-// the erofs::Builder could take in a max file size and error out once that limit is reached,
-// that wouldn't (easily) include the dirents overhead but shouldn't be a problem
 
 #[derive(Deserialize)]
 struct AuthEntry {
@@ -56,16 +49,8 @@ enum Error {
     OneshotRx,
     MissingFile,
     OpenFile,
-    //Anyhow(#[from] anyhow::Error),
-    // not sure a better way to handle this
-    //#[error(transparent)]
+    TotalLayerSizeTooBig,
     Arc(#[from] Arc<anyhow::Error>),
-    //ArcSelf(#[from] Arc<Error>),
-    //Errno(#[from] rustix::io::Errno),
-    //Io(#[from] std::io::Error),
-    //Join(#[from] tokio::task::JoinError),
-    //Squash(#[from] peimage::squash::Error),
-    //OciSpecError(#[from] oci_spec::OciSpecError),
 }
 
 // how wrong is this?
@@ -73,6 +58,20 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
+}
+
+#[derive(Default)]
+struct Counters {
+    img_cache_hit: AtomicU64,
+    img_cache_miss: AtomicU64,
+}
+
+#[derive(Debug)]
+struct Stats {
+    #[allow(dead_code)]
+    img_cache_hit: u64,
+    #[allow(dead_code)]
+    img_cache_miss: u64,
 }
 
 type StoredAuth = BTreeMap<String, AuthEntry>;
@@ -92,6 +91,7 @@ async fn handle_conn(
     client: Client,
     img_cache: ImageCache,
     imgs_dir: Arc<OwnedFd>,
+    counters: Arc<Counters>,
 ) -> anyhow::Result<(Digest, OwnedFd)> {
     let mut buf = [0; 1024];
     let len = conn.recv(&mut buf).await?;
@@ -101,10 +101,10 @@ async fn handle_conn(
     let reference = req.parse_reference().ok_or(Error::BadReference)?;
 
     let image_and_config = client
-        .get_image_manifest_and_configuration(&reference)
-        .await?;
-    let digest = image_and_config.digest()?;
-    let manifest = image_and_config.manifest()?;
+        .get_image_manifest_and_configuration(&reference, Arch::Amd64, Os::Linux)
+        .await?
+        .get()?;
+    let digest: Digest = image_and_config.manifest_digest.into();
 
     let (fd_tx, fd_rx) = tokio::sync::oneshot::channel();
 
@@ -115,7 +115,7 @@ async fn handle_conn(
             worker_semaphore,
             client,
             &reference,
-            &manifest,
+            &image_and_config.manifest,
             &imgs_dir,
             &key,
             fd_tx,
@@ -124,14 +124,14 @@ async fn handle_conn(
         .map_err(Error::Arc)?;
 
     if entry.is_fresh() {
-        //atomic_inc(&self.counters.blob_cache_miss);
+        atomic_inc(&counters.img_cache_miss);
         let size = *entry.value();
-        info!("img_cache miss digest={digest} size={size}");
+        info!("img_cache miss digest={key} size={size}");
         let fd = fd_rx.await.map_err(|_| Error::OneshotRx)?;
         Ok((digest, fd))
     } else {
-        //atomic_inc(&self.counters.blob_cache_hit);
-        info!("img_cache hit digest={digest}");
+        atomic_inc(&counters.img_cache_hit);
+        info!("img_cache hit digest={key}");
         match blobcache::openat_read_key(&imgs_dir, &key) {
             Ok(Some(file)) => Ok((digest, file.into())),
             Ok(None) => {
@@ -150,19 +150,30 @@ async fn make_erofs_image(
     worker_semaphore: Arc<Semaphore>,
     client: Client,
     reference: &Reference,
-    manifest: &ImageManifest,
+    manifest: &peoci::spec::ImageManifest,
     imgs_dir: &Arc<OwnedFd>,
     key: &BlobKey,
     fd_tx: tokio::sync::oneshot::Sender<OwnedFd>,
 ) -> anyhow::Result<u64> {
     let key = key.clone();
+
+    let total_layer_size = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.size)
+        .fold(0u64, |x, y| x.saturating_add(y));
+
+    if total_layer_size > MAX_TOTAL_LAYER_SIZE {
+        return Err(Error::TotalLayerSizeTooBig.into());
+    }
+
     let fds = client.get_layers(reference, manifest).await?;
     let mut layers: Vec<_> = manifest
-        .layers()
+        .layers
         .iter()
         .zip(fds.into_iter())
         .map(|(descriptor, fd)| -> Result<_, Error> {
-            let comp: Compression = descriptor.try_into()?;
+            let comp: Compression = descriptor.into();
             let reader: File = fd.into();
             Ok((comp, reader))
         })
@@ -249,6 +260,11 @@ async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Resul
                 ocidist_cache::Error::NoMatchingManifest => Some(WireResponse::NoMatchingManifest),
                 _ => None,
             }
+        } else if let Some(e) = error.downcast_ref::<Arc<Error>>() {
+            match **e {
+                Error::TotalLayerSizeTooBig => Some(WireResponse::ImageTooBig),
+                _ => None,
+            }
         } else if let Some(e) = error.downcast_ref::<Arc<peimage::squash::Error>>() {
             match **e {
                 peimage::squash::Error::Erofs(peerofs::build::Error::MaxSizeExceeded) => {
@@ -308,11 +324,12 @@ async fn main() {
         .unwrap();
 
     let worker_semaphore = Arc::new(Semaphore::new(1));
+    let counters = Arc::new(Counters::default());
 
-    std::fs::remove_file(socket_path).unwrap();
+    let _ = std::fs::remove_file(socket_path);
     let mut socket = UnixSeqpacketListener::bind_with_backlog(socket_path, 10).unwrap();
 
-    let cache_persist_period = tokio::time::Duration::from_secs(1 * 60 * 60);
+    let cache_persist_period = tokio::time::Duration::from_secs(60 * 60);
     let mut cache_persist_timer = tokio::time::interval(cache_persist_period);
     cache_persist_timer.tick().await; // discard first tick that fires immediately
 
@@ -326,7 +343,12 @@ async fn main() {
                 break;
             }
             _ = cache_persist_timer.tick() => {
+                let stats = Stats {
+                    img_cache_hit: atomic_take(&counters.img_cache_hit),
+                    img_cache_miss: atomic_take(&counters.img_cache_miss),
+                };
                 info!("client stats {:?}", client.stats().await);
+                info!("img    stats {:?}", stats);
                 // TODO img cache stats
                 info!("saving cache");
                 if let Err(e) = client.persist() {
@@ -340,18 +362,19 @@ async fn main() {
                         let client_ = client.clone();
                         let cache_ = cache.clone();
                         let imgs_dir_ = imgs_dir.clone();
+                        let counters_ = counters.clone();
                         tokio::spawn(async move {
-                            match handle_conn(worker_semaphore_, &conn, client_, cache_, imgs_dir_).await {
+                            match handle_conn(worker_semaphore_, &conn, client_, cache_, imgs_dir_, counters_).await {
                                 Ok((digest, fd)) => match respond_ok(conn, digest, fd).await {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        error!("error sending fd {:?}", e);
+                                        error!("error sending ok {:?}", e);
                                     }
                                 },
                                 Err(e) => match respond_err(conn, e).await {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        error!("error sending error {:?}", e);
+                                        error!("error sending err {:?}", e);
                                     }
                                 },
                             }

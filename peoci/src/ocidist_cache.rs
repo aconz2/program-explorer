@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicU64};
@@ -15,7 +14,11 @@ use rustix::fd::OwnedFd;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::Semaphore;
 
-use crate::{blobcache, blobcache::BlobKey, ocidist};
+use crate::{
+    blobcache,
+    blobcache::{BlobKey, atomic_inc, atomic_take},
+    ocidist, spec,
+};
 
 // This is a caching layer on top of ocidist that stores
 // 1) references: quay.io/fedora/fedora:42 -> sha256:ffffffff
@@ -51,6 +54,9 @@ pub enum Error {
     Errno(#[from] rustix::io::Errno),
     OciSpecError(#[from] OciSpecError),
     AcquireError(#[from] tokio::sync::AcquireError),
+    EncodeError(#[from] bincode::error::EncodeError),
+    DecodeError(#[from] bincode::error::DecodeError),
+    SpecError(#[from] spec::Error),
     OneshotRx,
     OneshotTx,
     NoCacheDir,
@@ -109,24 +115,7 @@ pub struct ClientBuilder {
 
 #[derive(bincode::Encode, bincode::Decode)]
 pub struct PackedImageAndConfiguration {
-    // ideally we would actually store this all in a single buffer but leaving for now
-    digest: String,
-    offset: usize, // offset of configuration
     data: Box<[u8]>,
-}
-
-impl Default for ClientBuilder {
-    fn default() -> ClientBuilder {
-        ClientBuilder {
-            cache_dir: None,
-            load_from_disk: false,
-            ref_capacity: 10_000_000,
-            manifest_capacity: 10_000_000,
-            blob_capacity: 1_000_000_000,
-            max_open_conns: 10,
-            auth: None,
-        }
-    }
 }
 
 struct Dirs {
@@ -165,37 +154,37 @@ pub struct Client {
     blob_cache: Cache<BlobKey, u64>,
 }
 
-// TODO maybe remove the history section from configuration to save some space
+impl Default for ClientBuilder {
+    fn default() -> ClientBuilder {
+        ClientBuilder {
+            cache_dir: None,
+            load_from_disk: false,
+            ref_capacity: 10_000_000,
+            manifest_capacity: 10_000_000,
+            blob_capacity: 1_000_000_000,
+            max_open_conns: 10,
+            auth: None,
+        }
+    }
+}
+
 impl PackedImageAndConfiguration {
     pub fn new(
         digest: &Digest,
-        manifest: impl AsRef<[u8]>,
-        configuration: impl AsRef<[u8]>,
-    ) -> Self {
-        let digest = digest.to_string();
-        let manifest = manifest.as_ref();
-        let configuration = configuration.as_ref();
-        let offset = manifest.len();
-        let mut data = Vec::with_capacity(manifest.len() + configuration.len());
-        data.extend(manifest);
-        data.extend(configuration);
-        Self {
-            digest,
-            offset,
-            data: data.into(),
-        }
+        manifest: &ImageManifest,
+        configuration: &ImageConfiguration,
+    ) -> Result<Self, Error> {
+        let combined = spec::ImageManifestAndConfiguration {
+            manifest_digest: digest.try_into()?,
+            manifest: manifest.try_into()?,
+            configuration: configuration.try_into()?,
+        };
+        let buf = bincode::encode_to_vec(&combined, bincode::config::standard())?;
+        Ok(Self { data: buf.into() })
     }
 
-    pub fn digest(&self) -> Result<Digest, OciSpecError> {
-        self.digest.parse()
-    }
-
-    pub fn manifest(&self) -> Result<ImageManifest, OciSpecError> {
-        ImageManifest::from_reader(Cursor::new(&self.data[..self.offset]))
-    }
-
-    pub fn configuration(&self) -> Result<ImageConfiguration, OciSpecError> {
-        ImageConfiguration::from_reader(Cursor::new(&self.data[self.offset..]))
+    pub fn get(&self) -> Result<spec::ImageManifestAndConfiguration, Error> {
+        Ok(bincode::decode_from_slice(&self.data, bincode::config::standard())?.0)
     }
 }
 
@@ -322,6 +311,8 @@ impl Client {
     pub async fn get_image_manifest_and_configuration(
         &self,
         reference: &Reference,
+        arch: Arch,
+        os: Os,
     ) -> Result<Arc<PackedImageAndConfiguration>, Arc<Error>> {
         // the digest from reference.digest() is not checked for validity in all cases, so if it is
         // present, we first check it. retreive_ref returns a string (since that is what we store
@@ -337,6 +328,8 @@ impl Client {
                     &self.client,
                     &self.connection_semaphore,
                     reference,
+                    arch,
+                    os,
                 ))
                 .await?;
             if entry.is_fresh() {
@@ -358,7 +351,7 @@ impl Client {
         let entry = self
             .manifest_cache
             .entry(digest_string)
-            .or_try_insert_with(retreive_manifest(
+            .or_try_insert_with(retreive_manifest_and_configuration(
                 &self.client,
                 &self.connection_semaphore,
                 &reference,
@@ -433,17 +426,20 @@ impl Client {
     pub async fn get_layers(
         &self,
         reference: &Reference,
-        manifest: &ImageManifest,
+        manifest: &spec::ImageManifest,
     ) -> Result<Vec<OwnedFd>, Arc<Error>> {
         use tokio::task::JoinSet;
         let mut set = JoinSet::new();
-        let n = manifest.layers().len();
-        for (i, layer) in manifest.layers().iter().enumerate() {
+        let n = manifest.layers.len();
+        for (i, layer) in manifest.layers.iter().enumerate() {
             let reference = reference.clone();
-            let descriptor = layer.clone();
+            // TODO we are converting LayerDescriptor to oci_spec::image::Descriptor
+            // can we push this down or make get_blob more generic
+            let descriptor = (*layer).into();
             let client = self.clone();
             set.spawn(async move { (i, client.get_blob(&reference, &descriptor).await) });
         }
+        // todo is there a nicer JoinSet collect into order?
         let mut ret = (0..n).map(|_| None).collect::<Vec<_>>();
         while let Some(next) = set.join_next().await {
             match next {
@@ -561,16 +557,17 @@ impl Client {
     }
 }
 
-// TODO this is hardcoded to amd64+Linux
 async fn retreive_ref(
     client: &ocidist::Client,
     semaphore: &Arc<Semaphore>,
     reference: &Reference,
+    arch: Arch,
+    os: Os,
 ) -> Result<String, Error> {
     let mut client = client.clone();
     let _permit = semaphore.acquire().await?;
     let descriptor = client
-        .get_matching_descriptor_from_index(reference, Arch::Amd64, Os::Linux)
+        .get_matching_descriptor_from_index(reference, arch, os)
         .await?
         .ok_or(Error::ManifestNotFound)?;
     // TODO for some images, is it possible they just don't have an image index and doing
@@ -580,7 +577,7 @@ async fn retreive_ref(
 
 // this reference must have a digest (and we go from string to Digest back to String in the packed
 // representation, but idk what else to do
-async fn retreive_manifest(
+async fn retreive_manifest_and_configuration(
     client: &ocidist::Client,
     semaphore: &Arc<Semaphore>,
     reference: &Reference,
@@ -601,10 +598,9 @@ async fn retreive_manifest(
         .get_image_configuration(reference, manifest.config())
         .await?
         .ok_or(Error::ConfigurationNotFound)?;
-    Ok(
-        PackedImageAndConfiguration::new(&digest, manifest_res.data(), configuration_res.data())
-            .into(),
-    )
+    let configuration = configuration_res.get()?;
+
+    Ok(PackedImageAndConfiguration::new(&digest, &manifest, &configuration)?.into())
 }
 
 async fn retreive_blob(
@@ -632,12 +628,4 @@ async fn retreive_blob(
         return Err(Error::OneshotTx);
     }
     Ok(size as u64)
-}
-
-fn atomic_inc(x: &AtomicU64) {
-    x.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn atomic_take(x: &AtomicU64) -> u64 {
-    x.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
