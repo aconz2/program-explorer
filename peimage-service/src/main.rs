@@ -236,6 +236,13 @@ async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> a
 async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Result<()> {
     error!("responding_err {}", error);
 
+    let wire_response = {
+        // I don't love this, but plumbing up things more directly into either the Ok so that we
+        // consider some "errors" not Err doesn't play well with ? which is nice. This is the
+        // classic thing with web servers too of wanting to use ? but not bubble up too much b/c
+        // you want to send something to the client. Note the Arc too which comes in because moka
+        // Cache or_try_insert_with always returns an Arc error in case there are multiple clients
+        // waiting for the result of a computation, they all get a shared reference
         if let Some(e) = error.downcast_ref::<Arc<ocidist_cache::Error>>() {
             match **e {
                 ocidist_cache::Error::ManifestNotFound => Some(WireResponse::ManifestNotFound),
@@ -305,32 +312,55 @@ async fn main() {
     std::fs::remove_file(socket_path).unwrap();
     let mut socket = UnixSeqpacketListener::bind_with_backlog(socket_path, 10).unwrap();
 
+    let cache_persist_period = tokio::time::Duration::from_secs(1 * 60 * 60);
+    let mut cache_persist_timer = tokio::time::interval(cache_persist_period);
+    cache_persist_timer.tick().await; // discard first tick that fires immediately
+
     loop {
-        match socket.accept().await {
-            Ok(conn) => {
-                let worker_semaphore_ = worker_semaphore.clone();
-                let client_ = client.clone();
-                let cache_ = cache.clone();
-                let imgs_dir_ = imgs_dir.clone();
-                tokio::spawn(async move {
-                    match handle_conn(worker_semaphore_, &conn, client_, cache_, imgs_dir_).await {
-                        Ok((digest, fd)) => match respond_ok(conn, digest, fd).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("error sending fd {:?}", e);
-                            }
-                        },
-                        Err(e) => match respond_err(conn, e).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("error sending error {:?}", e);
-                            }
-                        },
-                    }
-                });
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("got shutdown");
+                if let Err(e) = client.persist() {
+                    error!("error while persisting {e}");
+                }
+                break;
             }
-            Err(e) => {
-                error!("accept {}", e);
+            _ = cache_persist_timer.tick() => {
+                info!("client stats {:?}", client.stats().await);
+                // TODO img cache stats
+                info!("saving cache");
+                if let Err(e) = client.persist() {
+                    error!("error while persisting {e}");
+                }
+            }
+            accept = socket.accept() => {
+                 match accept {
+                    Ok(conn) => {
+                        let worker_semaphore_ = worker_semaphore.clone();
+                        let client_ = client.clone();
+                        let cache_ = cache.clone();
+                        let imgs_dir_ = imgs_dir.clone();
+                        tokio::spawn(async move {
+                            match handle_conn(worker_semaphore_, &conn, client_, cache_, imgs_dir_).await {
+                                Ok((digest, fd)) => match respond_ok(conn, digest, fd).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("error sending fd {:?}", e);
+                                    }
+                                },
+                                Err(e) => match respond_err(conn, e).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("error sending error {:?}", e);
+                                    }
+                                },
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("accept {}", e);
+                    }
+                }
             }
         }
     }
