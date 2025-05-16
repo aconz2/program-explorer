@@ -1,0 +1,3 @@
+[build]
+# need this to get IntoBytes for unions
+rustflags = "--cfg zerocopy_derive_union_into_bytes"
