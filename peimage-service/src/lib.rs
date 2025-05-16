@@ -12,9 +12,13 @@ pub enum Error {
     Decode(#[from] bincode::error::DecodeError),
     BadDigest,
     MissingFd,
-    NoMatchingManifest,
     ServerError(String),
     Unknown,
+
+    // these are the user facing errors
+    NoMatchingManifest,
+    ManifestNotFound,
+    ImageTooBig,
 }
 
 // how wrong is this?
@@ -50,6 +54,8 @@ impl Request {
 pub enum WireResponse {
     Ok { manifest_digest: String },
     NoMatchingManifest,
+    ManifestNotFound,
+    ImageTooBig,
     Err { message: String },
 }
 
@@ -89,6 +95,8 @@ pub async fn request_erofs_image(
             fd,
         }),
         (_, WireResponse::NoMatchingManifest) => Err(Error::NoMatchingManifest),
+        (_, WireResponse::ManifestNotFound) => Err(Error::ManifestNotFound),
+        (_, WireResponse::ImageTooBig) => Err(Error::ImageTooBig),
         (_, WireResponse::Err { message }) => Err(Error::ServerError(message)),
         (None, _) => Err(Error::MissingFd),
     }

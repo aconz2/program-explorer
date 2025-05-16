@@ -29,6 +29,9 @@ use peoci::{
 };
 use perunner::iofile::round_up_file_to_pmem_size;
 
+// this is the max erofs image size (of just the file data portion)
+const MAX_IMAGE_SIZE: u64 = 3_000_000_000;
+
 // TODO
 // can we bound/check up front how large the image will be and error out if too big?
 // when looking at the layers individually, we can determinte
@@ -49,12 +52,20 @@ enum Error {
     BadDigest,
     BadReference,
     BadLayerType(#[from] peoci::compression::Error),
-    OneshotSend,
+    OneshotTx,
+    OneshotRx,
     MissingFile,
     OpenFile,
+    //Anyhow(#[from] anyhow::Error),
     // not sure a better way to handle this
-    #[error(transparent)]
+    //#[error(transparent)]
     Arc(#[from] Arc<anyhow::Error>),
+    //ArcSelf(#[from] Arc<Error>),
+    //Errno(#[from] rustix::io::Errno),
+    //Io(#[from] std::io::Error),
+    //Join(#[from] tokio::task::JoinError),
+    //Squash(#[from] peimage::squash::Error),
+    //OciSpecError(#[from] oci_spec::OciSpecError),
 }
 
 // how wrong is this?
@@ -101,11 +112,11 @@ async fn handle_conn(
     let entry = img_cache
         .entry_by_ref(&key)
         .or_try_insert_with(make_erofs_image(
-            worker_semaphore.clone(),
-            client.clone(),
+            worker_semaphore,
+            client,
             &reference,
             &manifest,
-            imgs_dir.clone(),
+            &imgs_dir,
             &key,
             fd_tx,
         ))
@@ -116,7 +127,7 @@ async fn handle_conn(
         //atomic_inc(&self.counters.blob_cache_miss);
         let size = *entry.value();
         info!("img_cache miss digest={digest} size={size}");
-        let fd = fd_rx.await?;
+        let fd = fd_rx.await.map_err(|_| Error::OneshotRx)?;
         Ok((digest, fd))
     } else {
         //atomic_inc(&self.counters.blob_cache_hit);
@@ -133,8 +144,6 @@ async fn handle_conn(
             }
         }
     }
-
-
 }
 
 async fn make_erofs_image(
@@ -142,31 +151,30 @@ async fn make_erofs_image(
     client: Client,
     reference: &Reference,
     manifest: &ImageManifest,
-    imgs_dir: Arc<OwnedFd>,
+    imgs_dir: &Arc<OwnedFd>,
     key: &BlobKey,
     fd_tx: tokio::sync::oneshot::Sender<OwnedFd>,
 ) -> anyhow::Result<u64> {
     let key = key.clone();
-    let manifest = manifest.clone();
-    let fds = client.get_layers(reference, &manifest).await?;
+    let fds = client.get_layers(reference, manifest).await?;
+    let mut layers: Vec<_> = manifest
+        .layers()
+        .iter()
+        .zip(fds.into_iter())
+        .map(|(descriptor, fd)| -> Result<_, Error> {
+            let comp: Compression = descriptor.try_into()?;
+            let reader: File = fd.into();
+            Ok((comp, reader))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let imgs_dir = imgs_dir.clone();
 
     let _guard = worker_semaphore.acquire().await;
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
         let (mut file, guard) = blobcache::openat_create_write_with_guard(&imgs_dir, &key)?;
 
-        let mut layers: Vec<_> = manifest
-            .layers()
-            .iter()
-            .zip(fds.into_iter())
-            .map(|(descriptor, fd)| -> Result<_, Error> {
-                let comp: Compression = descriptor.try_into()?;
-                let reader: File = fd.into();
-                Ok((comp, reader))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         let t0 = Instant::now();
-        let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, &mut file)?;
+        let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, &mut file, Some(MAX_IMAGE_SIZE))?;
         let elapsed = t0.elapsed().as_secs_f32();
         guard.success()?;
         round_up_file_to_pmem_size(&file)?;
@@ -175,7 +183,7 @@ async fn make_erofs_image(
         file.rewind()?;
         info!("built image for {key} size={size} Squash{squash_stats:?} Erofs{erofs_stats:?} in {elapsed:.2}s");
         if fd_tx.send(file.into()).is_err() {
-            return Err(Error::OneshotSend.into());
+            return Err(Error::OneshotTx.into());
         }
         Ok(size)
     })
@@ -227,21 +235,27 @@ async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> a
 
 async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Result<()> {
     error!("responding_err {}", error);
-    let wire_response = {
-        // TODO this isn't working, I want a few errors to be propagated so that the api can return
-        // something helpful when possible, basically
-        // - your reference doesn't exist
-        // - your reference exists but not for amd64+linux
-        // - your image was too big
-        // maybe we shouldn't take in anyhow here
-        if let Some(&ocidist_cache::Error::NoMatchingManifest) = error.downcast_ref::<ocidist_cache::Error>() {
-            WireResponse::NoMatchingManifest
-        } else {
-            WireResponse::Err {
-                message: "unexpected error".to_string(),
+
+        if let Some(e) = error.downcast_ref::<Arc<ocidist_cache::Error>>() {
+            match **e {
+                ocidist_cache::Error::ManifestNotFound => Some(WireResponse::ManifestNotFound),
+                ocidist_cache::Error::NoMatchingManifest => Some(WireResponse::NoMatchingManifest),
+                _ => None,
             }
+        } else if let Some(e) = error.downcast_ref::<Arc<peimage::squash::Error>>() {
+            match **e {
+                peimage::squash::Error::Erofs(peerofs::build::Error::MaxSizeExceeded) => {
+                    Some(WireResponse::ImageTooBig)
+                }
+                _ => None,
+            }
+        } else {
+            None
         }
-    };
+    }
+    .unwrap_or_else(|| WireResponse::Err {
+        message: "unexpected error".to_string(),
+    });
     let mut buf = [0; 1024];
     let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
     conn.send(&buf[..n]).await?;

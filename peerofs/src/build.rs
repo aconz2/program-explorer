@@ -118,6 +118,7 @@ pub enum Error {
     TooManyXattrs,
     ModeShouldFitInU16,
     DirDiskIdMismatch { expected: Option<u32>, got: u32 },
+    MaxSizeExceeded,
     Oob,
     Other(String),
     Io(#[from] std::io::Error),
@@ -154,6 +155,8 @@ pub struct Builder<W: Write + Seek> {
     inode_addr: u64,
     stats: Stats,
     max_depth: usize,
+    max_file_size: u64,
+    cur_file_size: u64,
 }
 
 pub type XattrMap = BTreeMap<Box<[u8]>, Box<[u8]>>;
@@ -717,7 +720,7 @@ impl Dir {
 }
 
 impl<W: Write + Seek> Builder<W> {
-    pub fn new(writer: W) -> Result<Self, Error> {
+    pub fn new(writer: W, max_file_size: Option<u64>) -> Result<Self, Error> {
         let block_size_bits = 12; // TODO configurable
         let mut ret = Builder {
             root: Some(Root::default()),
@@ -734,6 +737,8 @@ impl<W: Write + Seek> Builder<W> {
             inode_addr: 0,
             stats: Stats::default(),
             max_depth: MAX_DEPTH,
+            max_file_size: max_file_size.unwrap_or(u64::MAX),
+            cur_file_size: 0,
         };
         // manually advance to first block
         ret.writer
@@ -805,9 +810,11 @@ impl<W: Write + Seek> Builder<W> {
         len: usize,
         contents: &mut R,
     ) -> Result<(), Error> {
+        if self.cur_file_size.saturating_add(len as u64) >= self.max_file_size {
+            return Err(Error::MaxSizeExceeded);
+        }
+
         let (n_blocks, block_len, tail_len) = size_tail_len(len, self.block_size_bits);
-        // TODO maybe only store start_block if we use it, there's nothing bad that would happen
-        // but seems a bit cleaner
         if cfg!(debug_assertions) {
             let cur = self.writer.stream_position()?;
             if cur % self.block_size() != 0 {
@@ -826,6 +833,7 @@ impl<W: Write + Seek> Builder<W> {
                 );
             }
         }
+
         let start_block = if block_len > 0 {
             self.cur_data_block
                 .try_into()

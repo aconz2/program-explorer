@@ -12,8 +12,8 @@ use oci_spec::{
     image::{Arch, Descriptor, Digest, ImageConfiguration, ImageManifest, Os},
 };
 use rustix::fd::OwnedFd;
-use tokio::sync::Semaphore;
 use tokio::io::AsyncSeekExt;
+use tokio::sync::Semaphore;
 
 use crate::{blobcache, blobcache::BlobKey, ocidist};
 
@@ -77,7 +77,7 @@ pub enum Error {
 // how wrong is this?
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "ocidist_cache::Error::{:?}", self)
     }
 }
 
@@ -334,8 +334,8 @@ impl Client {
                 .ref_cache
                 .entry(reference.to_string())
                 .or_try_insert_with(retreive_ref(
-                    self.client.clone(),
-                    self.connection_semaphore.clone(),
+                    &self.client,
+                    &self.connection_semaphore,
                     reference,
                 ))
                 .await?;
@@ -359,8 +359,8 @@ impl Client {
             .manifest_cache
             .entry(digest_string)
             .or_try_insert_with(retreive_manifest(
-                self.client.clone(),
-                self.connection_semaphore.clone(),
+                &self.client,
+                &self.connection_semaphore,
                 &reference,
             ))
             .await?;
@@ -386,8 +386,8 @@ impl Client {
             .blob_cache
             .entry_by_ref(&key)
             .or_try_insert_with(retreive_blob(
-                self.client.clone(),
-                self.connection_semaphore.clone(),
+                &self.client,
+                &self.connection_semaphore,
                 reference,
                 descriptor,
                 &self.dirs.blobs,
@@ -563,25 +563,29 @@ impl Client {
 
 // TODO this is hardcoded to amd64+Linux
 async fn retreive_ref(
-    mut client: ocidist::Client,
-    semaphore: Arc<Semaphore>,
+    client: &ocidist::Client,
+    semaphore: &Arc<Semaphore>,
     reference: &Reference,
 ) -> Result<String, Error> {
+    let mut client = client.clone();
     let _permit = semaphore.acquire().await?;
     let descriptor = client
         .get_matching_descriptor_from_index(reference, Arch::Amd64, Os::Linux)
         .await?
-        .ok_or(Error::NoMatchingManifest)?;
+        .ok_or(Error::ManifestNotFound)?;
+    // TODO for some images, is it possible they just don't have an image index and doing
+    // get_image_manifest directly would work?
     Ok(descriptor.digest().to_string())
 }
 
 // this reference must have a digest (and we go from string to Digest back to String in the packed
 // representation, but idk what else to do
 async fn retreive_manifest(
-    mut client: ocidist::Client,
-    semaphore: Arc<Semaphore>,
+    client: &ocidist::Client,
+    semaphore: &Arc<Semaphore>,
     reference: &Reference,
 ) -> Result<Arc<PackedImageAndConfiguration>, Error> {
+    let mut client = client.clone();
     let digest: Digest = reference
         .digest()
         .ok_or(Error::MissingDigest)?
@@ -604,14 +608,15 @@ async fn retreive_manifest(
 }
 
 async fn retreive_blob(
-    mut client: ocidist::Client,
-    semaphore: Arc<Semaphore>,
+    client: &ocidist::Client,
+    semaphore: &Arc<Semaphore>,
     reference: &Reference,
     descriptor: &Descriptor,
     blob_dir: &OwnedFd,
     key: &BlobKey,
     fd_tx: tokio::sync::oneshot::Sender<OwnedFd>,
 ) -> Result<u64, Error> {
+    let mut client = client.clone();
     let _permit = semaphore.acquire().await?;
     let (mut file, guard) = blobcache::openat_create_write_async_with_guard(blob_dir, key)?;
     let mut bw = tokio::io::BufWriter::with_capacity(32 * 1024, &mut file);

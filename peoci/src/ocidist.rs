@@ -46,6 +46,7 @@ pub enum Error {
     BadImageIndex,
     InvalidAuth,
     Unknown,
+    NoMatchingManifest,
     NoImageIndexForRefWithDigest,
     DomainNotSupported(String),
     BadContentType(String),
@@ -268,7 +269,7 @@ impl Client {
     ) -> Result<Option<Descriptor>, Error> {
         if let Some(index) = self.get_image_index(reference).await? {
             let index = index.get()?;
-            index
+            let descriptor = index
                 .manifests()
                 .iter()
                 .find(|descriptor| {
@@ -277,9 +278,15 @@ impl Client {
                         .as_ref()
                         .map(|platform| *platform.architecture() == arch && *platform.os() == os)
                         .unwrap_or(false)
-                })
-                .map(|descriptor| Ok(descriptor.clone()))
-                .transpose()
+                });
+                //.map(|descriptor| Ok(descriptor.clone()))
+                //.map(|descriptor| descriptor.clone())
+                //.transpose()
+            if let Some(descriptor) = descriptor {
+                Ok(Some(descriptor.clone()))
+            } else {
+                Err(Error::NoMatchingManifest)
+            }
         } else {
             Ok(None)
         }

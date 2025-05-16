@@ -278,13 +278,14 @@ impl<W: Write + Seek> EntryCallback for SquashToErofs<W> {
 pub fn squash_to_erofs<W, R>(
     layer_readers: &mut [(Compression, R)],
     out: &mut W,
+    max_file_size: Option<u64>,
 ) -> Result<(Stats, ErofsStats), Error>
 where
     W: Write + Seek,
     R: Read,
 {
     let mut helper = SquashToErofs {
-        builder: ErofsBuilder::new(out)?,
+        builder: ErofsBuilder::new(out, max_file_size)?,
     };
     let squash_stats = squash_cb(layer_readers, &mut helper)?;
     let (erofs_stats, _) = helper.builder.into_inner()?;
