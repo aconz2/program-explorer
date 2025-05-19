@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use log::{error, trace};
+use log::{error, trace, info};
 use moka::{Expiry, future::Cache};
 use oci_spec::{
     OciSpecError,
@@ -492,6 +492,28 @@ impl Client {
         }
 
         let res = req.send().await?;
+
+        // ghcr apparently returns either 403 or 429
+        if res.status() == StatusCode::FORBIDDEN || res.status() == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(ratelimit_remaining) = get_ratelimit_remaining_header(res.headers()) {
+                info!("parsed ratelimit header {:?}", ratelimit_remaining);
+            }
+            for (header, value) in res.headers().iter() {
+                if header.as_str().contains("ratelimit") {
+                    info!("ratelimit header {}: {:?}", header, value);
+                }
+            }
+        }
+
+        if log::log_enabled!(log::Level::Trace) {
+            for (header, value) in res.headers().iter() {
+                trace!("header {}: {:?}", header, value);
+                //if header.as_str().contains("ratelimit") {
+                //    trace!("ratelimit header| {}: {:?}", header, value);
+                //}
+            }
+        }
+
         if res.status() != StatusCode::UNAUTHORIZED {
             return Ok(res);
         }
@@ -707,6 +729,84 @@ fn parse_www_authenticate_bearer_str(input: &str) -> Option<WWWAuthenticateBeare
     Some(ret)
 }
 
+// treating ratelimit as one word b/c that is what the http header does
+//
+// github doesn't (I don't think) use a window in the header value and the docs suggest the default
+// is one hour
+const DEFAULT_RATELIMIT_WINDOW: u32 = 60 * 60; // 1 hour in seconds
+
+#[derive(Debug, PartialEq, Eq)]
+struct RatelimitRemaining {
+    quota: u32,  // units
+    window: Option<u32>,
+}
+
+impl RatelimitRemaining {
+    fn window_duration(&self) -> Duration {
+        Duration::from_secs(self.window.unwrap_or(DEFAULT_RATELIMIT_WINDOW) as u64)
+    }
+}
+
+fn get_ratelimit_remaining_header(map: &reqwest::header::HeaderMap) -> Option<RatelimitRemaining> {
+    if let Some(value) = map.get("ratelimit-remaining") {
+        parse_ratelimit_remaining_header(value)
+    } else if let Some(value) = map.get("x-ratelimit-remaining") {
+        parse_ratelimit_remaining_header(value)
+    } else {
+        None
+    }
+}
+
+fn parse_ratelimit_remaining_header(input: &HeaderValue) -> Option<RatelimitRemaining> {
+    parse_ratelimit_remaining_str(input.to_str().ok()?)
+}
+
+fn parse_ratelimit_remaining_str(input: &str) -> Option<RatelimitRemaining> {
+    // nom not so nice here
+    //use nom::{
+    //    IResult, Parser,
+    //    bytes::{complete::tag, take_while},
+    //    character::complete::{digit1},
+    //    sequence::{preceded},
+    //    combinator::{map_res,opt},
+    //};
+    //fn parser(input: &str) -> IResult<&str, (u32, Option<u32>)> {
+    //    let (input, quota) : (_, u32) = map_res(digit1, str::parse).parse(input)?;
+    //    let (input, window) = opt(preceded(tag(";w="), map_res(digit1, str::parse))).parse(input)?;
+    //    Ok((input, (quota, window)))
+    //}
+    //let (_, (quota, window)) = parser(input).ok()?;
+    //Some(RatelimitRemaining {
+    //    quota, window
+    //})
+    if let Some((l, r)) = input.split_once(";w=") {
+        let quota = l.parse().ok()?;
+        let window = Some(r.parse().ok()?);
+        Some(RatelimitRemaining{quota, window})
+    } else {
+        let quota = input.parse().ok()?;
+        Some(RatelimitRemaining{quota, window: None})
+    }
+}
+
+fn get_ratelimit_reset_header(map: &reqwest::header::HeaderMap) -> Option<u32> {
+    if let Some(value) = map.get("ratelimit-remaining") {
+        parse_ratelimit_reset_header(value)
+    } else if let Some(value) = map.get("x-ratelimit-remaining") {
+        parse_ratelimit_reset_header(value)
+    } else {
+        None
+    }
+}
+
+fn parse_ratelimit_reset_header(input: &HeaderValue) -> Option<u32> {
+    parse_ratelimit_reset_str(input.to_str().ok()?)
+}
+
+fn parse_ratelimit_reset_str(input: &str) -> Option<u32> {
+    input.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +865,13 @@ mod tests {
                 case
             );
         }
+    }
+
+    #[test]
+    fn test_ratelimit_remaining() {
+        assert_eq!(RatelimitRemaining{quota: 100, window: None}, parse_ratelimit_remaining_str("100").unwrap());
+        assert_eq!(RatelimitRemaining{quota: 100, window: Some(3600)}, parse_ratelimit_remaining_str("100;w=3600").unwrap());
+        assert_eq!(None, parse_ratelimit_remaining_str("x100;w=3600"));
+        assert_eq!(None, parse_ratelimit_remaining_str("100x;w=3600"));
     }
 }

@@ -10,6 +10,7 @@ use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
 };
+use clap::Parser;
 
 use peoci::ocidist::{Auth, AuthMap};
 
@@ -29,12 +30,28 @@ fn load_stored_auth(p: impl AsRef<Path>) -> AuthMap {
         .collect()
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    image_ref: String,
+
+    #[arg(long, default_value = "false")]
+    blobs: bool,
+
+    #[arg(long, default_value = "true", action=clap::ArgAction::Set)]
+    cache: bool,
+
+    #[arg(long)]
+    outfile: Option<String>,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
 
-    let args: Vec<_> = std::env::args().collect();
-    let image_ref: Reference = args.get(1).expect("give me an image ref").parse().unwrap();
+    let args = Args::parse();
+
+    let image_ref: Reference = args.image_ref.parse().unwrap();
 
     let auth = if let Some(v) =
         std::env::vars().find_map(|(k, v)| if k == "PEOCI_AUTH" { Some(v) } else { None })
@@ -46,9 +63,7 @@ async fn main() {
 
     println!("{:?}", image_ref);
 
-    let cache = true;
-
-    if cache {
+    if args.cache {
         let peoci_cache_dir = std::env::vars()
             .find(|(k, _v)| k == "PEOCI_CACHE")
             .map(|(_, v)| Path::new(&v).to_owned())
@@ -86,11 +101,13 @@ async fn main() {
         //    .unwrap();
         //println!("got blob {:?}", manifest.layers()[0].digest());
 
-        let layers = client
-            .get_layers(&image_ref, &manifest_config.manifest)
-            .await
-            .unwrap();
-        println!("got layers {:?}", layers);
+        if args.blobs {
+            let layers = client
+                .get_layers(&image_ref, &manifest_config.manifest)
+                .await
+                .unwrap();
+            println!("got layers {:?}", layers);
+        }
 
         println!("{:#?}", client.stats().await);
 
@@ -100,7 +117,7 @@ async fn main() {
 
         client.set_auth(auth).await;
 
-        let outfile = args.get(2);
+        let outfile = args.outfile;
 
         let image_ref = if image_ref.digest().is_some() {
             image_ref

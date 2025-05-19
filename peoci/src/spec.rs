@@ -1,7 +1,13 @@
 use bincode::{Decode, Encode};
 
-// this is a redux version of some oci_spec types that implement bincode::Encode/Decode with
-// borrowing, we omit some fields to save space in the cache
+// this is a redux version of some oci_spec types that implement bincode::Encode/Decode
+// we omit some fields to save space in the cache
+// really it would be better to have
+// a) a type that decodes the info we need from the registry OCI json response (ideally with
+// borrowing since we're reading the whole response into a buffer)
+// b) a type that decodes these redux types from the stored buffer from the cache
+// because there are Vec a plenty, I presume something like flexbuffer is maybe the right thing
+// I think this is overkill (more than I've already done) so leaving for now
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
