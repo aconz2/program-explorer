@@ -3,8 +3,9 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
-use log::{error, trace, info};
+use log::{error, info, trace, warn};
 use moka::{Expiry, future::Cache};
 use oci_spec::{
     OciSpecError,
@@ -14,7 +15,7 @@ use oci_spec::{
         Os,
     },
 };
-use reqwest::{Method, StatusCode, header, header::HeaderValue};
+use reqwest::{Method, Response, StatusCode, header, header::HeaderValue};
 use serde::Deserialize;
 use sha2::Sha256;
 use tokio::{
@@ -48,6 +49,7 @@ pub enum Error {
     Unknown,
     NoMatchingManifest,
     NoImageIndexForRefWithDigest,
+    RatelimitExceeded,
     DomainNotSupported(String),
     BadContentType(String),
     DigestAlgorithmNotHandled(DigestAlgorithm),
@@ -61,6 +63,13 @@ impl std::fmt::Display for Error {
         write!(f, "{:?}", self)
     }
 }
+
+// NOTES
+// for both ocidist::Client and ocidst_cache::Client, the whole thing is Clone, mostly modeled
+// after moka::Cache being clone and using interior mutability so that everything takes &self
+// idk if this is "right" and whether the type should rather be a single field of Arc with more
+// things inside. Also idk if Arc<ArcSwap<_>> is a good idiom but follows from each field being
+// Clone
 
 // our key is index.docker.io/library/gcc for example
 // does not include scope because we are always just pulling
@@ -107,12 +116,14 @@ pub enum Auth {
 }
 
 pub type AuthMap = BTreeMap<String, Auth>;
+pub type RatelimitMap = BTreeMap<String, Instant>;
 
 #[derive(Clone)]
 pub struct Client {
     client: reqwest::Client,
     token_cache: Cache<TokenCacheKey, Token>,
-    auth_store: Arc<RwLock<AuthMap>>,
+    auth_store: Arc<ArcSwap<AuthMap>>,
+    ratelimit: Arc<RwLock<RatelimitMap>>,
 }
 
 pub struct ImageManifestResponse {
@@ -207,21 +218,24 @@ impl Client {
             .expire_after(ExpireToken)
             .build();
 
-        let auth_store = Arc::new(BTreeMap::new().into());
+        let auth_store = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+        let ratelimit = Arc::new(RwLock::new(BTreeMap::new()));
 
         Ok(Client {
             client,
             token_cache,
             auth_store,
+            ratelimit,
         })
     }
 
     pub async fn set_auth(&self, auth: AuthMap) {
-        *self.auth_store.write().await = auth;
+        //*self.auth_store.write().await = auth;
+        self.auth_store.store(auth.into());
     }
 
     pub async fn get_image_manifest(
-        &mut self,
+        &self,
         reference: &Reference,
     ) -> Result<Option<ImageManifestResponse>, Error> {
         self.get_manifest(reference, ACCEPTED_IMAGE_MANIFEST)
@@ -245,7 +259,7 @@ impl Client {
     }
 
     pub async fn get_image_index(
-        &mut self,
+        &self,
         reference: &Reference,
     ) -> Result<Option<ImageIndexResponse>, Error> {
         if reference.digest().is_some() {
@@ -266,7 +280,7 @@ impl Client {
     }
 
     pub async fn get_matching_descriptor_from_index(
-        &mut self,
+        &self,
         reference: &Reference,
         arch: Arch,
         os: Os,
@@ -294,7 +308,7 @@ impl Client {
     }
 
     pub async fn get_image_configuration(
-        &mut self,
+        &self,
         reference: &Reference,
         descriptor: &Descriptor,
     ) -> Result<Option<ImageConfigurationResponse>, Error> {
@@ -322,7 +336,7 @@ impl Client {
     // one nagging thing here is that ideally we could take Reference or Reference+Digest or
     // Reference+Descriptor
     async fn get_manifest(
-        &mut self,
+        &self,
         reference: &Reference,
         accept: &str,
     ) -> Result<Option<(String, Option<Digest>, Bytes)>, Error> {
@@ -368,7 +382,7 @@ impl Client {
     }
 
     pub async fn get_blob(
-        &mut self,
+        &self,
         reference: &Reference,
         descriptor: &Descriptor,
         writer: &mut (impl AsyncWrite + std::marker::Unpin),
@@ -418,7 +432,7 @@ impl Client {
     }
 
     async fn request_blob(
-        &mut self,
+        &self,
         reference: &Reference,
         descriptor: &Descriptor,
     ) -> Result<reqwest::Response, Error> {
@@ -440,7 +454,8 @@ impl Client {
         www_auth: &WWWAuthenticateBearerRealmService<'_>,
     ) -> Result<Option<Token>, Error> {
         let registry = reference.resolve_registry();
-        match self.auth_store.read().await.get(registry) {
+        //match self.auth_store.read().await.get(registry) {
+        match self.auth_store.load().get(registry) {
             Some(Auth::None) => Ok(None),
             Some(Auth::UserPass(user, pass)) => {
                 let entry = self
@@ -479,10 +494,13 @@ impl Client {
     // the cache correctly); but we have to fail the request to properly get the www-auth so idk
     // what else to do. Maybe we cache the www-auth per domain? idk
     async fn auth_and_retry(
-        &mut self,
+        &self,
         reference: &Reference,
         mut req: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, Error> {
+
+        self.check_ratelimit(reference).await?;
+
         // this is safe because we are only doing GET's
         // not sure if there is a better way to retry than cloning up front
         let req_copy = req.try_clone().unwrap();
@@ -493,24 +511,11 @@ impl Client {
 
         let res = req.send().await?;
 
-        // ghcr apparently returns either 403 or 429
-        if res.status() == StatusCode::FORBIDDEN || res.status() == StatusCode::TOO_MANY_REQUESTS {
-            if let Some(ratelimit_remaining) = get_ratelimit_remaining_header(res.headers()) {
-                info!("parsed ratelimit header {:?}", ratelimit_remaining);
-            }
-            for (header, value) in res.headers().iter() {
-                if header.as_str().contains("ratelimit") {
-                    info!("ratelimit header {}: {:?}", header, value);
-                }
-            }
-        }
+        self.handle_ratelimit(reference, &res).await?;
 
         if log::log_enabled!(log::Level::Trace) {
             for (header, value) in res.headers().iter() {
                 trace!("header {}: {:?}", header, value);
-                //if header.as_str().contains("ratelimit") {
-                //    trace!("ratelimit header| {}: {:?}", header, value);
-                //}
             }
         }
 
@@ -535,11 +540,63 @@ impl Client {
             .await?
             .ok_or(Error::StatusNotOk(StatusCode::UNAUTHORIZED))?;
 
-        req_copy
-            .bearer_auth(token.token)
-            .send()
-            .await
-            .map_err(Into::into)
+        let res = req_copy.bearer_auth(token.token).send().await?;
+
+        self.handle_ratelimit(reference, &res).await?;
+
+        Ok(res)
+    }
+
+    async fn check_ratelimit(&self, reference: &Reference) -> Result<(), Error> {
+        let mut remove = false;
+        let registry = reference.resolve_registry();
+        if let Some(ratelimit_end) = self.ratelimit.read().await.get(registry) {
+            if Instant::now() < *ratelimit_end {
+                warn!("still in ratelimit reset period");
+                return Err(Error::RatelimitExceeded);
+            } else {
+                remove = true;
+            }
+        }
+        if remove {
+            self.ratelimit.write().await.remove(registry);
+        }
+        Ok(())
+    }
+
+    async fn handle_ratelimit(&self, reference: &Reference, res: &Response) -> Result<(), Error> {
+        // ghcr apparently returns either 403 or 429
+        if res.status() == StatusCode::FORBIDDEN || res.status() == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(ratelimit_remaining) = get_ratelimit_remaining_header(res.headers()) {
+                info!("parsed ratelimit header {:?}", ratelimit_remaining);
+            }
+            for (header, value) in res.headers().iter() {
+                if header.as_str().contains("ratelimit") {
+                    info!("ratelimit header {}: {:?}", header, value);
+                }
+            }
+
+            let registry = reference.resolve_registry();
+            let ratelimit_reset = get_ratelimit_reset_header(res.headers()).unwrap_or_else(|| {
+                warn!(
+                    "got res status {} from {} but no ratelimit-reset",
+                    res.status(),
+                    registry
+                );
+                DEFAULT_RATELIMIT_RESET
+            });
+            warn!(
+                "hit ratelimit when registry={} res.url={} reset={}",
+                registry,
+                res.url(),
+                ratelimit_reset
+            );
+            let rate_end = Instant::now() + Duration::from_secs(ratelimit_reset as u64);
+            let mut rm = self.ratelimit.write().await;
+            rm.insert(registry.to_string(), rate_end);
+            return Err(Error::RatelimitExceeded);
+        }
+        Ok(())
     }
 }
 
@@ -734,10 +791,12 @@ fn parse_www_authenticate_bearer_str(input: &str) -> Option<WWWAuthenticateBeare
 // github doesn't (I don't think) use a window in the header value and the docs suggest the default
 // is one hour
 const DEFAULT_RATELIMIT_WINDOW: u32 = 60 * 60; // 1 hour in seconds
+// if they don't send ratelimit-reset, default to 1 minute (guessing)
+const DEFAULT_RATELIMIT_RESET: u32 = 60;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RatelimitRemaining {
-    quota: u32,  // units
+    quota: u32, // units
     window: Option<u32>,
 }
 
@@ -782,10 +841,13 @@ fn parse_ratelimit_remaining_str(input: &str) -> Option<RatelimitRemaining> {
     if let Some((l, r)) = input.split_once(";w=") {
         let quota = l.parse().ok()?;
         let window = Some(r.parse().ok()?);
-        Some(RatelimitRemaining{quota, window})
+        Some(RatelimitRemaining { quota, window })
     } else {
         let quota = input.parse().ok()?;
-        Some(RatelimitRemaining{quota, window: None})
+        Some(RatelimitRemaining {
+            quota,
+            window: None,
+        })
     }
 }
 
@@ -869,8 +931,20 @@ mod tests {
 
     #[test]
     fn test_ratelimit_remaining() {
-        assert_eq!(RatelimitRemaining{quota: 100, window: None}, parse_ratelimit_remaining_str("100").unwrap());
-        assert_eq!(RatelimitRemaining{quota: 100, window: Some(3600)}, parse_ratelimit_remaining_str("100;w=3600").unwrap());
+        assert_eq!(
+            RatelimitRemaining {
+                quota: 100,
+                window: None
+            },
+            parse_ratelimit_remaining_str("100").unwrap()
+        );
+        assert_eq!(
+            RatelimitRemaining {
+                quota: 100,
+                window: Some(3600)
+            },
+            parse_ratelimit_remaining_str("100;w=3600").unwrap()
+        );
         assert_eq!(None, parse_ratelimit_remaining_str("x100;w=3600"));
         assert_eq!(None, parse_ratelimit_remaining_str("100x;w=3600"));
     }

@@ -23,6 +23,7 @@ use peoci::{
     blobcache,
     blobcache::{BlobKey, atomic_inc, atomic_take},
     compression::Compression,
+    ocidist,
     ocidist::{Auth, AuthMap},
     ocidist_cache,
     ocidist_cache::Client,
@@ -244,6 +245,7 @@ async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> a
     Ok(())
 }
 
+// these errors are super leaky but not sure something nicer right now
 async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Result<()> {
     error!("responding_err {}", error);
 
@@ -258,6 +260,9 @@ async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Resul
             match **e {
                 ocidist_cache::Error::ManifestNotFound => Some(WireResponse::ManifestNotFound),
                 ocidist_cache::Error::NoMatchingManifest => Some(WireResponse::NoMatchingManifest),
+                ocidist_cache::Error::ClientError(ocidist::Error::RatelimitExceeded) => {
+                    Some(WireResponse::RatelimitExceeded)
+                }
                 _ => None,
             }
         } else if let Some(e) = error.downcast_ref::<Arc<Error>>() {

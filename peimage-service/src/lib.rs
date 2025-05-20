@@ -22,6 +22,7 @@ pub enum Error {
     NoMatchingManifest,
     ManifestNotFound,
     ImageTooBig,
+    RatelimitExceeded,
 }
 
 // how wrong is this?
@@ -63,6 +64,7 @@ pub enum WireResponse {
     NoMatchingManifest,
     ManifestNotFound,
     ImageTooBig,
+    RatelimitExceeded,
     Err { message: String },
 }
 
@@ -104,6 +106,7 @@ pub async fn request_erofs_image(
         (_, WireResponse::NoMatchingManifest) => Err(Error::NoMatchingManifest),
         (_, WireResponse::ManifestNotFound) => Err(Error::ManifestNotFound),
         (_, WireResponse::ImageTooBig) => Err(Error::ImageTooBig),
+        (_, WireResponse::RatelimitExceeded) => Err(Error::RatelimitExceeded),
         (_, WireResponse::Err { message }) => Err(Error::ServerError(message)),
         (None, _) => Err(Error::MissingFd),
     }

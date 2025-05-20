@@ -1848,6 +1848,7 @@ dependencies = [
 name = "peoci"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bincode 2.0.1",
  "bytes",
  "clap 4.5.38",

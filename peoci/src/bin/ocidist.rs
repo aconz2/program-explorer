@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
+use clap::Parser;
 use oci_spec::{
     distribution::Reference,
     image::{Arch, Os},
@@ -10,7 +13,6 @@ use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
 };
-use clap::Parser;
 
 use peoci::ocidist::{Auth, AuthMap};
 
@@ -35,11 +37,14 @@ fn load_stored_auth(p: impl AsRef<Path>) -> AuthMap {
 struct Args {
     image_ref: String,
 
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     blobs: bool,
 
     #[arg(long, default_value = "true", action=clap::ArgAction::Set)]
     cache: bool,
+
+    #[arg(long)]
+    json: bool,
 
     #[arg(long)]
     outfile: Option<String>,
@@ -113,7 +118,11 @@ async fn main() {
 
         client.persist().unwrap();
     } else {
-        let mut client = peoci::ocidist::Client::new().unwrap();
+        let client = peoci::ocidist::Client::new().unwrap();
+
+        // manual testing
+        //use std::time::{Instant, Duration};
+        //client.ratelimit.write().await.insert("index.docker.io".to_string(), Instant::now() + Duration::from_secs(30));
 
         client.set_auth(auth).await;
 
@@ -136,7 +145,11 @@ async fn main() {
             .unwrap()
             .unwrap();
         let manifest = manifest_response.get().unwrap();
-        println!("got manifest {:#?}", manifest);
+        if args.json {
+            jq(manifest_response.data());
+        } else {
+            println!("got manifest {:#?}", manifest);
+        }
 
         let configuration_response = client
             .get_image_configuration(&image_ref, manifest.config())
@@ -144,7 +157,11 @@ async fn main() {
             .unwrap()
             .unwrap();
         let config = configuration_response.get().unwrap();
-        println!("got configuration {:#?}", config);
+        if args.json {
+            jq(manifest_response.data());
+        } else {
+            println!("got configuration {:#?}", config);
+        }
 
         if let Some(outfile) = outfile {
             let mut writer = BufWriter::new(File::create(outfile).await.unwrap());
@@ -161,4 +178,10 @@ async fn main() {
             );
         }
     }
+}
+
+fn jq(buf: impl AsRef<[u8]>) {
+    let mut child = Command::new("jq").stdin(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(buf.as_ref()).unwrap();
+    child.wait().unwrap();
 }
