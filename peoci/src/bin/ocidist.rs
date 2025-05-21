@@ -158,7 +158,7 @@ async fn main() {
             .unwrap();
         let config = configuration_response.get().unwrap();
         if args.json {
-            jq(manifest_response.data());
+            jq(configuration_response.data());
         } else {
             println!("got configuration {:#?}", config);
         }

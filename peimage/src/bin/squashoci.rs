@@ -24,8 +24,9 @@ fn main() {
         let stats = squash_to_tar(&mut readers, &mut out).unwrap();
         eprintln!("{stats:?}");
     } else if output.ends_with(".erofs") {
-        let mut out = File::create(output).unwrap();
-        let (squash_stats, erofs_stats) = squash_to_erofs(&mut readers, &mut out, None).unwrap();
+        let out = File::create(output).unwrap();
+        let builder = peerofs::build::Builder::new(out, peerofs::build::BuilderConfig::default()).unwrap();
+        let (squash_stats, erofs_stats) = squash_to_erofs(&mut readers, builder).unwrap();
         eprintln!("{squash_stats:?}");
         eprintln!("{erofs_stats:?}");
     }

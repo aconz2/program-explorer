@@ -22,13 +22,26 @@ if [ ! -f vendor/gen_init_cpio ]; then
     gcc -O1 vendor/gen_init_cpio.c -o vendor/gen_init_cpio
 fi
 
-./vendor/gen_init_cpio <(
-  sed \
+function gen_file() {
+    sed \
     -e "s/\$PROFILE/$profile/" \
     -e "s!\$CRUN!$crun!" \
-    -e "s/.*#! REMOVE_IN_RELEASE//" \
-    initramfs.file) \
-    > $outfile
+    initramfs.file | \
+    (if [[ "$profile" = "release" ]];
+        # this one removes the whole line
+        then sed -e "s/.*#@ REMOVE_IN_RELEASE//";
+        # this one removes trailing whitespace and the marker
+        # gen_init_cpio doesn't like having anything else in the line
+        else sed -e "s/ *#@ REMOVE_IN_RELEASE//";
+    fi)
+    # the
+}
+
+echo "=========== using initrams.file =========="
+gen_file
+echo "=========================================="
+
+./vendor/gen_init_cpio <(gen_file) > $outfile
 
 echo "wrote to $outfile"
 ls -lh $outfile

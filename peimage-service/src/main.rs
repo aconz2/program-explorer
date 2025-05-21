@@ -27,8 +27,8 @@ use peoci::{
     ocidist::{Auth, AuthMap},
     ocidist_cache,
     ocidist_cache::Client,
+    spec,
 };
-use perunner::iofile::round_up_file_to_pmem_size;
 
 // max sum of compressed layer sizes
 const MAX_TOTAL_LAYER_SIZE: u64 = 2_000_000_000;
@@ -86,6 +86,23 @@ fn load_stored_auth(p: impl AsRef<Path>) -> anyhow::Result<AuthMap> {
         .collect::<AuthMap>())
 }
 
+pub fn round_up_file_to_pmem_size<F: rustix::fd::AsFd>(f: F) -> rustix::io::Result<u64> {
+    fn round_up_to<const N: u64>(x: u64) -> u64 {
+        if x == 0 {
+            return N;
+        }
+        x.div_ceil(N) * N
+    }
+    const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
+    let stat = rustix::fs::fstat(&f)?;
+    let cur = stat.st_size as u64;
+    let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
+    if cur != newlen {
+        rustix::fs::ftruncate(f, newlen)?;
+    }
+    Ok(newlen)
+}
+
 async fn handle_conn(
     worker_semaphore: Arc<Semaphore>,
     conn: &UnixSeqpacket,
@@ -93,7 +110,7 @@ async fn handle_conn(
     img_cache: ImageCache,
     imgs_dir: Arc<OwnedFd>,
     counters: Arc<Counters>,
-) -> anyhow::Result<(Digest, OwnedFd)> {
+) -> anyhow::Result<(Digest, spec::ImageConfiguration, OwnedFd)> {
     let mut buf = [0; 1024];
     let len = conn.recv(&mut buf).await?;
     let (req, _) =
@@ -105,7 +122,9 @@ async fn handle_conn(
         .get_image_manifest_and_configuration(&reference, Arch::Amd64, Os::Linux)
         .await?
         .get()?;
+
     let digest: Digest = image_and_config.manifest_digest.into();
+    let config = image_and_config.configuration;
 
     let (fd_tx, fd_rx) = tokio::sync::oneshot::channel();
 
@@ -129,12 +148,12 @@ async fn handle_conn(
         let size = *entry.value();
         info!("img_cache miss digest={key} size={size}");
         let fd = fd_rx.await.map_err(|_| Error::OneshotRx)?;
-        Ok((digest, fd))
+        Ok((digest, config, fd))
     } else {
         atomic_inc(&counters.img_cache_hit);
         info!("img_cache hit digest={key}");
         match blobcache::openat_read_key(&imgs_dir, &key) {
-            Ok(Some(file)) => Ok((digest, file.into())),
+            Ok(Some(file)) => Ok((digest, config, file.into())),
             Ok(None) => {
                 error!("image cache missing file {}", key);
                 Err(Error::MissingFile.into())
@@ -186,7 +205,11 @@ async fn make_erofs_image(
         let (mut file, guard) = blobcache::openat_create_write_with_guard(&imgs_dir, &key)?;
 
         let t0 = Instant::now();
-        let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, &mut file, Some(MAX_IMAGE_SIZE))?;
+        let builder = peerofs::build::Builder::new(&mut file, peerofs::build::BuilderConfig{
+            max_file_size: Some(MAX_IMAGE_SIZE),
+            ..Default::default()
+        })?;
+        let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, builder)?;
         let elapsed = t0.elapsed().as_secs_f32();
         guard.success()?;
         round_up_file_to_pmem_size(&file)?;
@@ -229,8 +252,14 @@ async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedF
     Ok((image_cache, imgs_dir))
 }
 
-async fn respond_ok(conn: UnixSeqpacket, digest: Digest, erofs_fd: OwnedFd) -> anyhow::Result<()> {
+async fn respond_ok(
+    conn: UnixSeqpacket,
+    digest: Digest,
+    config: spec::ImageConfiguration,
+    erofs_fd: OwnedFd,
+) -> anyhow::Result<()> {
     let wire_response = WireResponse::Ok {
+        config,
         manifest_digest: digest.to_string(),
     };
     let mut buf = [0; 1024];
@@ -370,7 +399,7 @@ async fn main() {
                         let counters_ = counters.clone();
                         tokio::spawn(async move {
                             match handle_conn(worker_semaphore_, &conn, client_, cache_, imgs_dir_, counters_).await {
-                                Ok((digest, fd)) => match respond_ok(conn, digest, fd).await {
+                                Ok((digest, config, fd)) => match respond_ok(conn, digest, config, fd).await {
                                     Ok(_) => {}
                                     Err(e) => {
                                         error!("error sending ok {:?}", e);

@@ -24,12 +24,12 @@ impl std::fmt::Display for Error {
     }
 }
 
-#[derive(Debug, Encode, Decode, Copy, Clone)]
+#[derive(Debug, Encode, Decode, Copy, Clone, PartialEq)]
 pub enum Os {
     Linux,
 }
 
-#[derive(Debug, Encode, Decode, Copy, Clone)]
+#[derive(Debug, Encode, Decode, Copy, Clone, PartialEq)]
 pub enum Arch {
     Amd64,
     Arm64,

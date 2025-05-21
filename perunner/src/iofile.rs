@@ -4,9 +4,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 
 use rustix::fd::AsFd;
-use rustix::fs::{
-    fcntl_add_seals, ftruncate, memfd_create, fstat, MemfdFlags, SealFlags,
-};
+use rustix::fs::{fcntl_add_seals, fstat, ftruncate, memfd_create, MemfdFlags, SealFlags};
 
 const PMEM_ALIGN_SIZE: u64 = 0x20_0000; // 2 MB
 
@@ -131,8 +129,17 @@ mod tests {
     #[test]
     fn test_round_up_to() {
         assert_eq!(PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(0));
-        assert_eq!(PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE - 1));
-        assert_eq!(PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE));
-        assert_eq!(2*PMEM_ALIGN_SIZE, round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE + 1));
+        assert_eq!(
+            PMEM_ALIGN_SIZE,
+            round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE - 1)
+        );
+        assert_eq!(
+            PMEM_ALIGN_SIZE,
+            round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE)
+        );
+        assert_eq!(
+            2 * PMEM_ALIGN_SIZE,
+            round_up_to::<PMEM_ALIGN_SIZE>(PMEM_ALIGN_SIZE + 1)
+        );
     }
 }

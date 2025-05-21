@@ -42,8 +42,9 @@ pub struct Config {
     pub stdin: Option<String>, // name of file in user's archive, not contents
     pub strace: bool,
     pub crun_debug: bool,
-    pub rootfs_dir: String,
-    pub rootfs_kind: RootfsKind, // this isn't really viable since we need to know
+    // Some(dir) if a mult-image, None otherwise
+    pub rootfs_dir: Option<String>,
+    pub rootfs_kind: RootfsKind,
     pub response_format: ResponseFormat,
     pub kernel_inspect: bool,
 }

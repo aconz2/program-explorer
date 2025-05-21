@@ -221,7 +221,7 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     };
     if config.strace {
         cmd.arg("-e")
-            .arg("write,openat,unshare,clone,clone3")
+            .arg("write,openat,unshare,clone,clone3,chdir")
             .arg("-f")
             .arg("-o")
             .arg("/run/crun.strace")
@@ -317,12 +317,17 @@ fn main() {
         RootfsKind::Sqfs => c"squashfs",
         RootfsKind::Erofs => c"erofs",
     };
-    mount(IMAGE_DEVICE, c"/mnt/index", rootfs_kind, MS::SILENT, None).unwrap();
 
+    // rootfs_dir can be None, in which case this isn't a multi-image
+    if let Some(rootfs_dir) = config.rootfs_dir.as_ref() {
+        mount(IMAGE_DEVICE, c"/mnt/image", rootfs_kind, MS::SILENT, None).unwrap();
+        let rootfs_dir = CString::new(format!("/mnt/image/{}", rootfs_dir)).unwrap();
+        mount_bind(&rootfs_dir, c"/mnt/rootfs").unwrap();
+    } else {
+        mount(IMAGE_DEVICE, c"/mnt/rootfs", rootfs_kind, MS::SILENT, None).unwrap();
+    }
     // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
-    let rootfs_dir = CString::new(format!("/mnt/index/{}", config.rootfs_dir)).unwrap();
     //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
-    mount_bind(&rootfs_dir, c"/mnt/rootfs").unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
     //Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
 

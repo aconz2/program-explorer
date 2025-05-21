@@ -498,7 +498,6 @@ impl Client {
         reference: &Reference,
         mut req: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, Error> {
-
         self.check_ratelimit(reference).await?;
 
         // this is safe because we are only doing GET's
@@ -790,6 +789,7 @@ fn parse_www_authenticate_bearer_str(input: &str) -> Option<WWWAuthenticateBeare
 //
 // github doesn't (I don't think) use a window in the header value and the docs suggest the default
 // is one hour
+#[allow(dead_code)]
 const DEFAULT_RATELIMIT_WINDOW: u32 = 60 * 60; // 1 hour in seconds
 // if they don't send ratelimit-reset, default to 1 minute (guessing)
 const DEFAULT_RATELIMIT_RESET: u32 = 60;
@@ -801,6 +801,7 @@ struct RatelimitRemaining {
 }
 
 impl RatelimitRemaining {
+    #[allow(dead_code)]
     fn window_duration(&self) -> Duration {
         Duration::from_secs(self.window.unwrap_or(DEFAULT_RATELIMIT_WINDOW) as u64)
     }

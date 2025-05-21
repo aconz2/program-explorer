@@ -163,7 +163,8 @@ impl HttpRunnerApp {
         let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
             .ok_or(Error::BadRequest)?;
 
-        let runtime_spec = create_runtime_spec(&image_entry.image.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
+        let config = (&image_entry.image.config).try_into().unwrap(); // TODO don't unwrap
+        let runtime_spec = create_runtime_spec(&config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
             .map_err(|_| Error::OciSpec)?;
 
         let ch_config = CloudHypervisorConfig {
@@ -182,7 +183,7 @@ impl HttpRunnerApp {
             stdin              : api_req.stdin,
             strace             : false,
             crun_debug         : false,
-            rootfs_dir         : image_entry.image.rootfs.clone(),
+            rootfs_dir         : Some(image_entry.image.rootfs.clone()),
             rootfs_kind        : image_entry.rootfs_kind,
             response_format    : response_format,
             kernel_inspect     : false,

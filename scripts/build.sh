@@ -12,7 +12,7 @@ else
     cargo_profile="$profile"
 fi
 
-for package in perunner peserver; do
+for package in perunner; do
     cargo build --package=${package} --profile=${cargo_profile}
 done
 
@@ -21,7 +21,7 @@ done
 # pingora requires flate2 with the zlib-ng feature
 # peimage requires erofs-utils (at runtime)
 
-for package in peinit pearchive peserver; do
+for package in peinit pearchive; do
     cargo build --package=${package} --profile=${cargo_profile} --target x86_64-unknown-linux-musl
 done
 

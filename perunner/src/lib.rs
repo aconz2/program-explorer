@@ -2,7 +2,6 @@ pub mod cloudhypervisor;
 pub mod iofile;
 pub mod worker;
 
-use oci_spec::image as oci_image;
 use oci_spec::runtime as oci_runtime;
 
 use once_cell::sync::Lazy;
@@ -18,7 +17,7 @@ const SECCOMP_JSON: &[u8] = include_bytes!("../seccomp.json");
 static SECCOMP: Lazy<oci_runtime::LinuxSeccomp> =
     Lazy::new(|| serde_json::from_slice(SECCOMP_JSON).unwrap());
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     BadArch,
     BadOs,
@@ -28,13 +27,29 @@ pub enum Error {
     OciUser,
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+// NOTE: if oci_spec::image::ImageConfiguration was parsed from a vnd.docker.distribution.manifest.v2.json, I'm
+// getting empty strings for a lot of things that are Option
 // the allocations in this make me a bit unhappy, but maybe its all worth it
 pub fn create_runtime_spec(
-    image_config: &oci_image::ImageConfiguration,
+    image_config: &peoci::spec::ImageConfiguration,
     entrypoint: Option<&[String]>,
     cmd: Option<&[String]>,
     env: Option<&[String]>,
 ) -> Result<oci_runtime::Spec, Error> {
+    // TODO multi arch/os
+    if image_config.architecture != peoci::spec::Arch::Amd64 {
+        return Err(Error::BadArch);
+    }
+    if image_config.os != peoci::spec::Os::Linux {
+        return Err(Error::BadOs);
+    }
+
     //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(UID, UID);
     // ugh this api is horrible
@@ -60,14 +75,6 @@ pub fn create_runtime_spec(
     );
 
     linux.set_seccomp(Some(SECCOMP.clone()));
-
-    // TODO multi arch/os
-    if *image_config.architecture() != oci_image::Arch::Amd64 {
-        return Err(Error::BadArch);
-    }
-    if *image_config.os() != oci_image::Os::Linux {
-        return Err(Error::BadOs);
-    }
 
     // TODO how does oci-spec-rs deserialize the config .Env into .env ?
 
@@ -118,9 +125,9 @@ pub fn create_runtime_spec(
     // the chaining...
     let args = {
         let mut acc = vec![];
-        match image_config.config() {
+        match &image_config.config {
             Some(config) => {
-                match (entrypoint, config.entrypoint()) {
+                match (entrypoint, &config.entrypoint) {
                     (Some(xs), _) => {
                         acc.extend_from_slice(xs);
                     }
@@ -129,7 +136,7 @@ pub fn create_runtime_spec(
                     }
                     _ => {}
                 }
-                match (cmd, config.cmd()) {
+                match (cmd, &config.cmd) {
                     (Some(xs), _) => {
                         acc.extend_from_slice(xs);
                     }
@@ -162,8 +169,8 @@ pub fn create_runtime_spec(
         tmp.push("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string());
         if let Some(env) = env {
             tmp.extend_from_slice(env);
-        } else if let Some(config) = image_config.config() {
-            if let Some(env) = config.env() {
+        } else if let Some(config) = &image_config.config {
+            if let Some(env) = &config.env {
                 tmp.extend_from_slice(env);
             }
         }
@@ -172,7 +179,7 @@ pub fn create_runtime_spec(
     *process.env_mut() = Some(env);
 
     // image config can be null / totally empty
-    if let Some(config) = image_config.config() {
+    if let Some(config) = &image_config.config {
         // TODO: handle user fully
         // from oci-spec-rs/src/image/config.rs
         // user:
@@ -183,12 +190,16 @@ pub fn create_runtime_spec(
         //   groups of the given user/uid in /etc/passwd from
         //   the container are applied.
         // let _ = config.exposed_ports; // ignoring network for now
-        if let Some(user_config_string) = config.user() {
-            process.set_user(parse_user_string(user_config_string)?);
+        if let Some(user_config_string) = &config.user {
+            if !user_config_string.is_empty() {
+                process.set_user(parse_user_string(user_config_string)?);
+            }
         }
 
-        if let Some(cwd) = config.working_dir() {
-            process.set_cwd(cwd.into());
+        if let Some(cwd) = &config.working_dir {
+            if !cwd.is_empty() {
+                process.set_cwd(cwd.into());
+            }
         }
     } else {
         // TODO are the defaults all okay here?

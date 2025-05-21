@@ -13,6 +13,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
     Encode(#[from] bincode::error::EncodeError),
     Decode(#[from] bincode::error::DecodeError),
+    PeOciSpec(#[from] peoci::spec::Error),
     BadDigest,
     MissingFd,
     ServerError(String),
@@ -35,19 +36,19 @@ impl std::fmt::Display for Error {
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct Request {
     reference: String,
-    //arch: Arch,
-    //os: Os,
+    arch: peoci::spec::Arch,
+    os: peoci::spec::Os,
     // TODO I think this has to take a duration since we'd rather not have the requester do a
     // timeout and cancel the request
 }
 
 impl Request {
-    pub fn new(reference: &Reference, _arch: Arch, _os: Os) -> Self {
-        Request {
+    pub fn new(reference: &str, arch: Arch, os: Os) -> Result<Self, Error> {
+        Ok(Request {
             reference: reference.to_string(),
-            //arch,
-            //os,
-        }
+            arch: (&arch).try_into()?,
+            os: (&os).try_into()?,
+        })
     }
 }
 
@@ -60,16 +61,22 @@ impl Request {
 // this should maybe not be pub but pub(crate) doesn't work with main.rs I think?
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub enum WireResponse {
-    Ok { manifest_digest: String },
+    Ok {
+        manifest_digest: String,
+        config: peoci::spec::ImageConfiguration,
+    },
     NoMatchingManifest,
     ManifestNotFound,
     ImageTooBig,
     RatelimitExceeded,
-    Err { message: String },
+    Err {
+        message: String,
+    },
 }
 
 pub struct Response {
     pub manifest_digest: Digest,
+    pub config: peoci::spec::ImageConfiguration,
     pub fd: OwnedFd,
 }
 
@@ -99,7 +106,14 @@ pub async fn request_erofs_image(
     };
 
     match (fd, wire_response) {
-        (Some(fd), WireResponse::Ok { manifest_digest }) => Ok(Response {
+        (
+            Some(fd),
+            WireResponse::Ok {
+                manifest_digest,
+                config,
+            },
+        ) => Ok(Response {
+            config,
             manifest_digest: manifest_digest.parse().map_err(|_| Error::BadDigest)?,
             fd,
         }),

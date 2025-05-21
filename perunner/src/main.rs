@@ -8,6 +8,7 @@ use std::time::Duration;
 use byteorder::{WriteBytesExt, LE};
 use clap::Parser;
 use memmap2::{Mmap, MmapOptions};
+use oci_spec::image::{Arch, Os};
 
 use pearchive::{pack_dir_to_writer, unpack_visitor, UnpackVisitor};
 use peimage::index::{PEImageMultiIndex, PEImageMultiIndexKeyType};
@@ -169,8 +170,11 @@ struct Args {
     #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
-    #[arg(long, default_value = "../busybox.erofs")]
-    index: String,
+    #[arg(long)]
+    index: Option<String>,
+
+    #[arg(long)]
+    image_service: Option<String>,
 
     #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]
     image: String,
@@ -237,6 +241,10 @@ fn main() {
         }
         args
     };
+    if args.index.is_some() && args.image_service.is_some() {
+        eprintln!("--index and --image-service can't both be some");
+        std::process::exit(1);
+    }
     let ch_log_level: ChLogLevel = args.ch_log_level.as_str().try_into().unwrap();
     let cwd = std::env::current_dir().unwrap();
 
@@ -245,30 +253,83 @@ fn main() {
     //     .finish();
     // tracing::subscriber::set_global_default(subscriber)
     //     .expect("setting default subscriber failed");
+    //
 
-    let image_index = {
-        let mut index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name);
-        index
-            .add_path(&args.index)
-            .expect("failed to create image index");
-        index
-    };
-
-    let image_index_entry = {
-        match image_index.get(&args.image) {
-            Some(e) => e,
-            None => {
+    // bit nasty but trying to preserve handling of old multi-image images and new images from
+    // image service (at least temporarily
+    let (config, rootfs_dir, image_path, _maybe_fd_guard) = {
+        if let Some(index_path) = args.index {
+            let mut index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name);
+            index
+                .add_path(&index_path)
+                .expect("failed to create image index");
+            if let Some(image_index_entry) = index.get(&args.image) {
+                let config: peoci::spec::ImageConfiguration =
+                    (&image_index_entry.image.config).try_into().unwrap();
+                if args.spec_only {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&image_index_entry.image.config).unwrap()
+                    );
+                }
+                if false {
+                    let fd: rustix::fd::OwnedFd =
+                        std::fs::File::open(&image_index_entry.path).unwrap().into();
+                    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
+                    let path = PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd()));
+                    (
+                        config,
+                        Some(image_index_entry.image.rootfs.clone()),
+                        path,
+                        Some(fd),
+                    )
+                } else {
+                    (
+                        config,
+                        Some(image_index_entry.image.rootfs.clone()),
+                        image_index_entry.path.clone(),
+                        None,
+                    )
+                }
+            } else {
                 eprintln!(
                     "image {} not found in the index; available images are: ",
                     args.image
                 );
-                for (k, v) in image_index.map() {
+                for (k, v) in index.map() {
                     eprintln!("  {} {}", k, v.image.id.digest);
                 }
                 panic!("image not present");
             }
+        } else if let Some(image_service) = args.image_service {
+            let request =
+                peimage_service::Request::new(&args.image, Arch::Amd64, Os::Linux).unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .unwrap();
+            let res = rt
+                .block_on(peimage_service::request_erofs_image(image_service, request))
+                .unwrap();
+            if args.spec_only {
+                println!("{:?}", res.config);
+            }
+            rustix::io::fcntl_setfd(&res.fd, rustix::io::FdFlags::empty()).unwrap();
+
+            (
+                res.config,
+                None,
+                PathBuf::from(format!("/dev/fd/{}", res.fd.as_raw_fd())),
+                Some(res.fd),
+            )
+        } else {
+            panic!("--index and --image-service can't both be none");
         }
     };
+    println!(
+        "{:?} {:?} {:?} {:?}",
+        config, rootfs_dir, image_path, _maybe_fd_guard
+    );
 
     let response_format = match args.json {
         true => ResponseFormat::JsonV1,
@@ -278,21 +339,10 @@ fn main() {
     let timeout = Duration::from_millis(args.timeout);
     let ch_timeout = timeout + Duration::from_millis(args.ch_timeout);
 
-    // here we just always replace all the image's arguments (entrypoint is empty)
     let env = None;
-    let runtime_spec = create_runtime_spec(
-        &image_index_entry.image.config,
-        Some(&[]),
-        Some(&args.args),
-        env,
-    )
-    .unwrap();
+    let runtime_spec = create_runtime_spec(&config, Some(&[]), Some(&args.args), env).unwrap();
 
     if args.spec_only {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&image_index_entry.image.config).unwrap()
-        );
         println!("{}", serde_json::to_string_pretty(&runtime_spec).unwrap());
         return;
     }
@@ -313,8 +363,8 @@ fn main() {
         stdin: args.stdin,
         strace: args.strace,
         crun_debug: args.crun_debug,
-        rootfs_dir: image_index_entry.image.rootfs.clone(),
-        rootfs_kind: image_index_entry.rootfs_kind,
+        rootfs_dir: rootfs_dir,
+        rootfs_kind: peinit::RootfsKind::Erofs,
         response_format: response_format,
         kernel_inspect: args.kernel_inspect,
     };
@@ -337,7 +387,7 @@ fn main() {
                 ch_config: ch_config.clone(),
                 ch_timeout: ch_timeout,
                 io_file: io_file,
-                rootfs: image_index_entry.path.clone(),
+                rootfs: image_path.clone(),
             };
             pool.sender()
                 .try_send(worker_input)
@@ -365,7 +415,7 @@ fn main() {
             ch_config: ch_config,
             ch_timeout: ch_timeout,
             io_file: io_file,
-            rootfs: image_index_entry.path.clone(),
+            rootfs: image_path,
         };
         handle_worker_output(worker::run(worker_input), &response_format, args.stdout);
     }

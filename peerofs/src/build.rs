@@ -140,6 +140,12 @@ pub struct Stats {
     block_end_padding: usize,
 }
 
+#[derive(Default)]
+pub struct BuilderConfig {
+    pub max_file_size: Option<u64>,
+    pub increment_uid_gid: Option<u32>,
+}
+
 pub struct Builder<W: Write + Seek> {
     root: Option<Root>,
     increment_uid_gid: Option<u32>,
@@ -720,11 +726,11 @@ impl Dir {
 }
 
 impl<W: Write + Seek> Builder<W> {
-    pub fn new(writer: W, max_file_size: Option<u64>) -> Result<Self, Error> {
+    pub fn new(writer: W, config: BuilderConfig) -> Result<Self, Error> {
         let block_size_bits = 12; // TODO configurable
         let mut ret = Builder {
             root: Some(Root::default()),
-            increment_uid_gid: None,
+            increment_uid_gid: config.increment_uid_gid,
             writer: BufWriter::with_capacity(32 * 1024, writer),
             superblock: Superblock::new_zeroed(),
             cur_data_block: 1,
@@ -737,7 +743,7 @@ impl<W: Write + Seek> Builder<W> {
             inode_addr: 0,
             stats: Stats::default(),
             max_depth: MAX_DEPTH,
-            max_file_size: max_file_size.unwrap_or(u64::MAX),
+            max_file_size: config.max_file_size.unwrap_or(u64::MAX),
             cur_file_size: 0,
         };
         // manually advance to first block
@@ -1428,7 +1434,7 @@ mod tests {
     }
 
     fn into_erofs<W: Write + Seek>(entries: &EList, writer: W) -> Result<W, Error> {
-        let mut b = Builder::new(writer)?;
+        let mut b = Builder::new(writer, BuilderConfig::default())?;
         for entry in entries.iter() {
             match &entry.typ {
                 EntryTyp::File => {
@@ -1638,7 +1644,7 @@ mod tests {
 
     #[test]
     fn test_builder_simple() -> Result<(), Error> {
-        let mut b = Builder::new(NamedTempFile::new().expect("tf"))?;
+        let mut b = Builder::new(NamedTempFile::new().expect("tf"), BuilderConfig::default())?;
         {
             let data = b"hello world";
             b.add_file(
@@ -1777,7 +1783,7 @@ mod tests {
 
     #[test]
     fn test_max_depth() {
-        let mut b = Builder::new(Cursor::new(vec![])).unwrap();
+        let mut b = Builder::new(Cursor::new(vec![]), BuilderConfig::default()).unwrap();
         let depth = MAX_DEPTH;
         let mut very_deep_file = String::with_capacity(2 * depth);
         for _ in 0..depth {
