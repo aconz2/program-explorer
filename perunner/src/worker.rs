@@ -1,7 +1,6 @@
 use crossbeam::channel;
 use crossbeam::channel::{Receiver, Sender};
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::os::fd::{OwnedFd, AsRawFd, FromRawFd};
 use std::thread;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
@@ -15,6 +14,7 @@ use crate::cloudhypervisor;
 use crate::cloudhypervisor::{
     CloudHypervisor, CloudHypervisorConfig, CloudHypervisorLogs, CloudHypervisorPmem,
     CloudHypervisorPmemMode, CloudHypervisorPostMortem,
+    PathBufOrOwnedFd,
 };
 use crate::iofile::IoFile;
 
@@ -23,7 +23,7 @@ type JoinHandleT = JoinHandle<()>;
 pub struct Input {
     pub id: u64,
     pub ch_config: CloudHypervisorConfig,
-    pub rootfs: PathBuf,
+    pub image: PathBufOrOwnedFd,
     pub io_file: IoFile,
     pub ch_timeout: Duration,
 }
@@ -120,9 +120,10 @@ fn spawn_worker(
 // a bit ugly since we can't easily use ? to munge the errors
 pub fn run(input: Input) -> OutputResult {
     let pmems = CloudHypervisorPmem::Two([
-        (input.rootfs, CloudHypervisorPmemMode::ReadOnly),
+        (input.image, CloudHypervisorPmemMode::ReadOnly),
         (
-            format!("/dev/fd/{}", input.io_file.as_raw_fd()).into(),
+            // child process is scoped to this function, we keep input.io_file alive
+            PathBufOrOwnedFd::Fd(unsafe{ OwnedFd::from_raw_fd(input.io_file.as_raw_fd()) }),
             CloudHypervisorPmemMode::ReadWrite,
         ),
     ]);

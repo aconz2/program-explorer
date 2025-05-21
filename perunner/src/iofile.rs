@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{OwnedFd,AsRawFd, BorrowedFd};
 
 use rustix::fd::AsFd;
 use rustix::fs::{fcntl_add_seals, fstat, ftruncate, memfd_create, MemfdFlags, SealFlags};
@@ -40,6 +40,12 @@ impl AsRawFd for IoFileBuilder {
     }
 }
 
+impl AsFd for IoFileBuilder {
+    fn as_fd(&self) -> BorrowedFd {
+        self.file.as_fd()
+    }
+}
+
 impl Write for IoFileBuilder {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.file.write(data)
@@ -73,9 +79,21 @@ impl Seek for IoFile {
     }
 }
 
+impl AsFd for IoFile {
+    fn as_fd(&self) -> BorrowedFd {
+        self.file.as_fd()
+    }
+}
+
 impl AsRawFd for IoFile {
     fn as_raw_fd(&self) -> i32 {
         self.file.as_raw_fd()
+    }
+}
+
+impl From<IoFile> for OwnedFd {
+    fn from(io_file: IoFile) -> OwnedFd {
+        io_file.file.into()
     }
 }
 

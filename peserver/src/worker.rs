@@ -22,7 +22,7 @@ use prometheus::{register_int_counter,IntCounter};
 use arc_swap::ArcSwap;
 
 use perunner::{worker,create_runtime_spec};
-use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel};
+use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel, PathBufOrOwnedFd};
 use perunner::iofile::IoFileBuilder;
 
 use peimage::index::PEImageMultiIndex;
@@ -58,6 +58,7 @@ enum Error {
     Read,
     BadRequest,
     BadImagePath,
+    BadImageConfig,
     NoSuchImage,
     IoFileCreate,
     QueueFull,
@@ -106,6 +107,7 @@ impl From<Error> for StatusCode {
             NoSuchImage |
             BadContentType |
             BadImagePath |
+            BadImageConfig |
             OciSpec |
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
@@ -163,7 +165,8 @@ impl HttpRunnerApp {
         let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
             .ok_or(Error::BadRequest)?;
 
-        let config = (&image_entry.image.config).try_into().unwrap(); // TODO don't unwrap
+        let config = (&image_entry.image.config).try_into()
+            .map_err(|_| Error::BadImageConfig)?;
         let runtime_spec = create_runtime_spec(&config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
             .map_err(|_| Error::OciSpec)?;
 
@@ -211,7 +214,7 @@ impl HttpRunnerApp {
             ch_config  : ch_config,
             ch_timeout : RUN_TIMEOUT + CH_TIMEOUT_EXTRA,
             io_file    : io_file,
-            rootfs     : image_entry.path.clone(),
+            image : PathBufOrOwnedFd::PathBuf(image_entry.path.clone()),
         };
 
         let (resp_sender, resp_receiver) = tokio::sync::oneshot::channel();
@@ -299,10 +302,10 @@ impl ServeHttp for HttpRunnerApp {
     async fn response(&self, session: &mut ServerSession) -> Response<Vec<u8>> {
         let req_parts: &http::request::Parts = session.req_header();
         //trace!("{} {}", req_parts.method, req_parts.uri.path());
-        let res = match (req_parts.method.clone(), req_parts.uri.path()) {
-            (Method::GET,  "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
-            (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session).await,
-            (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session).await,
+        let res = match (&req_parts.method, req_parts.uri.path()) {
+            (&Method::GET,  "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
+            (&Method::GET,  apiv1::images::PATH) => self.apiv1_images(session).await,
+            (&Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)
             }

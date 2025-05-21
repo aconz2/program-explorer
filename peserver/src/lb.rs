@@ -394,9 +394,9 @@ impl ProxyHttp for LB {
 
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
-        let ret = match (req_parts.method.clone(), req_parts.uri.path()) {
-            (Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, ctx).await.map(|_| true),
-            (Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, ctx).await,
+        let ret = match (&req_parts.method, req_parts.uri.path()) {
+            (&Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, ctx).await.map(|_| true),
+            (&Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, ctx).await,
             _ => {
                 session.downstream_session
                     .write_response_header_ref(&premade_responses::NOT_FOUND)

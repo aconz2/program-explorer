@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 //use std::os::unix::net::{UnixListener,UnixStream};
 use std::io;
+use std::os::fd::OwnedFd;
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -54,7 +55,7 @@ impl TryFrom<&str> for ChLogLevel {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum CloudHypervisorPmemMode {
     ReadOnly,
     ReadWrite,
@@ -69,10 +70,17 @@ impl CloudHypervisorPmemMode {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
+pub enum PathBufOrOwnedFd {
+    PathBuf(PathBuf),
+    Fd(OwnedFd), // k I think this should rather be BorrowedFd but then we need a lifetime
+                 // parameter on this
+}
+
+#[derive(Debug)]
 pub enum CloudHypervisorPmem {
-    One([(PathBuf, CloudHypervisorPmemMode); 1]),
-    Two([(PathBuf, CloudHypervisorPmemMode); 2]),
+    One([(PathBufOrOwnedFd, CloudHypervisorPmemMode); 1]),
+    Two([(PathBufOrOwnedFd, CloudHypervisorPmemMode); 2]),
 }
 
 #[derive(Clone)]
@@ -143,6 +151,17 @@ impl From<Error> for CloudHypervisorPostMortem {
 //    Some((listener, stream))
 //}
 
+// TODO when I switched the iofile pmem from tmpfs to memfd, we leave that open with no CLOEXEC so
+// that we can pass /dev/fd/{n} as the path and ch is happy. But that means that every ch
+// will have that fd open. And now with peimage-service giving us an fd for the image, we want to
+// do the same for the image. The right thing to do (I think) is dup each fd we want to pass in,
+// then dup2 to the front, then close_range(high, ~0) all in the pre_exec. Idk if the dup'ing is
+// that useful, maybe we just make sure to close everything that isn't the fd's we want passed in
+// we could either support both files and fd's since I think eventually (or now) we'll pass the
+// kernel and initramfs as fd's
+// okay library to use is command_fds from google
+// but still no fexecve to actually call ch from fd :(
+
 impl CloudHypervisor {
     pub fn start(
         config: CloudHypervisorConfig,
@@ -204,28 +223,17 @@ impl CloudHypervisor {
                     }
                 }
             }
-            match pmems {
-                Some(CloudHypervisorPmem::One([(path, mode)])) => {
-                    x.arg("--pmem").arg(format!(
-                        "file={:?},discard_writes={}",
-                        path,
-                        mode.discard_writes()
-                    ));
-                }
-                Some(CloudHypervisorPmem::Two([(path1, mode1), (path2, mode2)])) => {
-                    x.arg("--pmem")
-                        .arg(format!(
-                            "file={},discard_writes={}",
-                            path1.display(),
-                            mode1.discard_writes()
-                        ))
-                        .arg(format!(
-                            "file={},discard_writes={}",
-                            path2.display(),
-                            mode2.discard_writes()
-                        ));
-                }
-                None => {}
+            let pmems = match &pmems {
+                Some(CloudHypervisorPmem::One(arr)) => &arr[..],
+                Some(CloudHypervisorPmem::Two(arr)) => &arr[..],
+                None => &[],
+            };
+            for (path, mode) in pmems.iter() {
+                x.arg("--pmem").arg(format!(
+                    "file={:?},discard_writes={}",
+                    path,
+                    mode.discard_writes()
+                ));
             }
             if config.keep_args {
                 args.extend(x.get_args().map(|x| x.into()));

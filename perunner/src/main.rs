@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{OwnedFd, AsRawFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use pearchive::{pack_dir_to_writer, unpack_visitor, UnpackVisitor};
 use peimage::index::{PEImageMultiIndex, PEImageMultiIndexKeyType};
 use peinit::ResponseFormat;
 
-use perunner::cloudhypervisor::{ChLogLevel, CloudHypervisorConfig};
+use perunner::cloudhypervisor::{ChLogLevel, CloudHypervisorConfig, PathBufOrOwnedFd};
 use perunner::create_runtime_spec;
 use perunner::iofile::IoFileBuilder;
 use perunner::worker;
@@ -27,6 +27,8 @@ use perunner::worker;
 //}
 
 // this is kinda dupcliated with pearchive::packdev
+// TODO this AsRawFd trait stems from pearchive which stems from using libc apis, I think they can
+// be replaced and we just need AsFd
 fn create_pack_file_from_dir<P: AsRef<Path>, W: Write + AsRawFd + Seek>(
     dir: &Option<P>,
     mut file: W,
@@ -257,7 +259,7 @@ fn main() {
 
     // bit nasty but trying to preserve handling of old multi-image images and new images from
     // image service (at least temporarily
-    let (config, rootfs_dir, image_path, _maybe_fd_guard) = {
+    let (config, rootfs_dir, image_path_or_fd) = {
         if let Some(index_path) = args.index {
             let mut index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name);
             index
@@ -273,22 +275,20 @@ fn main() {
                     );
                 }
                 if false {
-                    let fd: rustix::fd::OwnedFd =
+                    let fd: OwnedFd =
                         std::fs::File::open(&image_index_entry.path).unwrap().into();
                     rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
-                    let path = PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd()));
+                    //let path = PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd()));
                     (
                         config,
                         Some(image_index_entry.image.rootfs.clone()),
-                        path,
-                        Some(fd),
+                        PathBufOrOwnedFd::Fd(fd)
                     )
                 } else {
                     (
                         config,
                         Some(image_index_entry.image.rootfs.clone()),
-                        image_index_entry.path.clone(),
-                        None,
+                        PathBufOrOwnedFd::PathBuf(image_index_entry.path.clone()),
                     )
                 }
             } else {
@@ -314,21 +314,20 @@ fn main() {
             if args.spec_only {
                 println!("{:?}", res.config);
             }
-            rustix::io::fcntl_setfd(&res.fd, rustix::io::FdFlags::empty()).unwrap();
+            //rustix::io::fcntl_setfd(&res.fd, rustix::io::FdFlags::empty()).unwrap();
 
             (
                 res.config,
                 None,
-                PathBuf::from(format!("/dev/fd/{}", res.fd.as_raw_fd())),
-                Some(res.fd),
+                PathBufOrOwnedFd::Fd(res.fd),
             )
         } else {
             panic!("--index and --image-service can't both be none");
         }
     };
     println!(
-        "{:?} {:?} {:?} {:?}",
-        config, rootfs_dir, image_path, _maybe_fd_guard
+        "{:?} {:?} {:?}",
+        config, rootfs_dir, image_path_or_fd
     );
 
     let response_format = match args.json {
@@ -387,7 +386,7 @@ fn main() {
                 ch_config: ch_config.clone(),
                 ch_timeout: ch_timeout,
                 io_file: io_file,
-                rootfs: image_path.clone(),
+                image: image_path_or_fd.clone(),
             };
             pool.sender()
                 .try_send(worker_input)
@@ -415,7 +414,7 @@ fn main() {
             ch_config: ch_config,
             ch_timeout: ch_timeout,
             io_file: io_file,
-            rootfs: image_path,
+            image: image_path_or_fd,
         };
         handle_worker_output(worker::run(worker_input), &response_format, args.stdout);
     }
