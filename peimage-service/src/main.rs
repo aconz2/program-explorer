@@ -207,7 +207,7 @@ async fn make_erofs_image(
         let t0 = Instant::now();
         let builder = peerofs::build::Builder::new(&mut file, peerofs::build::BuilderConfig{
             max_file_size: Some(MAX_IMAGE_SIZE),
-            ..Default::default()
+            increment_uid_gid: Some(1000), // TODO magic constant
         })?;
         let (squash_stats, erofs_stats) = squash_to_erofs(&mut layers, builder)?;
         let elapsed = t0.elapsed().as_secs_f32();
