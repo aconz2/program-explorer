@@ -8,11 +8,14 @@ use std::os::fd::OwnedFd;
 use std::ffi::OsString;
 use std::time::Duration;
 
+use command_fds::{CommandFdExt, FdMapping};
 use tempfile::NamedTempFile;
 use waitid_timeout::{ChildWaitIdExt, WaitIdDataOvertime};
 //use serde::Serialize;
-use api_client;
 
+//use api_client;
+
+// todo thiserror
 #[derive(Debug, Default)]
 pub enum Error {
     #[default]
@@ -21,18 +24,19 @@ pub enum Error {
     Spawn,
     SpawnWithArgs(Vec<OsString>),
     Socket,
-    Api(api_client::Error),
+    //Api(api_client::Error),
     Overtime,
     Wait,
     BadExit,
+    FdSetup,
 }
 
-impl From<api_client::Error> for Error {
-    fn from(e: api_client::Error) -> Self {
-        Error::Api(e)
-    }
-}
-
+//impl From<api_client::Error> for Error {
+//    fn from(e: api_client::Error) -> Self {
+//        Error::Api(e)
+//    }
+//}
+//
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum ChLogLevel {
@@ -74,14 +78,22 @@ impl CloudHypervisorPmemMode {
 pub enum PathBufOrOwnedFd {
     PathBuf(PathBuf),
     Fd(OwnedFd), // k I think this should rather be BorrowedFd but then we need a lifetime
-                 // parameter on this
 }
 
-#[derive(Debug)]
-pub enum CloudHypervisorPmem {
-    One([(PathBufOrOwnedFd, CloudHypervisorPmemMode); 1]),
-    Two([(PathBufOrOwnedFd, CloudHypervisorPmemMode); 2]),
+impl PathBufOrOwnedFd {
+    pub fn try_clone(&self) -> Option<Self> {
+        match self {
+            PathBufOrOwnedFd::PathBuf(p) => Some(PathBufOrOwnedFd::PathBuf(p.clone())),
+            PathBufOrOwnedFd::Fd(fd) => Some(PathBufOrOwnedFd::Fd(fd.try_clone().ok()?)),
+        }
+    }
 }
+
+//#[derive(Debug)]
+//pub enum CloudHypervisorPmem {
+//    One([(PathBufOrOwnedFd, CloudHypervisorPmemMode); 1]),
+//    Two([(PathBufOrOwnedFd, CloudHypervisorPmemMode); 2]),
+//}
 
 #[derive(Clone)]
 pub struct CloudHypervisorConfig {
@@ -151,29 +163,34 @@ impl From<Error> for CloudHypervisorPostMortem {
 //    Some((listener, stream))
 //}
 
-// TODO when I switched the iofile pmem from tmpfs to memfd, we leave that open with no CLOEXEC so
-// that we can pass /dev/fd/{n} as the path and ch is happy. But that means that every ch
-// will have that fd open. And now with peimage-service giving us an fd for the image, we want to
-// do the same for the image. The right thing to do (I think) is dup each fd we want to pass in,
-// then dup2 to the front, then close_range(high, ~0) all in the pre_exec. Idk if the dup'ing is
-// that useful, maybe we just make sure to close everything that isn't the fd's we want passed in
-// we could either support both files and fd's since I think eventually (or now) we'll pass the
-// kernel and initramfs as fd's
-// okay library to use is command_fds from google
 // but still no fexecve to actually call ch from fd :(
 
 impl CloudHypervisor {
     pub fn start(
         config: CloudHypervisorConfig,
-        pmems: Option<CloudHypervisorPmem>,
+        pmems: Vec<(PathBufOrOwnedFd, CloudHypervisorPmemMode)>,
     ) -> Result<Self, Error> {
         let err_file = NamedTempFile::with_prefix("err-").map_err(|_| Error::TempfileSetup)?;
         let log_file = NamedTempFile::with_prefix("log-").map_err(|_| Error::TempfileSetup)?;
         let con_file = NamedTempFile::with_prefix("con-").map_err(|_| Error::TempfileSetup)?;
 
-        // Disabling sapi socket as don't really need it
-        //let (listener, stream) = setup_socket(rand_path_prefix("sock-"))
-        //    .ok_or(Error::Socket)?;
+        let mut child_fd_cur = 3;
+        let mut fd_mappings = vec![];
+        let pmem_paths_modes = pmems
+            .into_iter()
+            .map(|(path_or_fd, mode)| match path_or_fd {
+                PathBufOrOwnedFd::PathBuf(p) => (p, mode),
+                PathBufOrOwnedFd::Fd(fd) => {
+                    let child_fd = child_fd_cur;
+                    child_fd_cur += 1;
+                    fd_mappings.push(FdMapping {
+                        parent_fd: fd,
+                        child_fd,
+                    });
+                    (PathBuf::from(format!("/dev/fd/{child_fd}")), mode)
+                }
+            })
+            .collect::<Vec<_>>();
 
         let mut args = vec![];
         let child = {
@@ -223,21 +240,17 @@ impl CloudHypervisor {
                     }
                 }
             }
-            let pmems = match &pmems {
-                Some(CloudHypervisorPmem::One(arr)) => &arr[..],
-                Some(CloudHypervisorPmem::Two(arr)) => &arr[..],
-                None => &[],
-            };
-            for (path, mode) in pmems.iter() {
-                x.arg("--pmem").arg(format!(
-                    "file={:?},discard_writes={}",
-                    path,
-                    mode.discard_writes()
-                ));
+
+            if !pmem_paths_modes.is_empty() {
+                x.arg("--pmem");
+            }
+            for (path, mode) in pmem_paths_modes.iter() {
+                x.arg(format!("file={:?},discard_writes={}", path, mode.discard_writes()));
             }
             if config.keep_args {
                 args.extend(x.get_args().map(|x| x.into()));
             }
+            x.fd_mappings(fd_mappings).map_err(|_| Error::FdSetup)?;
             x.spawn().map_err(|_| Error::SpawnWithArgs(args.clone()))?
         };
 

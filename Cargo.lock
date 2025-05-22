@@ -455,6 +455,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990"
 
 [[package]]
+name = "command-fds"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ec1052629a80c28594777d1252efc8a6b005d13f9edfd8c3fc0f44d5b32489a"
+dependencies = [
+ "nix 0.30.1",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1609,6 +1619,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.9.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nom"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1835,6 +1857,7 @@ dependencies = [
  "base16ct",
  "bincode 1.3.3",
  "byteorder",
+ "command-fds",
  "libc",
  "rustix 1.0.7",
  "serde",
@@ -1880,6 +1903,7 @@ dependencies = [
  "base16ct",
  "byteorder",
  "clap 4.5.38",
+ "command-fds",
  "crossbeam",
  "libc",
  "log",

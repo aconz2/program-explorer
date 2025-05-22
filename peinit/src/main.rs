@@ -3,13 +3,14 @@ use std::fs;
 use std::fs::{DirEntry, File};
 use std::io;
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use rustix::fs::{chown, mkdir, open, OFlags, Mode};
+use command_fds::{CommandFdExt, FdMapping};
+use rustix::fs::{chown, mkdir, open, Mode, OFlags};
 use rustix::mount::MountFlags as MS;
 use rustix::mount::{mount, mount_bind, mount_bind_recursive};
 use rustix::process::{chdir, chroot};
@@ -140,28 +141,26 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
 // kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
 // threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
-    // NOTE this does not set CLOEXEC
-    let mut file: File = open(archive, OFlags::RDONLY, Mode::empty()).unwrap().into();
+    let mut file: File = open(archive, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+        .unwrap()
+        .into();
     let (archive_size, config) = read_io_file_config(&mut file).unwrap();
 
+    let fd_mappings = vec![FdMapping {
+        parent_fd: file.into(),
+        child_fd: 3,
+    }];
+
     //let mut cmd = Command::new("strace").arg("/bin/pearchive");
-    let mut cmd = Command::new("/bin/pearchive");
-
-    let fd = file.as_raw_fd();
-
-    cmd.arg("unpackfd")
-        .arg(format!("{fd}"))
+    let ret = Command::new("/bin/pearchive")
+        .arg("unpackfd")
+        .arg("3")
         .arg(dir)
-        .arg(format!("{archive_size}"));
-
-    cmd.uid(1000).gid(1000);
-    //unsafe {
-    //    cmd.pre_exec(|| {
-    //        libc::umask(0);
-    //        Ok(())
-    //    });
-    //}
-    let ret = cmd
+        .arg(format!("{archive_size}"))
+        .uid(1000)
+        .gid(1000)
+        .fd_mappings(fd_mappings)
+        .unwrap()
         .status()
         .unwrap()
         .code()
@@ -172,14 +171,19 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 // TODO: maybe do this in process?
-fn pack_output<P: AsRef<OsStr>, F: AsRawFd>(dir: P, archive: F) {
-    let fd = archive.as_raw_fd();
+fn pack_output<P: AsRef<OsStr>>(dir: P, archive: OwnedFd) {
+    let fd_mappings = vec![FdMapping {
+        parent_fd: archive,
+        child_fd: 3,
+    }];
     let ret = Command::new("/bin/pearchive")
         .arg("packfd")
         .arg(dir)
-        .arg(format!("{fd}"))
+        .arg("3")
         .uid(1000)
         .gid(1000)
+        .fd_mappings(fd_mappings)
+        .unwrap()
         .status()
         .unwrap()
         .code()
@@ -398,14 +402,14 @@ fn main() {
     };
 
     {
-        // output
-        // NOTE this does not set CLOEXEC
-        let mut f: File = open(INOUT_DEVICE, OFlags::RDWR, Mode::empty()).unwrap().into();
+        let mut f: File = open(INOUT_DEVICE, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
+            .unwrap()
+            .into();
         write_io_file_response(&mut f, &response).unwrap();
 
         match config.response_format {
             ResponseFormat::PeArchiveV1 => {
-                pack_output("/run/output", f);
+                pack_output("/run/output", f.into());
             }
             ResponseFormat::JsonV1 => {}
         }

@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{OwnedFd,AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 
 use rustix::fd::AsFd;
 use rustix::fs::{fcntl_add_seals, fstat, ftruncate, memfd_create, MemfdFlags, SealFlags};
@@ -18,10 +18,9 @@ pub struct IoFileBuilder {
 
 impl IoFileBuilder {
     pub fn new() -> rustix::io::Result<Self> {
-        // NOTE: CLOEXEC is NOT set
         let fd = memfd_create(
             "peiofile",
-            MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL,
+            MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL | MemfdFlags::CLOEXEC,
         )?;
         Ok(Self { file: fd.into() })
     }

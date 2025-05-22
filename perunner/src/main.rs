@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{OwnedFd, AsRawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -275,14 +275,13 @@ fn main() {
                     );
                 }
                 if false {
-                    let fd: OwnedFd =
-                        std::fs::File::open(&image_index_entry.path).unwrap().into();
+                    let fd: OwnedFd = std::fs::File::open(&image_index_entry.path).unwrap().into();
                     rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
                     //let path = PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd()));
                     (
                         config,
                         Some(image_index_entry.image.rootfs.clone()),
-                        PathBufOrOwnedFd::Fd(fd)
+                        PathBufOrOwnedFd::Fd(fd),
                     )
                 } else {
                     (
@@ -316,19 +315,12 @@ fn main() {
             }
             //rustix::io::fcntl_setfd(&res.fd, rustix::io::FdFlags::empty()).unwrap();
 
-            (
-                res.config,
-                None,
-                PathBufOrOwnedFd::Fd(res.fd),
-            )
+            (res.config, None, PathBufOrOwnedFd::Fd(res.fd))
         } else {
             panic!("--index and --image-service can't both be none");
         }
     };
-    println!(
-        "{:?} {:?} {:?}",
-        config, rootfs_dir, image_path_or_fd
-    );
+    println!("{:?} {:?} {:?}", config, rootfs_dir, image_path_or_fd);
 
     let response_format = match args.json {
         true => ResponseFormat::JsonV1,
@@ -386,7 +378,7 @@ fn main() {
                 ch_config: ch_config.clone(),
                 ch_timeout: ch_timeout,
                 io_file: io_file,
-                image: image_path_or_fd.clone(),
+                image: image_path_or_fd.try_clone().unwrap(),
             };
             pool.sender()
                 .try_send(worker_input)

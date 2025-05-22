@@ -1,6 +1,6 @@
 use crossbeam::channel;
 use crossbeam::channel::{Receiver, Sender};
-use std::os::fd::{OwnedFd, AsRawFd, FromRawFd};
+use std::os::fd::{AsFd};
 use std::thread;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
@@ -12,9 +12,8 @@ use nix::sched::{sched_getaffinity, sched_setaffinity, CpuSet};
 
 use crate::cloudhypervisor;
 use crate::cloudhypervisor::{
-    CloudHypervisor, CloudHypervisorConfig, CloudHypervisorLogs, CloudHypervisorPmem,
-    CloudHypervisorPmemMode, CloudHypervisorPostMortem,
-    PathBufOrOwnedFd,
+    CloudHypervisor, CloudHypervisorConfig, CloudHypervisorLogs, CloudHypervisorPmemMode,
+    CloudHypervisorPostMortem, PathBufOrOwnedFd,
 };
 use crate::iofile::IoFile;
 
@@ -119,16 +118,16 @@ fn spawn_worker(
 
 // a bit ugly since we can't easily use ? to munge the errors
 pub fn run(input: Input) -> OutputResult {
-    let pmems = CloudHypervisorPmem::Two([
+    let pmems = vec![
         (input.image, CloudHypervisorPmemMode::ReadOnly),
         (
             // child process is scoped to this function, we keep input.io_file alive
-            PathBufOrOwnedFd::Fd(unsafe{ OwnedFd::from_raw_fd(input.io_file.as_raw_fd()) }),
+            PathBufOrOwnedFd::Fd(input.io_file.as_fd().try_clone_to_owned().unwrap()),
             CloudHypervisorPmemMode::ReadWrite,
         ),
-    ]);
+    ];
     let mut ch = {
-        match CloudHypervisor::start(input.ch_config, Some(pmems)) {
+        match CloudHypervisor::start(input.ch_config, pmems) {
             Ok(ch) => ch,
             Err(e) => {
                 return Err(e.into());
@@ -304,11 +303,7 @@ pub mod asynk {
         }
     }
 
-    fn spawn_worker(
-        id: usize,
-        cpuset: CpuSet,
-        input: Receiver<(Input, oneshot::Sender<OutputResult>)>,
-    ) -> JoinHandleT {
+    fn spawn_worker(id: usize, cpuset: CpuSet, input: Receiver<SenderElement>) -> JoinHandleT {
         spawn(move || {
             trace!("starting worker {id}");
             sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
