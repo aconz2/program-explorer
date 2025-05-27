@@ -3,20 +3,20 @@ use std::ffi::{CStr, CString, OsStr};
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Cursor, Write};
-use std::os::fd::{OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use memmap2::MmapOptions;
 use rustix::{
-    fs::{FileType, RawDir},
     fd::AsFd,
-    process::{geteuid, getegid},
+    fs::{FileType, RawDir},
+    process::{getegid, geteuid},
     thread::{unshare, UnshareFlags},
 };
 
 mod open;
-use open::{openat, openat_w, opendirat, opendirat_cwd, openpathat, opendir, mkdirat};
+use open::{mkdirat, openat, openat_w, opendir, opendirat, opendirat_cwd, openpathat};
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
@@ -253,9 +253,17 @@ fn unshare_user() -> Result<(), Error> {
     let uid = geteuid();
     let gid = getegid();
     unshare(UnshareFlags::NEWUSER).map_err(|_| Error::Unshare)?;
-    fs::write("/proc/self/uid_map", format!("0 {} 1", uid.as_raw()).as_bytes()).map_err(|_| Error::Write)?;
+    fs::write(
+        "/proc/self/uid_map",
+        format!("0 {} 1", uid.as_raw()).as_bytes(),
+    )
+    .map_err(|_| Error::Write)?;
     fs::write("/proc/self/setgroups", b"deny").map_err(|_| Error::Write)?;
-    fs::write("/proc/self/gid_map", format!("0 {} 1", gid.as_raw()).as_bytes()).map_err(|_| Error::Write)?;
+    fs::write(
+        "/proc/self/gid_map",
+        format!("0 {} 1", gid.as_raw()).as_bytes(),
+    )
+    .map_err(|_| Error::Write)?;
     Ok(())
 }
 
@@ -279,7 +287,9 @@ impl TryFrom<&u8> for ArchiveFormat1Tag {
 }
 
 fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
-    let (int_bytes, rest) = input.split_at_checked(std::mem::size_of::<u32>()).ok_or(Error::BadSize)?;
+    let (int_bytes, rest) = input
+        .split_at_checked(std::mem::size_of::<u32>())
+        .ok_or(Error::BadSize)?;
     *input = rest;
     Ok(u32::from_le_bytes(
         int_bytes.try_into().map_err(|_| Error::BadSize)?,
@@ -317,12 +327,8 @@ fn sendfile_all<Fd1: rustix::fd::AsFd, Fd2: rustix::fd::AsFd>(
 ) -> Result<(), Error> {
     let mut len = len;
     while len > 0 {
-        let sent = rustix::fs::sendfile(
-            fd_out,
-            fd_in,
-            None,
-            len as usize,
-        ).map_err(|e| Error::SendFile(e.raw_os_error()))?;
+        let sent = rustix::fs::sendfile(fd_out, fd_in, None, len as usize)
+            .map_err(|e| Error::SendFile(e.raw_os_error()))?;
         len = len.checked_sub(sent as u64).ok_or(Error::SizeUnderflow)?
     }
     Ok(())
