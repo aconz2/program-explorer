@@ -1,16 +1,16 @@
+use std::io::{Read, Write};
 use std::path::Path;
-use std::io::{Read,Write};
 
-use http::Method;
-use std::time::Duration;
-use pingora::prelude::{RequestHeader,HttpPeer};
+use bytes::Bytes;
 use clap::Parser;
 use flate2::read::GzDecoder;
-use bytes::Bytes;
+use http::Method;
+use pingora::prelude::{HttpPeer, RequestHeader};
+use std::time::Duration;
 
+use pearchive::{unpack_visitor, PackMemToVec, PackMemVisitor, UnpackVisitor};
 use peserver::api;
 use peserver::api::v2 as apiv2;
-use pearchive::{PackMemToVec,PackMemVisitor,UnpackVisitor,unpack_visitor};
 
 use peserver::util::read_full_client_response_body;
 
@@ -134,20 +134,24 @@ async fn main() {
     let url = apiv2::runi::PREFIX.to_owned() + &args.image;
     let req = {
         let mut x = RequestHeader::build(Method::POST, url.as_bytes(), Some(3)).unwrap();
-        x.insert_header("Content-Type", api::APPLICATION_X_PE_ARCHIVEV1).unwrap();
+        x.insert_header("Content-Type", api::APPLICATION_X_PE_ARCHIVEV1)
+            .unwrap();
         x.insert_header("Content-Length", buf.len()).unwrap();
         if args.gzip {
             x.insert_header("Accept-Encoding", "gzip").unwrap();
         }
         if args.header_too_many {
             for i in 0..1000 {
-                x.insert_header(format!("my-header-{}", i), "blah-blah-blah").unwrap();
+                x.insert_header(format!("my-header-{}", i), "blah-blah-blah")
+                    .unwrap();
             }
         }
         if args.header_too_big {
             // okay doesn't seem like there is an upper limit yet...
             let mut s = String::with_capacity(4096 * 16);
-            for _ in 0..s.capacity() { s.push('x'); }
+            for _ in 0..s.capacity() {
+                s.push('x');
+            }
             x.insert_header("my-big-header", s).unwrap();
         }
         Box::new(x)
@@ -165,7 +169,13 @@ async fn main() {
     println!("{} {:?}", status, res_parts.version);
     print_headers("< ", &res_parts.headers);
 
-    if args.gzip && res_parts.headers.get("Content-encoding").and_then(|x| x.to_str().ok()) != Some("gzip") {
+    if args.gzip
+        && res_parts
+            .headers
+            .get("Content-encoding")
+            .and_then(|x| x.to_str().ok())
+            != Some("gzip")
+    {
         println!("yoooooooooooooooooo gzip not there");
     }
 
@@ -185,6 +195,6 @@ async fn main() {
     let (response, archive) = apiv2::runi::parse_response(&body).unwrap();
     println!("api  response {:#?}", response);
 
-    let mut unpacker = UnpackVisitorPrinter{};
+    let mut unpacker = UnpackVisitorPrinter {};
     unpack_visitor(archive, &mut unpacker).unwrap();
 }

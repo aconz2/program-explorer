@@ -1,20 +1,20 @@
-use std::net::{IpAddr,Ipv6Addr};
 use std::io::Write;
+use std::net::{IpAddr, Ipv6Addr};
 
-use bytes::{Bytes,BytesMut};
-use http::{Response,StatusCode};
-use serde::Serialize;
-use sha2::{Sha256,Digest};
-use base64::prelude::{BASE64_STANDARD,Engine};
+use base64::prelude::{Engine, BASE64_STANDARD};
+use bytes::{Bytes, BytesMut};
 use env_logger;
+use http::{Response, StatusCode};
 use log::Level;
 use rustix::fd::AsFd;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use pingora;
-use pingora::proxy::Session;
 use pingora::protocols::http::ServerSession;
+use pingora::proxy::Session;
 
-use crate::api::{APPLICATION_JSON,APPLICATION_X_PE_ARCHIVEV1};
+use crate::api::{APPLICATION_JSON, APPLICATION_X_PE_ARCHIVEV1};
 
 // taken from https://github.com/swsnr/systemd-journal-logger.rs/blob/main/src/lib.rs
 // which does more than I want by trying to connect to /run/systemd/journal/socket
@@ -47,7 +47,10 @@ pub fn setup_logs() {
     }
 }
 
-pub async fn read_full_server_request_body(session: &mut ServerSession, max_len: usize) -> Result<Bytes, Box<pingora::Error>> {
+pub async fn read_full_server_request_body(
+    session: &mut ServerSession,
+    max_len: usize,
+) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
     while let Some(bytes) = session.read_request_body().await? {
         acc.extend_from_slice(&bytes);
@@ -58,7 +61,9 @@ pub async fn read_full_server_request_body(session: &mut ServerSession, max_len:
     Ok(acc.freeze())
 }
 
-pub async fn read_full_client_response_body(session: &mut pingora::protocols::http::v1::client::HttpSession) -> Result<Bytes, Box<pingora::Error>> {
+pub async fn read_full_client_response_body(
+    session: &mut pingora::protocols::http::v1::client::HttpSession,
+) -> Result<Bytes, Box<pingora::Error>> {
     let mut acc = BytesMut::with_capacity(4096);
     while let Some(bytes) = session.read_body_ref().await? {
         acc.extend_from_slice(bytes);
@@ -100,7 +105,10 @@ pub fn response_string(status: StatusCode, body: &str) -> Response<Vec<u8>> {
         .unwrap()
 }
 
-pub fn response_json<T: Serialize>(status: StatusCode, body: T) -> serde_json::Result<Response<Vec<u8>>> {
+pub fn response_json<T: Serialize>(
+    status: StatusCode,
+    body: T,
+) -> serde_json::Result<Response<Vec<u8>>> {
     Ok(response_json_vec(status, serde_json::to_vec(&body)?))
 }
 
@@ -136,37 +144,40 @@ pub fn etag(data: &[u8]) -> String {
 }
 
 pub mod premade_responses {
-    use once_cell::sync::Lazy;
-    use pingora::protocols::http::error_resp;
-    use pingora::http::ResponseHeader;
-    use http::StatusCode;
     use crate::api::MAX_REQ_PER_SEC;
+    use http::StatusCode;
+    use once_cell::sync::Lazy;
+    use pingora::http::ResponseHeader;
+    use pingora::protocols::http::error_resp;
 
     // annoyingly this doesn't work because status gets captured
     //fn e(status: StatusCode) -> Lazy<ResponseHeader> {
     //    Lazy::new(move || error_resp::gen_error_response(status.into()))
     //}
 
-    pub static NOT_FOUND: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::NOT_FOUND.into()));
-    pub static INTERNAL_SERVER_ERROR: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::INTERNAL_SERVER_ERROR.into()));
-    pub static SERVICE_UNAVAILABLE: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::SERVICE_UNAVAILABLE.into()));
-    pub static PAYLOAD_TOO_LARGE: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(StatusCode::PAYLOAD_TOO_LARGE.into()));
+    pub static NOT_FOUND: Lazy<ResponseHeader> =
+        Lazy::new(|| error_resp::gen_error_response(StatusCode::NOT_FOUND.into()));
+    pub static INTERNAL_SERVER_ERROR: Lazy<ResponseHeader> =
+        Lazy::new(|| error_resp::gen_error_response(StatusCode::INTERNAL_SERVER_ERROR.into()));
+    pub static SERVICE_UNAVAILABLE: Lazy<ResponseHeader> =
+        Lazy::new(|| error_resp::gen_error_response(StatusCode::SERVICE_UNAVAILABLE.into()));
+    pub static PAYLOAD_TOO_LARGE: Lazy<ResponseHeader> =
+        Lazy::new(|| error_resp::gen_error_response(StatusCode::PAYLOAD_TOO_LARGE.into()));
 
     pub static TOO_MANY_REQUESTS: Lazy<ResponseHeader> = Lazy::new(|| {
-            let mut header = ResponseHeader::build(StatusCode::TOO_MANY_REQUESTS, Some(3)).unwrap();
-            header
-                .insert_header("X-Rate-Limit-Limit", MAX_REQ_PER_SEC.to_string())
-                .unwrap();
-            header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
-            header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
-            header.insert_header("Content-Length", "0").unwrap();
-            header
+        let mut header = ResponseHeader::build(StatusCode::TOO_MANY_REQUESTS, Some(3)).unwrap();
+        header
+            .insert_header("X-Rate-Limit-Limit", MAX_REQ_PER_SEC.to_string())
+            .unwrap();
+        header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
+        header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
+        header.insert_header("Content-Length", "0").unwrap();
+        header
     });
 
     pub static NOT_MODIFIED: Lazy<ResponseHeader> = Lazy::new(|| {
-            let mut header = ResponseHeader::build(StatusCode::NOT_MODIFIED, Some(1)).unwrap();
-            header.insert_header("Content-Length", "0").unwrap();
-            header
+        let mut header = ResponseHeader::build(StatusCode::NOT_MODIFIED, Some(1)).unwrap();
+        header.insert_header("Content-Length", "0").unwrap();
+        header
     });
 }
-

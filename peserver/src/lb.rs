@@ -1,38 +1,37 @@
-use std::sync::Arc;
-use std::time::Duration;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
+use std::time::Duration;
 
-use pingora::prelude::{timeout,HttpPeer};
-use pingora::http::{RequestHeader};
-use pingora::services::background::{background_service,BackgroundService};
-use pingora::server::configuration::{Opt,ServerConf};
-use pingora::server::Server;
-use pingora::Result;
-use pingora::proxy::{ProxyHttp, Session};
-use pingora_limits::rate::Rate;
+use pingora::http::RequestHeader;
+use pingora::prelude::{timeout, HttpPeer};
 use pingora::protocols::http::v1::common::header_value_content_length;
+use pingora::protocols::l4::socket::SocketAddr;
+use pingora::proxy::{ProxyHttp, Session};
+use pingora::server::configuration::{Opt, ServerConf};
+use pingora::server::Server;
+use pingora::services::background::{background_service, BackgroundService};
 use pingora::services::listening::Service;
 use pingora::upstreams::peer::Peer;
-use pingora::protocols::l4::socket::SocketAddr;
+use pingora::Result;
+use pingora_limits::rate::Rate;
 
 use async_trait::async_trait;
-use http::{Method,StatusCode,header};
-use log::{error,info,warn};
-use once_cell::sync::Lazy;
-use tokio::sync::{Semaphore,OwnedSemaphorePermit};
-use prometheus::{register_int_counter,IntCounter};
 use clap::Parser;
+use http::{header, Method, StatusCode};
+use log::{error, info, warn};
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter, IntCounter};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use peserver::api::v2 as apiv2;
 use peserver::api;
+use peserver::api::v2 as apiv2;
 
-use peserver::util::{read_full_client_response_body,session_ip_id,setup_logs};
 use peserver::util::premade_responses;
+use peserver::util::{read_full_client_response_body, session_ip_id, setup_logs};
 
-static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("lb_req_run", "Number of run requests").unwrap()
-});
+static REQ_RUN_COUNT: Lazy<IntCounter> =
+    Lazy::new(|| register_int_counter!("lb_req_run", "Number of run requests").unwrap());
 
 // write_response_header_ref makes a Box::new(x.clone()) internally! I guess it has to but
 // maybe there could be a path to take an Arc so that you don't actually have to copy?
@@ -45,7 +44,8 @@ const TLS_FALSE: bool = false;
 // TODO understand how to tune these
 const HASHES: usize = 4;
 const SLOTS: usize = 1024;
-static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
+static RATE_LIMITER: Lazy<Rate> =
+    Lazy::new(|| Rate::new_with_estimator_config(Duration::from_secs(1), HASHES, SLOTS));
 
 type WorkerId = u16;
 
@@ -58,7 +58,10 @@ struct Worker {
 
 impl Worker {
     fn new(peer: HttpPeer, max_conn: usize) -> Self {
-        Self { peer, max_conn: Semaphore::new(max_conn).into() }
+        Self {
+            peer,
+            max_conn: Semaphore::new(max_conn).into(),
+        }
     }
 
     fn address(&self) -> &SocketAddr {
@@ -74,8 +77,12 @@ struct Workers {
 
 impl Workers {
     fn new(workers: Vec<Worker>, image_check_frequency: Duration) -> Option<Self> {
-        if workers.is_empty() { return None; }
-        if workers.len() > WorkerId::MAX.into() { return None; }
+        if workers.is_empty() {
+            return None;
+        }
+        if workers.len() > WorkerId::MAX.into() {
+            return None;
+        }
 
         let workers: Vec<_> = workers.into_iter().map(Arc::new).collect();
 
@@ -85,7 +92,9 @@ impl Workers {
         })
     }
 
-    fn get_worker(&self, id: WorkerId) -> Option<&Arc<Worker>> { self.workers.get(id as usize) }
+    fn get_worker(&self, id: WorkerId) -> Option<&Arc<Worker>> {
+        self.workers.get(id as usize)
+    }
 
     async fn get_max_conn(&self, peer: &HttpPeer) -> Result<usize, Box<pingora::Error>> {
         let connector = pingora::connectors::http::v1::Connector::new(None);
@@ -93,7 +102,8 @@ impl Workers {
         session.read_timeout = Some(Duration::from_secs(5));
         session.write_timeout = Some(Duration::from_secs(5));
         let req = {
-            let x = RequestHeader::build(Method::GET, "/api/internal/maxconn".as_bytes(), None).unwrap();
+            let x = RequestHeader::build(Method::GET, "/api/internal/maxconn".as_bytes(), None)
+                .unwrap();
             Box::new(x)
         };
 
@@ -106,13 +116,14 @@ impl Workers {
         }
         let body = read_full_client_response_body(&mut session).await?;
         let s = String::from_utf8_lossy(&body);
-        s.parse::<usize>().map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))
+        s.parse::<usize>()
+            .map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))
     }
 }
 
 #[async_trait]
 impl BackgroundService for Workers {
-    async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
+    async fn start(&self, _shutdown: pingora::server::ShutdownWatch) -> () {
         //let mut interval = tokio::time::interval(self.image_check_frequency);
         // TODO do this better
         for (id, worker) in self.workers.iter().enumerate() {
@@ -159,9 +170,15 @@ pub struct LBCtx {
 }
 
 impl LBCtx {
-    fn new() -> Self { Self{ inner: None } }
-    fn is_some(&self) -> bool { self.inner.is_some() }
-    fn peer(&self) -> Option<HttpPeer> { self.inner.as_ref().map(|inner| inner.worker.peer.clone()) }
+    fn new() -> Self {
+        Self { inner: None }
+    }
+    fn is_some(&self) -> bool {
+        self.inner.is_some()
+    }
+    fn peer(&self) -> Option<HttpPeer> {
+        self.inner.as_ref().map(|inner| inner.worker.peer.clone())
+    }
     fn replace(&mut self, inner: LBCtxInner) {
         assert!(self.inner.is_none());
         self.inner.replace(inner);
@@ -170,7 +187,10 @@ impl LBCtx {
 
 impl LB {
     fn new(max_conn: usize, workers: Arc<Workers>) -> Self {
-        Self { workers, max_conn: Semaphore::new(max_conn).into() }
+        Self {
+            workers,
+            max_conn: Semaphore::new(max_conn).into(),
+        }
     }
 
     // Ok(true) means request done, ie the image was missed
@@ -183,16 +203,18 @@ impl LB {
         // will just be a 500, not 413
         match header_value_content_length(req_parts.headers.get(header::CONTENT_LENGTH)) {
             Some(l) if l > api::MAX_BODY_SIZE => {
-                session.downstream_session
+                session
+                    .downstream_session
                     .write_response_header_ref(&premade_responses::PAYLOAD_TOO_LARGE)
                     .await?;
-                return Err(pingora::Error::new(pingora::ErrorType::ReadError))
+                return Err(pingora::Error::new(pingora::ErrorType::ReadError));
             }
             _ => {}
         }
 
         let Some(worker) = self.workers.get_worker(0) else {
-            return session.downstream_session
+            return session
+                .downstream_session
                 .write_response_header_ref(&premade_responses::INTERNAL_SERVER_ERROR)
                 .await
                 .map(|_| true);
@@ -203,26 +225,35 @@ impl LB {
                 ctx.replace(ctx_inner);
                 Ok(false)
             }
-            None => {
-                session.downstream_session
-                    .write_response_header_ref(&premade_responses::SERVICE_UNAVAILABLE)
-                    .await
-                    .map(|_| true)
-            }
+            None => session
+                .downstream_session
+                .write_response_header_ref(&premade_responses::SERVICE_UNAVAILABLE)
+                .await
+                .map(|_| true),
         }
     }
 
     async fn get_permits(&self, worker: &Arc<Worker>) -> Option<LBCtxInner> {
         let lb_permit = self.max_conn.clone().try_acquire_owned().ok()?;
         let worker_permit = {
-            match timeout(api::MAX_WAIT_TIMEOUT, worker.max_conn.clone().acquire_owned()).await {
+            match timeout(
+                api::MAX_WAIT_TIMEOUT,
+                worker.max_conn.clone().acquire_owned(),
+            )
+            .await
+            {
                 Ok(Ok(permit)) => permit,
-                _ => {  // either timeout or error acquiring
+                _ => {
+                    // either timeout or error acquiring
                     return None;
                 }
             }
         };
-        Some(LBCtxInner{ lb_permit, worker_permit, worker: worker.clone() })
+        Some(LBCtxInner {
+            lb_permit,
+            worker_permit,
+            worker: worker.clone(),
+        })
     }
 
     fn rate_limit(&self, session: &mut Session, _ctx: &mut LBCtx) -> bool {
@@ -243,7 +274,9 @@ impl LB {
 impl ProxyHttp for LB {
     type CTX = LBCtx;
 
-    fn new_ctx(&self) -> LBCtx { LBCtx::new() }
+    fn new_ctx(&self) -> LBCtx {
+        LBCtx::new()
+    }
 
     // This function is only called once when the server starts
     // for some reason the default has a downstream response compression builder that is disabled
@@ -254,22 +287,24 @@ impl ProxyHttp for LB {
     // Ok(true) means request is done
     async fn request_filter(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         if self.rate_limit(session, ctx) {
-            return session.downstream_session
+            return session
+                .downstream_session
                 .write_response_header_ref(&premade_responses::TOO_MANY_REQUESTS)
                 .await
-                .map(|_| true)
+                .map(|_| true);
         }
 
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
         let ret = match (&req_parts.method, req_parts.uri.path()) {
-            (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => self.apiv2_runi(session, ctx).await,
-            _ => {
-                session.downstream_session
-                    .write_response_header_ref(&premade_responses::NOT_FOUND)
-                    .await
-                    .map(|_| true)
+            (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => {
+                self.apiv2_runi(session, ctx).await
             }
+            _ => session
+                .downstream_session
+                .write_response_header_ref(&premade_responses::NOT_FOUND)
+                .await
+                .map(|_| true),
         };
         ret
     }
@@ -288,11 +323,15 @@ impl ProxyHttp for LB {
     }
 
     // what peer should we send the request to?
-    async fn upstream_peer(&self, _session: &mut Session, ctx: &mut LBCtx) -> Result<Box<HttpPeer>> {
+    async fn upstream_peer(
+        &self,
+        _session: &mut Session,
+        ctx: &mut LBCtx,
+    ) -> Result<Box<HttpPeer>> {
         // should be Some because proxy_upstream_filter should filter those which are None
         ctx.peer()
-           .map(Box::new)
-           .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
+            .map(Box::new)
+            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::ConnectProxyFailure))
     }
 }
 
@@ -326,9 +365,14 @@ fn parse_peers(args: &[String]) -> Result<Vec<Worker>, PeerParseError> {
     for arg in args {
         let (kind, addr) = arg.split_once(':').ok_or(BadFmt)?;
         let worker = match kind {
-            "uds" => Worker::new(HttpPeer::new_uds(addr, TLS_FALSE, "".to_string()).map_err(|_| UdsError)?, 0),
+            "uds" => Worker::new(
+                HttpPeer::new_uds(addr, TLS_FALSE, "".to_string()).map_err(|_| UdsError)?,
+                0,
+            ),
             "tcp" => Worker::new(HttpPeer::new(addr, TLS_FALSE, "".to_string()), 0),
-            _ => { return Err(BadKind); }
+            _ => {
+                return Err(BadKind);
+            }
         };
         ret.push(worker);
     }
@@ -350,7 +394,7 @@ fn main() {
         daemon: false,
         nocapture: false,
         test: false,
-        conf: None // path to configuration file
+        conf: None, // path to configuration file
     });
     let conf = ServerConf::default();
 

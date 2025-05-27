@@ -1,60 +1,57 @@
-use std::time::Duration;
-use std::io::{Read,Write};
 use std::ffi::OsString;
 use std::fs::Permissions;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path};
+use std::path::Path;
+use std::time::Duration;
 
-use pingora_timeout::timeout;
-use pingora::services::listening::Service;
-use pingora::server::Server;
-use pingora::server::configuration::{Opt,ServerConf};
 use pingora::apps::http_app::ServeHttp;
 use pingora::protocols::http::ServerSession;
+use pingora::server::configuration::{Opt, ServerConf};
+use pingora::server::Server;
+use pingora::services::listening::Service;
+use pingora_timeout::timeout;
 
 use async_trait::async_trait;
-use http::{Method,Response,StatusCode,header};
-use serde::{Serialize};
-use log::{info,error,log_enabled};
 use clap::Parser;
-use once_cell::sync::Lazy;
-use prometheus::{register_int_counter,IntCounter};
+use http::{header, Method, Response, StatusCode};
+use log::{error, info, log_enabled};
 use oci_spec::image::{Arch, Os};
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter, IntCounter};
+use serde::Serialize;
 
-use perunner::{worker,create_runtime_spec};
-use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel, PathBufOrOwnedFd};
+use perunner::cloudhypervisor::{ChLogLevel, CloudHypervisorConfig, PathBufOrOwnedFd};
 use perunner::iofile::IoFileBuilder;
-
+use perunner::{create_runtime_spec, worker};
 
 use peserver::api;
-use peserver::api::ContentType;
 use peserver::api::v2 as apiv2;
+use peserver::api::ContentType;
 use peserver::util::{
-    read_full_server_request_body,
-    response_json,response_no_body,response_json_vec,response_pearchivev1,response_string,setup_logs,
+    read_full_server_request_body, response_json, response_json_vec, response_no_body,
+    response_pearchivev1, response_string, setup_logs,
 };
 
-static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("worker_req_run", "Worker number of run requests").unwrap()
-});
+static REQ_RUN_COUNT: Lazy<IntCounter> =
+    Lazy::new(|| register_int_counter!("worker_req_run", "Worker number of run requests").unwrap());
 
-static ERR_CH_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("worker_err_ch", "Worker number of ch errors").unwrap()
-});
+static ERR_CH_COUNT: Lazy<IntCounter> =
+    Lazy::new(|| register_int_counter!("worker_err_ch", "Worker number of ch errors").unwrap());
 
 // timeout we put on the user's process (after the initial crun process exits)
-const RUN_TIMEOUT: Duration      = Duration::from_millis(1000);
+const RUN_TIMEOUT: Duration = Duration::from_millis(1000);
 // overhead from kernel boot and crun start
 const CH_TIMEOUT_EXTRA: Duration = Duration::from_millis(300);
 
-#[derive(Debug,Serialize,Clone)]
+#[derive(Debug, Serialize, Clone)]
 enum Error {
     ReadTimeout,
     Read,
     BadRequest,
     BadImagePath,
     BadReference,
-    ImageServiceError,
+    ImageService,
     IoFileCreate,
     QueueFull,
     WorkerRecv,
@@ -95,19 +92,13 @@ impl From<Error> for StatusCode {
         use Error::*;
         match val {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
-            Read |
-            BadContentType |
-            BadImagePath |
-            OciSpec |
-            BadReference |
-            BadRequest => StatusCode::BAD_REQUEST,
+            Read | BadContentType | BadImagePath | OciSpec | BadReference | BadRequest => {
+                StatusCode::BAD_REQUEST
+            }
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
-            WorkerRecv |
-            IoFileCreate |
-            ResponseRead |
-            Worker |
-            ImageServiceError |
-            Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            WorkerRecv | IoFileCreate | ResponseRead | Worker | ImageService | Internal => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 }
@@ -116,7 +107,7 @@ impl From<Error> for StatusCode {
 impl From<Error> for Response<Vec<u8>> {
     fn from(val: Error) -> Self {
         // response_no_body(self.into())
-        response_json(val.clone().into(), ErrorBody{ error: val }).unwrap()
+        response_json(val.clone().into(), ErrorBody { error: val }).unwrap()
     }
 }
 
@@ -125,18 +116,23 @@ impl HttpRunnerApp {
         REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.req_header();
 
-        let uri_path_reference = apiv2::runi::parse_path(req_parts.uri.path())
-            .ok_or(Error::BadImagePath)?;
+        let uri_path_reference =
+            apiv2::runi::parse_path(req_parts.uri.path()).ok_or(Error::BadImagePath)?;
 
-        let image_service_req = peimage_service::Request::new(&uri_path_reference, Arch::Amd64, Os::Linux)
-            .map_err(|_| Error::BadReference)?;
+        let image_service_req =
+            peimage_service::Request::new(uri_path_reference, Arch::Amd64, Os::Linux)
+                .map_err(|_| Error::BadReference)?;
 
         // TODO rethink error handling and giving better messages
         let image_service_res = {
-            match peimage_service::request_erofs_image(&self.image_service, image_service_req).await {
+            match peimage_service::request_erofs_image(&self.image_service, image_service_req).await
+            {
                 Ok(res) => res,
                 Err(peimage_service::Error::NoMatchingManifest) => {
-                    return Ok(response_string(StatusCode::BAD_REQUEST, "no matching image for amd64+linux"));
+                    return Ok(response_string(
+                        StatusCode::BAD_REQUEST,
+                        "no matching image for amd64+linux",
+                    ));
                 }
                 Err(peimage_service::Error::ManifestNotFound) => {
                     return Ok(response_string(StatusCode::BAD_REQUEST, "no such manifest"));
@@ -145,13 +141,19 @@ impl HttpRunnerApp {
                     return Ok(response_string(StatusCode::BAD_REQUEST, "image too big"));
                 }
                 Err(peimage_service::Error::RatelimitExceeded) => {
-                    return Ok(response_string(StatusCode::INTERNAL_SERVER_ERROR, "ratelimit to registry exceeded"));
+                    return Ok(response_string(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "ratelimit to registry exceeded",
+                    ));
                 }
-                Err(_) => { return Err(Error::ImageServiceError); }
+                Err(_) => {
+                    return Err(Error::ImageService);
+                }
             }
         };
 
-        let content_type = session.req_header()
+        let content_type = session
+            .req_header()
             .headers
             .get(header::CONTENT_TYPE)
             .and_then(|x| x.to_str().ok())
@@ -167,37 +169,48 @@ impl HttpRunnerApp {
         // TODO this is a timeout on the reading the entire body, session.read_timeout
         let read_timeout = Duration::from_millis(2000);
         // TODO ideally could read this in two parts to send the rest to the file
-        let body = timeout(read_timeout, read_full_server_request_body(session, api::MAX_BODY_SIZE))
-            .await
-            .map_err(|_| Error::ReadTimeout)?
-            .map_err(|_| Error::Read)?;
+        let body = timeout(
+            read_timeout,
+            read_full_server_request_body(session, api::MAX_BODY_SIZE),
+        )
+        .await
+        .map_err(|_| Error::ReadTimeout)?
+        .map_err(|_| Error::Read)?;
 
-        let (body_offset, api_req) = apiv2::runi::parse_request(&body, &content_type)
-            .ok_or(Error::BadRequest)?;
+        let (body_offset, api_req) =
+            apiv2::runi::parse_request(&body, &content_type).ok_or(Error::BadRequest)?;
 
-        let runtime_spec = create_runtime_spec(&image_service_res.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
-            .map_err(|e| { error!("got {e:?} when creating runtime_spec"); Error::OciSpec })?;
+        let runtime_spec = create_runtime_spec(
+            &image_service_res.config,
+            api_req.entrypoint.as_deref(),
+            api_req.cmd.as_deref(),
+            api_req.env.as_deref(),
+        )
+        .map_err(|e| {
+            error!("got {e:?} when creating runtime_spec");
+            Error::OciSpec
+        })?;
 
         let ch_config = CloudHypervisorConfig {
-            bin           : self.cloud_hypervisor.clone(),
-            kernel        : self.kernel.clone(),
-            initramfs     : self.initramfs.clone(),
-            log_level     : self.ch_log_level.clone(),
-            console       : self.ch_console,
-            keep_args     : true,
-            event_monitor : false,
+            bin: self.cloud_hypervisor.clone(),
+            kernel: self.kernel.clone(),
+            initramfs: self.initramfs.clone(),
+            log_level: self.ch_log_level.clone(),
+            console: self.ch_console,
+            keep_args: true,
+            event_monitor: false,
         };
 
         let pe_config = peinit::Config {
-            timeout            : RUN_TIMEOUT,
-            oci_runtime_config : serde_json::to_string(&runtime_spec).unwrap(),
-            stdin              : api_req.stdin,
-            strace             : false,
-            crun_debug         : false,
-            rootfs_dir         : None,
-            rootfs_kind        : peinit::RootfsKind::Erofs,
-            response_format    : response_format,
-            kernel_inspect     : false,
+            timeout: RUN_TIMEOUT,
+            oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
+            stdin: api_req.stdin,
+            strace: false,
+            crun_debug: false,
+            rootfs_dir: None,
+            rootfs_kind: peinit::RootfsKind::Erofs,
+            response_format: response_format,
+            kernel_inspect: false,
         };
 
         let io_file = {
@@ -205,33 +218,39 @@ impl HttpRunnerApp {
             match content_type {
                 ContentType::ApplicationJson => {
                     // this is blocking, but is going to memfd so I don't think its bad to do this?
-                    peinit::write_io_file_config(&mut builder, &pe_config, 0).map_err(|_| Error::Internal)?;
+                    peinit::write_io_file_config(&mut builder, &pe_config, 0)
+                        .map_err(|_| Error::Internal)?;
                 }
                 ContentType::PeArchiveV1 => {
                     // this is blocking (as above)
-                    let archive_size: u32 = (body.len() - body_offset).try_into().map_err(|_| Error::Internal)?;
-                    peinit::write_io_file_config(&mut builder, &pe_config, archive_size).map_err(|_| Error::Internal)?;
-                    builder.write_all(&body[body_offset..]).map_err(|_| Error::Internal)?;
+                    let archive_size: u32 = (body.len() - body_offset)
+                        .try_into()
+                        .map_err(|_| Error::Internal)?;
+                    peinit::write_io_file_config(&mut builder, &pe_config, archive_size)
+                        .map_err(|_| Error::Internal)?;
+                    builder
+                        .write_all(&body[body_offset..])
+                        .map_err(|_| Error::Internal)?;
                 }
             }
             builder.finish().map_err(|_| Error::IoFileCreate)?
         };
 
         let worker_input = worker::Input {
-            id         : 42, // id is useless because we are passing a return channel
-            ch_config  : ch_config,
-            ch_timeout : RUN_TIMEOUT + CH_TIMEOUT_EXTRA,
-            io_file    : io_file,
-            image : PathBufOrOwnedFd::Fd(image_service_res.fd),
+            id: 42, // id is useless because we are passing a return channel
+            ch_config: ch_config,
+            ch_timeout: RUN_TIMEOUT + CH_TIMEOUT_EXTRA,
+            io_file: io_file,
+            image: PathBufOrOwnedFd::Fd(image_service_res.fd),
         };
 
         let (resp_sender, resp_receiver) = tokio::sync::oneshot::channel();
 
-        () = self.pool.sender()
+        () = self
+            .pool
+            .sender()
             .try_send((worker_input, resp_sender))
-            .map_err(|_| {
-                Error::QueueFull
-            })?;
+            .map_err(|_| Error::QueueFull)?;
 
         let mut worker_output = resp_receiver
             .await
@@ -243,10 +262,18 @@ impl HttpRunnerApp {
                     let _ = std::io::copy(file, &mut std::io::stderr());
                 }
                 error!("worker error {:?}", postmortem.error);
-                if let Some(args) = postmortem.args { error!("launched ch with {:?}", args); };
-                if let Some(mut err_file) = postmortem.logs.err_file { dump_file("ch err", &mut err_file); }
-                if let Some(mut log_file) = postmortem.logs.log_file { dump_file("ch log", &mut log_file); }
-                if let Some(mut con_file) = postmortem.logs.con_file { dump_file("ch con", &mut con_file); }
+                if let Some(args) = postmortem.args {
+                    error!("launched ch with {:?}", args);
+                };
+                if let Some(mut err_file) = postmortem.logs.err_file {
+                    dump_file("ch err", &mut err_file);
+                }
+                if let Some(mut log_file) = postmortem.logs.log_file {
+                    dump_file("ch log", &mut log_file);
+                }
+                if let Some(mut con_file) = postmortem.logs.con_file {
+                    dump_file("ch con", &mut con_file);
+                }
                 Error::Worker
             })?;
 
@@ -255,16 +282,24 @@ impl HttpRunnerApp {
                 eprintln!("=== {} ===", name);
                 let _ = std::io::copy(file, &mut std::io::stderr());
             }
-            if let Some(mut err_file) = worker_output.ch_logs.err_file { dump_file("ch err", &mut err_file); }
-            if let Some(mut log_file) = worker_output.ch_logs.log_file { dump_file("ch log", &mut log_file); }
-            if let Some(mut con_file) = worker_output.ch_logs.con_file { dump_file("ch con", &mut con_file); }
+            if let Some(mut err_file) = worker_output.ch_logs.err_file {
+                dump_file("ch err", &mut err_file);
+            }
+            if let Some(mut log_file) = worker_output.ch_logs.log_file {
+                dump_file("ch log", &mut log_file);
+            }
+            if let Some(mut con_file) = worker_output.ch_logs.con_file {
+                dump_file("ch con", &mut con_file);
+            }
         }
 
         match response_format {
             peinit::ResponseFormat::JsonV1 => {
                 peinit::read_io_file_response_bytes(&mut worker_output.io_file)
                     .map_err(|_| Error::ResponseRead)
-                    .map(|(_archive_size, json_bytes)| response_json_vec(StatusCode::OK, json_bytes))
+                    .map(|(_archive_size, json_bytes)| {
+                        response_json_vec(StatusCode::OK, json_bytes)
+                    })
             }
             peinit::ResponseFormat::PeArchiveV1 => {
                 peinit::read_io_file_response_archive_bytes(&mut worker_output.io_file)
@@ -274,8 +309,14 @@ impl HttpRunnerApp {
         }
     }
 
-    async fn api_internal_max_conn(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
-        Ok(response_string(StatusCode::OK, &format!("{}", self.max_conn)))
+    async fn api_internal_max_conn(
+        &self,
+        _session: &mut ServerSession,
+    ) -> Result<Response<Vec<u8>>, Error> {
+        Ok(response_string(
+            StatusCode::OK,
+            &format!("{}", self.max_conn),
+        ))
     }
 }
 
@@ -285,11 +326,11 @@ impl ServeHttp for HttpRunnerApp {
         let req_parts: &http::request::Parts = session.req_header();
         //trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (&req_parts.method, req_parts.uri.path()) {
-            (&Method::GET,  "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
-            (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => self.apiv2_runi(session).await,
-            _ => {
-                return response_no_body(StatusCode::NOT_FOUND)
+            (&Method::GET, "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
+            (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => {
+                self.apiv2_runi(session).await
             }
+            _ => return response_no_body(StatusCode::NOT_FOUND),
         };
         res.unwrap_or_else(|e| e.into())
     }
@@ -329,7 +370,7 @@ struct Args {
     #[arg(long)]
     prom: Option<String>,
 
-    #[arg(long, default_value="false")]
+    #[arg(long, default_value = "false")]
     ch_console: bool,
 
     #[arg(long)]
@@ -374,7 +415,7 @@ fn main() {
         daemon: false,
         nocapture: false,
         test: false,
-        conf: None // path to configuration file
+        conf: None, // path to configuration file
     });
 
     let conf = ServerConf::default();
@@ -409,10 +450,10 @@ fn main() {
 
     nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &server_cpuset).unwrap();
 
-    let max_conn = pool.len() * 2;  // TODO is this a good amount?
+    let max_conn = pool.len() * 2; // TODO is this a good amount?
     let app = HttpRunnerApp {
-        pool             : pool,
-        max_conn         : max_conn,
+        pool: pool,
+        max_conn: max_conn,
         // NOTE: these files are opened/passed as paths into cloud hypervisor so changes will
         // get picked up, which may not be what we want. currently ch doesn't support passing
         // as fd= otherwise we could open them here and be sure things didn't change. but it is a
@@ -420,11 +461,11 @@ fn main() {
         // run
         // and really for these things, I am bundling them in a container so won't get switched
         // we join with cwd but if you provide an abspath it will be abs
-        kernel           : cwd.join(args.kernel).into(),
-        initramfs        : cwd.join(args.initramfs).into(),
-        cloud_hypervisor : cwd.join(args.ch).into(),
+        kernel: cwd.join(args.kernel).into(),
+        initramfs: cwd.join(args.initramfs).into(),
+        cloud_hypervisor: cwd.join(args.ch).into(),
 
-        ch_console:   args.ch_console,
+        ch_console: args.ch_console,
         ch_log_level: args.ch_log_level.map(|x| x.as_str().try_into().unwrap()),
 
         image_service: args.image_service,
