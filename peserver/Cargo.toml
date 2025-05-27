@@ -39,9 +39,9 @@ peimage = { version = "0.1.0", path = "../peimage" }
 peimage-service = { version = "0.1.0", path = "../peimage-service" }
 peinit = { version = "0.1.0", path = "../peinit" }
 perunner = { version = "0.1.0", path = "../perunner", features = ["asynk"] }
-pingora = { version = "0.4.0", features = ["proxy", "lb"] }
-pingora-limits = "0.4.0"
-pingora-timeout = "0.4.0"
+pingora = { version = "0.5.0", features = ["proxy", "lb"] }
+pingora-limits = "0.5.0"
+pingora-timeout = "0.5.0"
 prometheus = "0.13.4"
 rustix = "0.38.44"
 serde = { version = "1.0.214", features = ["serde_derive"] }
