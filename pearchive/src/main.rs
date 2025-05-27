@@ -56,7 +56,7 @@ fn unpackfd(args: &[String]) {
         .get(0)
         .ok_or(Error::MissingArg)
         .unwrap()
-        .parse::<libc::c_int>()
+        .parse::<i32>()
         .unwrap();
     let outname = args.get(1).ok_or(Error::MissingArg).unwrap();
     let len = args
@@ -93,7 +93,7 @@ fn packfd(args: &[String]) {
         .get(1)
         .ok_or(Error::MissingArg)
         .unwrap()
-        .parse::<libc::c_int>()
+        .parse::<i32>()
         .unwrap();
     let indirpath = Path::new(indir);
     assert!(indirpath.is_dir(), "{:?} should be a dir", indirpath);

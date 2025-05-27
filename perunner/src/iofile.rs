@@ -105,7 +105,7 @@ fn round_up_to<const N: u64>(x: u64) -> u64 {
 
 pub fn round_up_file_to_pmem_size<F: AsFd>(f: F) -> rustix::io::Result<u64> {
     let stat = fstat(&f)?;
-    let cur = stat.st_size as u64;
+    let cur = stat.st_size.try_into().unwrap_or(0);
     let newlen = round_up_to::<PMEM_ALIGN_SIZE>(cur);
     if cur != newlen {
         ftruncate(f, newlen)?;

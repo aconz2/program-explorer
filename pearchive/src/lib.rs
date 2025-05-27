@@ -3,15 +3,20 @@ use std::ffi::{CStr, CString, OsStr};
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Cursor, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use memmap2::MmapOptions;
-use rustix::fs::{FileType, RawDir};
+use rustix::{
+    fs::{FileType, RawDir},
+    fd::AsFd,
+    process::{geteuid, getegid},
+    thread::{unshare, UnshareFlags},
+};
 
 mod open;
-use open::{openat, openat_w, opendirat, opendirat_cwd, openpathat, opendir};
+use open::{openat, openat_w, opendirat, opendirat_cwd, openpathat, opendir, mkdirat};
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
@@ -60,6 +65,7 @@ pub enum Error {
     Mmap,
     StackEmpty,
     BadCStr,
+    SizeUnderflow,
 }
 
 pub enum ArchiveFormat1Tag {
@@ -84,12 +90,12 @@ pub trait UnpackVisitor {
     fn on_file(&mut self, path: &Path, data: &[u8]) -> bool;
 }
 
-struct PackFsToWriter<W: Write + AsRawFd> {
+struct PackFsToWriter<W: Write + AsFd> {
     writer: BufWriter<W>,
     depth: usize,
 }
 
-impl<W: Write + AsRawFd> PackFsToWriter<W> {
+impl<W: Write + AsFd> PackFsToWriter<W> {
     fn new(out: W) -> Self {
         Self {
             depth: 0,
@@ -102,8 +108,8 @@ impl<W: Write + AsRawFd> PackFsToWriter<W> {
     }
 }
 
-impl<W: Write + AsRawFd> PackFsVisitor for PackFsToWriter<W> {
-    fn on_file(&mut self, name: &CStr, size: u64, mut fd: OwnedFd) -> Result<(), Error> {
+impl<W: Write + AsFd> PackFsVisitor for PackFsToWriter<W> {
+    fn on_file(&mut self, name: &CStr, size: u64, fd: OwnedFd) -> Result<(), Error> {
         let size_u32: u32 = size.try_into().map_err(|_| Error::Write)?;
         self.writer
             .write_all(&[ArchiveFormat1Tag::File as u8])
@@ -115,7 +121,7 @@ impl<W: Write + AsRawFd> PackFsVisitor for PackFsToWriter<W> {
             .write_all(&size_u32.to_le_bytes())
             .map_err(|_| Error::Write)?;
         self.writer.flush().map_err(|_| Error::Flush)?;
-        sendfile_all(&mut fd, self.writer.get_mut(), size)?;
+        sendfile_all(&fd, self.writer.get_ref(), size)?;
         Ok(())
     }
 
@@ -244,17 +250,12 @@ impl PackMemVisitor for PackMemToVec {
 }
 
 fn unshare_user() -> Result<(), Error> {
-    let uid = unsafe { libc::geteuid() };
-    let gid = unsafe { libc::getegid() };
-    unsafe {
-        let ret = libc::unshare(libc::CLONE_NEWUSER);
-        if ret < 0 {
-            return Err(Error::Unshare);
-        }
-    }
-    fs::write("/proc/self/uid_map", format!("0 {} 1", uid).as_bytes()).map_err(|_| Error::Write)?;
+    let uid = geteuid();
+    let gid = getegid();
+    unshare(UnshareFlags::NEWUSER).map_err(|_| Error::Unshare)?;
+    fs::write("/proc/self/uid_map", format!("0 {} 1", uid.as_raw()).as_bytes()).map_err(|_| Error::Write)?;
     fs::write("/proc/self/setgroups", b"deny").map_err(|_| Error::Write)?;
-    fs::write("/proc/self/gid_map", format!("0 {} 1", gid).as_bytes()).map_err(|_| Error::Write)?;
+    fs::write("/proc/self/gid_map", format!("0 {} 1", gid.as_raw()).as_bytes()).map_err(|_| Error::Write)?;
     Ok(())
 }
 
@@ -263,16 +264,6 @@ fn chroot(dir: &Path) -> Result<(), Error> {
     fs::chroot(dir).map_err(|_| Error::Chroot)?;
     std::env::set_current_dir("/").map_err(|_| Error::Chdir)?;
     Ok(())
-}
-
-fn mkdirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
-    unsafe {
-        let ret = libc::mkdirat(fd.as_raw_fd(), name.as_ptr(), MKDIR_MODE);
-        if ret < 0 {
-            return Err(Error::MkdirAt);
-        }
-        Ok(())
-    }
 }
 
 impl TryFrom<&u8> for ArchiveFormat1Tag {
@@ -314,42 +305,25 @@ fn read_cstr<'a>(input: &mut &'a [u8]) -> Result<&'a CStr, Error> {
     Err(Error::BadName)
 }
 
-fn file_size<Fd: AsRawFd>(fd: &Fd) -> Result<u64, Error> {
-    use std::mem;
-    let size = unsafe {
-        let mut buf: libc::stat = mem::zeroed();
-        let ret = libc::fstat(fd.as_raw_fd(), &mut buf as *mut _);
-        if ret < 0 {
-            return Err(Error::Fstat);
-        }
-        buf.st_size
-    };
-    // dude st_size is signed here and unsigned in statx
-    size.try_into().map_err(|_| Error::Fstat)
+fn file_size<Fd: rustix::fd::AsFd>(fd: &Fd) -> Result<u64, Error> {
+    let stat = rustix::fs::fstat(fd).map_err(|_| Error::Fstat)?;
+    Ok(stat.st_size.try_into().unwrap_or(0))
 }
 
-fn sendfile_all<Fd1: AsRawFd, Fd2: AsRawFd>(
-    fd_in: &mut Fd1,
-    fd_out: &mut Fd2,
+fn sendfile_all<Fd1: rustix::fd::AsFd, Fd2: rustix::fd::AsFd>(
+    fd_in: &Fd1,
+    fd_out: &Fd2,
     len: u64,
 ) -> Result<(), Error> {
-    use std::ptr;
     let mut len = len;
     while len > 0 {
-        let ret = unsafe {
-            libc::sendfile(
-                fd_out.as_raw_fd(),
-                fd_in.as_raw_fd(),
-                ptr::null_mut(),
-                len as usize,
-            )
-        };
-        if ret <= 0 {
-            return Err(Error::SendFile(unsafe { *libc::__errno_location() }));
-        }
-        let ret = ret as u64;
-        assert!(ret <= len);
-        len -= ret;
+        let sent = rustix::fs::sendfile(
+            fd_out,
+            fd_in,
+            None,
+            len as usize,
+        ).map_err(|e| Error::SendFile(e.raw_os_error()))?;
+        len = len.checked_sub(sent as u64).ok_or(Error::SizeUnderflow)?
     }
     Ok(())
 }
@@ -397,7 +371,7 @@ pub fn visit_dir<V: PackFsVisitor>(dir: &Path, v: &mut V) -> Result<(), Error> {
     visit_dirc(&cstr, v)
 }
 
-pub fn pack_dir_to_writer<W: Write + AsRawFd>(dir: &Path, writer: W) -> Result<W, Error> {
+pub fn pack_dir_to_writer<W: Write + AsFd>(dir: &Path, writer: W) -> Result<W, Error> {
     let mut visitor = PackFsToWriter::new(writer);
     visit_dir(dir, &mut visitor)?;
     visitor.into_file()
@@ -561,7 +535,6 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::fs;
-    use std::os::fd::FromRawFd;
     use std::path::PathBuf;
     //use std::thread;
     use std::io::{Seek, SeekFrom};
@@ -624,11 +597,13 @@ mod tests {
     }
 
     fn tempfile() -> File {
-        unsafe {
-            let ret = libc::open(c"/tmp".as_ptr(), libc::O_TMPFILE | libc::O_RDWR, 0o600);
-            assert!(ret > 0);
-            File::from_raw_fd(ret)
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(rustix::fs::OFlags::TMPFILE.bits().try_into().unwrap())
+            .open("/tmp")
+            .unwrap()
     }
 
     #[test]

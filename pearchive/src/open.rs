@@ -1,4 +1,4 @@
-use crate::{Error, FILE_MODE};
+use crate::{Error, FILE_MODE, MKDIR_MODE};
 use std::ffi::CStr;
 
 use rustix::{
@@ -48,3 +48,9 @@ pub(crate) fn openpathat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Erro
         ResolveFlags::BENEATH,
     ).map_err(|_| Error::OpenAt)
 }
+
+pub(crate) fn mkdirat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
+    rustix::fs::mkdirat(fd, name, Mode::from_bits_truncate(MKDIR_MODE))
+        .map_err(|_| Error::MkdirAt)
+}
+

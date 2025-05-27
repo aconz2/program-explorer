@@ -1802,7 +1802,6 @@ name = "pearchive"
 version = "0.1.0"
 dependencies = [
  "byteorder",
- "libc",
  "memmap2",
  "rand 0.8.5",
  "rustix 0.38.44",
