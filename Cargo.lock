@@ -1972,6 +1972,7 @@ dependencies = [
  "once_cell",
  "pearchive",
  "peimage",
+ "peimage-service",
  "peinit",
  "perunner",
  "pingora",

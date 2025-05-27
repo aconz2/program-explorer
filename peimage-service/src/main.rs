@@ -332,6 +332,7 @@ async fn main() {
     } else {
         BTreeMap::new()
     };
+    info!("loaded {} entries into auth", auth.len());
 
     let peoci_cache_dir = std::env::vars()
         .find(|(k, _v)| k == "PEOCI_CACHE")

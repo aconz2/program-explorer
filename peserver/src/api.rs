@@ -145,3 +145,60 @@ pub mod v1 {
         }
     }
 }
+
+pub mod v2 {
+    pub mod runi {
+        use super::super::ContentType;
+        use serde::{Serialize,Deserialize};
+        use peinit;
+
+        pub const PREFIX: &str = "/api/v1/run2/";
+
+        #[derive(Serialize,Deserialize)]
+        pub struct Request {
+            pub stdin      : Option<String>,       // filename that will be set as stdin, noop
+                                                   // for content-type: application/json
+            pub entrypoint : Option<Vec<String>>,  // as per oci image config
+            pub cmd        : Option<Vec<String>>,  // as per oci image config
+            pub env        : Option<Vec<String>>,  // as per oci image config
+        }
+
+        pub type Response = peinit::Response;
+
+        // /api/v2/runi/<reference>
+        pub fn parse_path(s: &str) -> Option<&str> {
+            let x = s.strip_prefix(PREFIX)?;
+            // https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
+            if x.len() > 255 { return None; }
+            Some(x)
+        }
+
+        pub fn parse_request(body: &[u8], content_type: &ContentType) -> Option<(usize, Request)> {
+            match content_type {
+                ContentType::ApplicationJson => {
+                    let req = serde_json::from_slice(body).ok()?;
+                    Some((0, req))
+                }
+                ContentType::PeArchiveV1 => {
+                    if body.len() < 4 { return None; }
+                    let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+                    let slice = body.get(4..4+json_size)?;
+                    let req = serde_json::from_slice(slice).ok()?;
+                    Some((4+json_size, req))
+                }
+            }
+        }
+
+        // assumes pearchivev1 format
+        // <u32: response size> <response json> <archive>
+        pub fn parse_response(body: &[u8]) -> Option<(Response, &[u8])> {
+            if body.len() < 4 { return None; }
+            let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+            let slice = body.get(4..4+json_size)?;
+            let response: Response = serde_json::from_slice(slice).ok()?;
+            let rem = body.get(4+json_size..)?;
+            Some((response, rem))
+        }
+
+    }
+}

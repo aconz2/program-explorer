@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use bytes::Bytes;
 
 use peserver::api;
-use peserver::api::v1 as apiv1;
+use peserver::api::v2 as apiv2;
 use pearchive::{PackMemToVec,PackMemVisitor,UnpackVisitor,unpack_visitor};
 
 use peserver::util::read_full_client_response_body;
@@ -47,10 +47,10 @@ impl UnpackVisitor for UnpackVisitorPrinter {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(long, default_value = "127.0.0.1:6188")]
+    #[arg(long, default_value = "localhost:6188")]
     addr: String,
 
-    #[arg(long, default_value = "sha256:22f27168517de1f58dae0ad51eacf1527e7e7ccc47512d3946f56bdbe913f564")]
+    #[arg(long, default_value = "index.docker.io/library/busybox:1.36.0")]
     image: String,
 
     #[arg(long)]
@@ -104,7 +104,7 @@ async fn main() {
     session.read_timeout = Some(Duration::from_secs(5));
     session.write_timeout = Some(Duration::from_secs(5));
 
-    let api_req = apiv1::runi::Request {
+    let api_req = apiv2::runi::Request {
         cmd: Some(args.args),
         entrypoint: Some(vec![]),
         stdin: args.stdin,
@@ -131,7 +131,7 @@ async fn main() {
         }
     };
 
-    let url = apiv1::runi::PREFIX.to_owned() + &args.image;
+    let url = apiv2::runi::PREFIX.to_owned() + &args.image;
     let req = {
         let mut x = RequestHeader::build(Method::POST, url.as_bytes(), Some(3)).unwrap();
         x.insert_header("Content-Type", api::APPLICATION_X_PE_ARCHIVEV1).unwrap();
@@ -182,7 +182,7 @@ async fn main() {
         return;
     }
     //hexdump(&body[..min(body.len(), 256)]);
-    let (response, archive) = apiv1::runi::parse_response(&body).unwrap();
+    let (response, archive) = apiv2::runi::parse_response(&body).unwrap();
     println!("api  response {:#?}", response);
 
     let mut unpacker = UnpackVisitorPrinter{};

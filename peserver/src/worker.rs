@@ -3,7 +3,7 @@ use std::io::{Read,Write};
 use std::ffi::OsString;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path,PathBuf};
+use std::path::{Path};
 
 use pingora_timeout::timeout;
 use pingora::services::listening::Service;
@@ -15,29 +15,24 @@ use pingora::protocols::http::ServerSession;
 use async_trait::async_trait;
 use http::{Method,Response,StatusCode,header};
 use serde::{Serialize};
-use log::{info,error,log_enabled,debug};
+use log::{info,error,log_enabled};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter,IntCounter};
-use arc_swap::ArcSwap;
+use oci_spec::image::{Arch, Os};
 
 use perunner::{worker,create_runtime_spec};
 use perunner::cloudhypervisor::{CloudHypervisorConfig,ChLogLevel, PathBufOrOwnedFd};
 use perunner::iofile::IoFileBuilder;
 
-use peimage::index::PEImageMultiIndex;
 
 use peserver::api;
 use peserver::api::ContentType;
-use peserver::api::v1 as apiv1;
+use peserver::api::v2 as apiv2;
 use peserver::util::{
     read_full_server_request_body,
     response_json,response_no_body,response_json_vec,response_pearchivev1,response_string,setup_logs,
 };
-
-static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("worker_req_images", "Worker number of images requests").unwrap()
-});
 
 static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!("worker_req_run", "Worker number of run requests").unwrap()
@@ -58,8 +53,8 @@ enum Error {
     Read,
     BadRequest,
     BadImagePath,
-    BadImageConfig,
-    NoSuchImage,
+    BadReference,
+    ImageServiceError,
     IoFileCreate,
     QueueFull,
     WorkerRecv,
@@ -67,7 +62,6 @@ enum Error {
     ResponseRead,
     Worker,
     Internal,
-    Serialize,
     OciSpec,
 }
 
@@ -77,16 +71,14 @@ struct ErrorBody {
 }
 
 struct HttpRunnerApp {
-    pub pool: worker::asynk::Pool,
-    pub max_conn: usize,
-    pub index: ArcSwap<PEImageMultiIndex>,
-    pub cloud_hypervisor: OsString,
-    pub initramfs: OsString,
-    pub kernel: OsString,
-    pub ch_console: bool,
-    pub ch_log_level: Option<ChLogLevel>,
-    pub index_files: Vec<PathBuf>,
-    pub index_dirs: Vec<PathBuf>,
+    pool: worker::asynk::Pool,
+    max_conn: usize,
+    cloud_hypervisor: OsString,
+    initramfs: OsString,
+    kernel: OsString,
+    ch_console: bool,
+    ch_log_level: Option<ChLogLevel>,
+    image_service: String,
 }
 
 //fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -104,18 +96,17 @@ impl From<Error> for StatusCode {
         match val {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
             Read |
-            NoSuchImage |
             BadContentType |
             BadImagePath |
-            BadImageConfig |
             OciSpec |
+            BadReference |
             BadRequest => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv |
             IoFileCreate |
             ResponseRead |
             Worker |
-            Serialize |
+            ImageServiceError |
             Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -130,16 +121,35 @@ impl From<Error> for Response<Vec<u8>> {
 }
 
 impl HttpRunnerApp {
-    async fn apiv1_runi(&self, session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
+    async fn apiv2_runi(&self, session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.req_header();
 
-        let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path())
+        let uri_path_reference = apiv2::runi::parse_path(req_parts.uri.path())
             .ok_or(Error::BadImagePath)?;
 
-        let index = self.index.load();
-        let image_entry = index.get(uri_path_image)
-            .ok_or(Error::NoSuchImage)?;
+        let image_service_req = peimage_service::Request::new(&uri_path_reference, Arch::Amd64, Os::Linux)
+            .map_err(|_| Error::BadReference)?;
+
+        // TODO rethink error handling and giving better messages
+        let image_service_res = {
+            match peimage_service::request_erofs_image(&self.image_service, image_service_req).await {
+                Ok(res) => res,
+                Err(peimage_service::Error::NoMatchingManifest) => {
+                    return Ok(response_string(StatusCode::BAD_REQUEST, "no matching image for amd64+linux"));
+                }
+                Err(peimage_service::Error::ManifestNotFound) => {
+                    return Ok(response_string(StatusCode::BAD_REQUEST, "no such manifest"));
+                }
+                Err(peimage_service::Error::ImageTooBig) => {
+                    return Ok(response_string(StatusCode::BAD_REQUEST, "image too big"));
+                }
+                Err(peimage_service::Error::RatelimitExceeded) => {
+                    return Ok(response_string(StatusCode::INTERNAL_SERVER_ERROR, "ratelimit to registry exceeded"));
+                }
+                Err(_) => { return Err(Error::ImageServiceError); }
+            }
+        };
 
         let content_type = session.req_header()
             .headers
@@ -162,13 +172,11 @@ impl HttpRunnerApp {
             .map_err(|_| Error::ReadTimeout)?
             .map_err(|_| Error::Read)?;
 
-        let (body_offset, api_req) = apiv1::runi::parse_request(&body, &content_type)
+        let (body_offset, api_req) = apiv2::runi::parse_request(&body, &content_type)
             .ok_or(Error::BadRequest)?;
 
-        let config = (&image_entry.image.config).try_into()
-            .map_err(|_| Error::BadImageConfig)?;
-        let runtime_spec = create_runtime_spec(&config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
-            .map_err(|_| Error::OciSpec)?;
+        let runtime_spec = create_runtime_spec(&image_service_res.config, api_req.entrypoint.as_deref(), api_req.cmd.as_deref(), api_req.env.as_deref())
+            .map_err(|e| { error!("got {e:?} when creating runtime_spec"); Error::OciSpec })?;
 
         let ch_config = CloudHypervisorConfig {
             bin           : self.cloud_hypervisor.clone(),
@@ -186,8 +194,8 @@ impl HttpRunnerApp {
             stdin              : api_req.stdin,
             strace             : false,
             crun_debug         : false,
-            rootfs_dir         : Some(image_entry.image.rootfs.clone()),
-            rootfs_kind        : image_entry.rootfs_kind,
+            rootfs_dir         : None,
+            rootfs_kind        : peinit::RootfsKind::Erofs,
             response_format    : response_format,
             kernel_inspect     : false,
         };
@@ -196,11 +204,11 @@ impl HttpRunnerApp {
             let mut builder = IoFileBuilder::new().map_err(|_| Error::IoFileCreate)?;
             match content_type {
                 ContentType::ApplicationJson => {
-                    // this is blocking, but is going to tmpfs so I don't think its bad to do this?
+                    // this is blocking, but is going to memfd so I don't think its bad to do this?
                     peinit::write_io_file_config(&mut builder, &pe_config, 0).map_err(|_| Error::Internal)?;
                 }
                 ContentType::PeArchiveV1 => {
-                    // this is blocking but should be fine, right?
+                    // this is blocking (as above)
                     let archive_size: u32 = (body.len() - body_offset).try_into().map_err(|_| Error::Internal)?;
                     peinit::write_io_file_config(&mut builder, &pe_config, archive_size).map_err(|_| Error::Internal)?;
                     builder.write_all(&body[body_offset..]).map_err(|_| Error::Internal)?;
@@ -214,7 +222,7 @@ impl HttpRunnerApp {
             ch_config  : ch_config,
             ch_timeout : RUN_TIMEOUT + CH_TIMEOUT_EXTRA,
             io_file    : io_file,
-            image : PathBufOrOwnedFd::PathBuf(image_entry.path.clone()),
+            image : PathBufOrOwnedFd::Fd(image_service_res.fd),
         };
 
         let (resp_sender, resp_receiver) = tokio::sync::oneshot::channel();
@@ -235,7 +243,7 @@ impl HttpRunnerApp {
                     let _ = std::io::copy(file, &mut std::io::stderr());
                 }
                 error!("worker error {:?}", postmortem.error);
-                if let Some(args) = postmortem.args { eprintln!("launched ch with {:?}", args); };
+                if let Some(args) = postmortem.args { error!("launched ch with {:?}", args); };
                 if let Some(mut err_file) = postmortem.logs.err_file { dump_file("ch err", &mut err_file); }
                 if let Some(mut log_file) = postmortem.logs.log_file { dump_file("ch log", &mut log_file); }
                 if let Some(mut con_file) = postmortem.logs.con_file { dump_file("ch con", &mut con_file); }
@@ -266,34 +274,8 @@ impl HttpRunnerApp {
         }
     }
 
-    async fn apiv1_images(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
-        REQ_IMAGES_COUNT.inc();
-        if let Err(e) = self.reload_index() {
-            error!("error loading index {}", e);
-            return Ok(response_no_body(StatusCode::INTERNAL_SERVER_ERROR));
-        }
-        let index = self.index.load();
-        response_json(StatusCode::OK, Into::<apiv1::images::Response>::into(&**index))
-            .map_err(|_| Error::Serialize)
-    }
-
     async fn api_internal_max_conn(&self, _session: &mut ServerSession) -> Result<Response<Vec<u8>>, Error> {
         Ok(response_string(StatusCode::OK, &format!("{}", self.max_conn)))
-    }
-
-    fn reload_index(&self) -> std::io::Result<()> {
-        let index = {
-            let mut index = PEImageMultiIndex::from_paths_by_digest_with_colon(&self.index_files)?;
-            for dir in &self.index_dirs {
-                index.add_dir(dir)?;
-            }
-            for (k, v) in index.map() {
-                debug!("loaded image {} from {:?}: {}", k, v.path, v.image.id.name());
-            }
-            index
-        };
-        self.index.store(index.into());
-        Ok(())
     }
 }
 
@@ -304,8 +286,7 @@ impl ServeHttp for HttpRunnerApp {
         //trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (&req_parts.method, req_parts.uri.path()) {
             (&Method::GET,  "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
-            (&Method::GET,  apiv1::images::PATH) => self.apiv1_images(session).await,
-            (&Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session).await,
+            (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => self.apiv2_runi(session).await,
             _ => {
                 return response_no_body(StatusCode::NOT_FOUND)
             }
@@ -355,10 +336,7 @@ struct Args {
     ch_log_level: Option<String>,
 
     #[arg(long)]
-    index: Vec<PathBuf>,
-
-    #[arg(long)]
-    index_dir: Vec<PathBuf>,
+    image_service: String,
 }
 
 fn parse_cpuset_colon(x: &str) -> Option<(usize, usize, usize)> {
@@ -435,7 +413,6 @@ fn main() {
     let app = HttpRunnerApp {
         pool             : pool,
         max_conn         : max_conn,
-        index            : ArcSwap::from_pointee(PEImageMultiIndex::default()),
         // NOTE: these files are opened/passed as paths into cloud hypervisor so changes will
         // get picked up, which may not be what we want. currently ch doesn't support passing
         // as fd= otherwise we could open them here and be sure things didn't change. but it is a
@@ -450,8 +427,7 @@ fn main() {
         ch_console:   args.ch_console,
         ch_log_level: args.ch_log_level.map(|x| x.as_str().try_into().unwrap()),
 
-        index_files: args.index,
-        index_dirs : args.index_dir,
+        image_service: args.image_service,
     };
 
     assert_file_exists(&app.kernel);

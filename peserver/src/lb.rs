@@ -1,11 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::{BTreeMap};
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 
 use pingora::prelude::{timeout,HttpPeer};
-use pingora::http::{RequestHeader,ResponseHeader};
+use pingora::http::{RequestHeader};
 use pingora::services::background::{background_service,BackgroundService};
 use pingora::server::configuration::{Opt,ServerConf};
 use pingora::server::Server;
@@ -18,28 +17,18 @@ use pingora::upstreams::peer::Peer;
 use pingora::protocols::l4::socket::SocketAddr;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use http::{Method,StatusCode,header};
-use arc_swap::ArcSwap;
-use log::{error,info,warn,debug};
+use log::{error,info,warn};
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore,OwnedSemaphorePermit};
 use prometheus::{register_int_counter,IntCounter};
 use clap::Parser;
 
-use peserver::api::v1 as apiv1;
+use peserver::api::v2 as apiv2;
 use peserver::api;
 
-use peserver::util::{read_full_client_response_body,session_ip_id,etag,setup_logs};
+use peserver::util::{read_full_client_response_body,session_ip_id,setup_logs};
 use peserver::util::premade_responses;
-
-static REQ_IMAGES_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("lb_req_images", "Number of images requests").unwrap()
-});
-
-static REQ_IMAGES_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("lb_req_images_cache_hit", "Number of images requests cache hit").unwrap()
-});
 
 static REQ_RUN_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!("lb_req_run", "Number of run requests").unwrap()
@@ -60,52 +49,8 @@ static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new_with_estimator_config(D
 
 type WorkerId = u16;
 
-// TODO images probably needs the images kept per worker, image_map might have a list of workerids
-// premade_json should store a merged view of all images
-pub struct ImageData {
-    image_map: BTreeMap<String, WorkerId>,
-    premade_json: Bytes,
-    premade_json_response_header: ResponseHeader,
-    premade_json_etag: String,
-}
-
-impl ImageData {
-    fn from_parts(image_map: BTreeMap<String, WorkerId>,
-                  premade_json: Bytes,
-                  ) -> Self {
-        let premade_json_etag = etag(&premade_json);
-        let premade_json_response_header = {
-            let mut x = ResponseHeader::build(200, Some(3)).unwrap();
-            x.insert_header(header::CONTENT_TYPE, "application/json").unwrap();
-            x.insert_header(header::CONTENT_LENGTH, premade_json.len()).unwrap();
-            x.insert_header(header::CACHE_CONTROL, "max-age=3600").unwrap();
-            x.insert_header(header::ETAG, premade_json_etag.clone()).unwrap();
-            x
-        };
-        Self { image_map, premade_json, premade_json_response_header, premade_json_etag }
-    }
-    fn new() -> Self {
-        let premade_json = serde_json::to_vec(&apiv1::images::Response{images: vec![]}).unwrap();
-        Self::from_parts(
-            BTreeMap::new(),
-            Bytes::from(premade_json),
-        )
-    }
-
-    fn update(&self, id: WorkerId, images: Vec<apiv1::images::Image>) -> Self {
-        let map: BTreeMap<_, _> = {
-            images
-                .iter()
-                .map(|img| (img.info.digest.clone(), id))
-                .collect()
-        };
-        let premade_json = serde_json::to_vec(&apiv1::images::Response{images}).unwrap();
-        Self::from_parts(map, premade_json.into())
-    }
-}
-
 #[derive(Debug)]
-pub struct Worker {
+struct Worker {
     peer: HttpPeer,
     // TODO make this dynamic or something
     max_conn: Arc<Semaphore>,
@@ -122,9 +67,8 @@ impl Worker {
 }
 
 // peers could be dynamic in the future, but always have to maintain the same id
-pub struct Workers {
+struct Workers {
     workers: Vec<Arc<Worker>>,
-    data: ArcSwap<ImageData>,
     image_check_frequency: Duration,
 }
 
@@ -137,46 +81,11 @@ impl Workers {
 
         Some(Self {
             workers,
-            data: ArcSwap::from_pointee(ImageData::new()),
             image_check_frequency,
         })
     }
 
     fn get_worker(&self, id: WorkerId) -> Option<&Arc<Worker>> { self.workers.get(id as usize) }
-
-    fn update_data(&self, worker_id: WorkerId, resp: apiv1::images::Response) {
-        self.data.store(self.data.load().update(worker_id, resp.images).into());
-    }
-
-    async fn do_update(&self, worker_id: WorkerId, peer: &HttpPeer) -> Result<(), Box<pingora::Error>> {
-        let connector = pingora::connectors::http::v1::Connector::new(None);
-        let (mut session, _) = connector.get_http_session(peer).await?;
-        session.read_timeout = Some(Duration::from_secs(5));
-        session.write_timeout = Some(Duration::from_secs(5));
-
-        // TODO: maybe use proper cache headers to only update when changed
-        let req = {
-            let x = RequestHeader::build(Method::GET, apiv1::images::PATH.as_bytes(), None).unwrap();
-            Box::new(x)
-        };
-        let _ = session.write_request_header(req).await?;
-        let _ = session.read_response().await?;
-        let res_parts: &http::response::Parts = session.resp_header().unwrap();
-        if res_parts.status != StatusCode::OK {
-            error!("got bad response for images {:?}", res_parts);
-            return Err(pingora::Error::new(pingora::ErrorType::InternalError));
-        }
-
-        let body = read_full_client_response_body(&mut session).await?;
-        let resp: apiv1::images::Response = serde_json::from_slice(&body)
-            .map_err(|_| pingora::Error::new(pingora::ErrorType::InternalError))?;
-        let n_images = resp.images.len();
-
-        self.update_data(worker_id, resp);
-
-        debug!("updated images for backend {}, {} images", peer, n_images);
-        Ok(())
-    }
 
     async fn get_max_conn(&self, peer: &HttpPeer) -> Result<usize, Box<pingora::Error>> {
         let connector = pingora::connectors::http::v1::Connector::new(None);
@@ -204,39 +113,31 @@ impl Workers {
 #[async_trait]
 impl BackgroundService for Workers {
     async fn start(&self, shutdown: pingora::server::ShutdownWatch) -> () {
-        let mut interval = tokio::time::interval(self.image_check_frequency);
-            // TODO do this better
-            for (id, worker) in self.workers.iter().enumerate() {
-                for _ in 0..20 {
-                    match self.get_max_conn(&worker.peer).await {
-                        Ok(max_conn) => {
-                            info!("updating maxconn for worker={} to {}", id, max_conn);
-                            worker.max_conn.add_permits(max_conn);
-                            break;
-                        }
-                        Err(_) => {
-                            warn!("error getting maxconn for worker={}", id);
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                        }
+        //let mut interval = tokio::time::interval(self.image_check_frequency);
+        // TODO do this better
+        for (id, worker) in self.workers.iter().enumerate() {
+            for _ in 0..20 {
+                match self.get_max_conn(&worker.peer).await {
+                    Ok(max_conn) => {
+                        info!("updating maxconn for worker={} to {}", id, max_conn);
+                        worker.max_conn.add_permits(max_conn);
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("error getting maxconn for worker={}", id);
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
             }
-        loop {
-            if *shutdown.borrow() {
-                return;
-            }
-
-            // shouldn't this be a select on the shutdown signal?
-            interval.tick().await;
-
-            // TODO in parallel or something (if dynamic, hard to spawn task per)
-            for (id, worker) in self.workers.iter().enumerate() {
-                match self.do_update(id.try_into().unwrap(), &worker.peer).await {
-                    Ok(()) => {}
-                    Err(e) => { error!("error getting images for peer {} {:?}", id, e); }
-                }
-            }
         }
+        //loop {
+        //    if *shutdown.borrow() {
+        //        return;
+        //    }
+        //
+        //    // shouldn't this be a select on the shutdown signal?
+        //    interval.tick().await;
+        //}
     }
 }
 
@@ -272,30 +173,8 @@ impl LB {
         Self { workers, max_conn: Semaphore::new(max_conn).into() }
     }
 
-    async fn apiv1_images(&self, session: &mut Session, _ctx: &mut LBCtx) -> Result<()> {
-        REQ_IMAGES_COUNT.inc();
-        session.set_write_timeout(api::DOWNSTREAM_WRITE_TIMEOUT);
-        let downstream_session = &mut session.downstream_session;
-        let data = self.workers.data.load();
-        let req_parts: &http::request::Parts = downstream_session.req_header();
-        match req_parts.headers.get(header::IF_NONE_MATCH) {
-            Some(etag) if etag.as_bytes() == data.premade_json_etag.as_bytes() => {
-                REQ_IMAGES_CACHE_HIT.inc();
-                return session.downstream_session
-                    .write_response_header_ref(&premade_responses::NOT_MODIFIED)
-                    .await
-                    .map(|_| ())
-                }
-            _ => {}
-        }
-        // NOTE these skip any filter modules
-        downstream_session.write_response_header_ref(&data.premade_json_response_header).await?;
-        downstream_session.write_response_body(data.premade_json.clone(), true).await?;
-        Ok(())
-    }
-
     // Ok(true) means request done, ie the image was missed
-    async fn apiv1_runi(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
+    async fn apiv2_runi(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
@@ -312,22 +191,11 @@ impl LB {
             _ => {}
         }
 
-        let uri_path_image = apiv1::runi::parse_path(req_parts.uri.path());
-
-        let image_map = &self.workers.data.load().image_map;
-
-        let worker = uri_path_image
-            .and_then(|image_id| image_map.get(image_id).copied())
-            .and_then(|worker_id| self.workers.get_worker(worker_id));
-
-        let worker = match worker {
-            Some(worker) => worker,
-            None => {
-                return session.downstream_session
-                    .write_response_header_ref(&premade_responses::NOT_FOUND)
-                    .await
-                    .map(|_| true);
-            }
+        let Some(worker) = self.workers.get_worker(0) else {
+            return session.downstream_session
+                .write_response_header_ref(&premade_responses::INTERNAL_SERVER_ERROR)
+                .await
+                .map(|_| true);
         };
 
         match self.get_permits(worker).await {
@@ -395,8 +263,7 @@ impl ProxyHttp for LB {
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
 
         let ret = match (&req_parts.method, req_parts.uri.path()) {
-            (&Method::GET,  apiv1::images::PATH) => self.apiv1_images(session, ctx).await.map(|_| true),
-            (&Method::POST, path) if path.starts_with(apiv1::runi::PREFIX) => self.apiv1_runi(session, ctx).await,
+            (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => self.apiv2_runi(session, ctx).await,
             _ => {
                 session.downstream_session
                     .write_response_header_ref(&premade_responses::NOT_FOUND)

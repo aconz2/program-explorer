@@ -631,3 +631,9 @@ curl -v -H 'Accept: application/vnd.oci.image.index.v1+json' -v https://quay.io/
 then use the digest to get the manifest
 curl -v -H 'Accept: application/vnd.oci.image.manifest.v1+json' -v https://quay.io/v2/fedora/fedora/blobs/sha256:c21a0d95f9633eabc079773cd3d160cbacfd99fd1c7c636be86
 dbfc4a96e9c4d
+
+example testing
+(cd peimage-service && env PEOCI_AUTH=~/Secure/container-registries.json RUST_LOG=trace cargo run /tmp/peimageservice.sock)
+(cd peserver && env RUST_LOG=trace cargo run --bin worker -- --image-service /tmp/peimageservice.sock --uds /tmp/peworker.sock --worker-cpuset 30:1:2)
+(cd peserver && env RUST_LOG=trace cargo run --bin lb -- --tcp localhost:6188 --worker uds:/tmp/peworker.sock)
+(cd peserver && cargo run --bin testclient -- echo hi)
