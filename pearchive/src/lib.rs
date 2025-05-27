@@ -286,7 +286,7 @@ impl TryFrom<&u8> for ArchiveFormat1Tag {
 }
 
 fn read_le_u32(input: &mut &[u8]) -> Result<u32, Error> {
-    let (int_bytes, rest) = input.split_at(std::mem::size_of::<u32>());
+    let (int_bytes, rest) = input.split_at_checked(std::mem::size_of::<u32>()).ok_or(Error::BadSize)?;
     *input = rest;
     Ok(u32::from_le_bytes(
         int_bytes.try_into().map_err(|_| Error::BadSize)?,
