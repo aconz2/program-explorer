@@ -12,6 +12,8 @@ podman build -t pe-server-lb:$tag -f containers/pe-server-lb .
 cp vmlinux target/release/vmlinux
 podman build -t pe-server-worker:$tag -f containers/pe-server-worker .
 
+podman build -t pe-image-service:$tag -f containers/pe-image-service .
+
 podman build -t pe-caddy:$tag -f containers/pe-caddy .
 podman build -t pe-caddy-dev:$tag -f containers/pe-caddy-dev .
 

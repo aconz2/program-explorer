@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use perunner::worker;
 // this is kinda dupcliated with pearchive::packdev
 // TODO this AsRawFd trait stems from pearchive which stems from using libc apis, I think they can
 // be replaced and we just need AsFd
-fn create_pack_file_from_dir<P: AsRef<Path>, W: Write + AsRawFd + Seek>(
+fn create_pack_file_from_dir<P: AsRef<Path>, W: Write + AsFd + Seek>(
     dir: &Option<P>,
     mut file: W,
     config: &peinit::Config,

@@ -12,16 +12,17 @@ else
     cargo_profile="$profile"
 fi
 
-for package in perunner; do
-    cargo build --package=${package} --profile=${cargo_profile}
-done
+# this is not really relevant to deploy
+# for package in perunner; do
+#     cargo build --package=${package} --profile=${cargo_profile}
+# done
 
 # todo would get this building in a container, but it seems caching deps locally is hard
 # peserver with musl requires musl-gcc (cmake OR zlib-ng-devel)
 # pingora requires flate2 with the zlib-ng feature
 # peimage requires erofs-utils (at runtime)
 
-for package in peinit pearchive; do
+for package in peinit pearchive peserver peimage-service; do
     cargo build --package=${package} --profile=${cargo_profile} --target x86_64-unknown-linux-musl
 done
 
