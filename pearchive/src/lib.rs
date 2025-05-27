@@ -11,7 +11,7 @@ use memmap2::MmapOptions;
 use rustix::fs::{FileType, RawDir};
 
 mod open;
-use open::{openat, openat_w, opendirat, opendirat_cwd, openpathat};
+use open::{openat, openat_w, opendirat, opendirat_cwd, openpathat, opendir};
 
 const MAX_DIR_DEPTH: usize = 32;
 const DIRENT_BUF_SIZE: usize = 2048;
@@ -58,6 +58,8 @@ pub enum Error {
     Chroot,
     Unshare,
     Mmap,
+    StackEmpty,
+    BadCStr,
 }
 
 pub enum ArchiveFormat1Tag {
@@ -385,19 +387,19 @@ fn visit_dirc_rec<V: PackFsVisitor>(curdir: &OwnedFd, v: &mut V) -> Result<(), E
 }
 
 fn visit_dirc<V: PackFsVisitor>(dir: &CStr, v: &mut V) -> Result<(), Error> {
-    let dirfd = opendirat_cwd(dir)?;
+    let dirfd = opendir(dir)?;
     visit_dirc_rec(&dirfd, v)?;
     Ok(())
 }
 
 pub fn visit_dir<V: PackFsVisitor>(dir: &Path, v: &mut V) -> Result<(), Error> {
-    let cstr = CString::new(dir.as_os_str().as_encoded_bytes()).unwrap();
+    let cstr = CString::new(dir.as_os_str().as_encoded_bytes()).map_err(|_| Error::BadCStr)?;
     visit_dirc(&cstr, v)
 }
 
 pub fn pack_dir_to_writer<W: Write + AsRawFd>(dir: &Path, writer: W) -> Result<W, Error> {
     let mut visitor = PackFsToWriter::new(writer);
-    visit_dir(dir, &mut visitor).unwrap();
+    visit_dir(dir, &mut visitor)?;
     visitor.into_file()
 }
 
@@ -416,7 +418,7 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
         match cur.first().map(|x| x.try_into()) {
             Some(Ok(ArchiveFormat1Tag::File)) => {
                 cur = &cur[1..];
-                let parent = stack.last().unwrap();
+                let parent = stack.last().ok_or(Error::StackEmpty)?;
                 let name = read_cstr(&mut cur)?;
                 let len = read_le_u32(&mut cur)? as usize;
                 if len > cur.len() {
@@ -428,9 +430,9 @@ unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error>
             }
             Some(Ok(ArchiveFormat1Tag::Dir)) => {
                 cur = &cur[1..];
-                let parent = stack.last().unwrap();
+                let parent = stack.last().ok_or(Error::StackEmpty)?;
                 let name = read_cstr(&mut cur)?;
-                mkdirat(parent, name).unwrap();
+                mkdirat(parent, name)?;
                 match cur.first().map(|x| x.try_into()) {
                     Some(Ok(ArchiveFormat1Tag::Pop)) => {
                         // fast path for empty dir, never open the dir or push it

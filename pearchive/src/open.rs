@@ -1,79 +1,50 @@
 use crate::{Error, FILE_MODE};
 use std::ffi::CStr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-pub fn openat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(
-            fd.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        );
-        if ret < 0 {
-            return Err(Error::OpenAt);
-        }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+use rustix::{
+    fd::{OwnedFd,AsFd},
+    fs::{Mode, OFlags, ResolveFlags},
+};
+
+pub(crate) fn openat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    rustix::fs::openat2(
+        fd, name, OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH,
+    ).map_err(|_| Error::OpenAt)
 }
 
-pub fn openat_w<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(
-            fd.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
-            FILE_MODE,
-        );
-        if ret < 0 {
-            return Err(Error::OpenAt);
-        }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+pub(crate) fn openat_w<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    rustix::fs::openat2(
+        fd, name, OFlags::WRONLY | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(FILE_MODE),
+        ResolveFlags::BENEATH,
+    ).map_err(|_| Error::OpenAt)
 }
 
-pub fn opendirat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(
-            fd.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
-        );
-        if ret < 0 {
-            return Err(Error::OpenAt);
-        }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+pub(crate) fn opendir(name: &CStr) -> Result<OwnedFd, Error> {
+    rustix::fs::open(
+        name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ).map_err(|_| Error::OpenAt)
 }
 
-pub fn opendirat_cwd(name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(
-            libc::AT_FDCWD,
-            name.as_ptr(),
-            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
-        );
-        if ret < 0 {
-            return Err(Error::OpenAt);
-        }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+pub(crate) fn opendirat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    rustix::fs::openat2(
+        fd, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH,
+    ).map_err(|_| Error::OpenAt)
 }
 
-pub fn openpathat<Fd: AsRawFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
-    let fd = unsafe {
-        let ret = libc::openat(
-            fd.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_DIRECTORY | libc::O_PATH | libc::O_CLOEXEC,
-        );
-        if ret < 0 {
-            return Err(Error::OpenAt);
-        }
-        ret
-    };
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+pub(crate) fn opendirat_cwd(name: &CStr) -> Result<OwnedFd, Error> {
+    opendirat(&rustix::fs::CWD, name)
+}
+
+pub(crate) fn openpathat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
+    rustix::fs::openat2(
+        fd, name, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH,
+    ).map_err(|_| Error::OpenAt)
 }
