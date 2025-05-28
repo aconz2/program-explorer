@@ -67,6 +67,16 @@ pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 // the superblock since extensions use data stored immediately after the superblock)
 // - initial value is u32::MAX
 //
+// Unions:
+// initially I used a rust union where the C code used unions, but zerocopy IntoBytes requres
+// [build]
+// rustflags = "--cfg zerocopy_derive_union_into_bytes"
+// in .cargo/config.toml and I wasn't super jazzed about that. So I switched the one union we
+// currently need which is InodeInfo to be a struct and manually implement union like
+// operations on the internal buffer. The two others are BlockAddrOrDelta and
+// FragmentOffsetOrDataSize and currently aren't used. Even InodeInfo currently only needs
+// raw_blkaddr
+//
 // TODO
 // - take a pass through field names and rename them (I guess retaining a comment to the original
 // field name)
@@ -177,13 +187,15 @@ pub enum InodeType {
     Extended,
 }
 
-#[derive(Immutable, FromZeros, IntoBytes)]
+#[derive(Debug, Immutable, FromZeros, IntoBytes)]
 #[repr(C)]
-pub union InodeInfo {
-    compressed_blocks: U32,
-    raw_blkaddr: U32, // block number not addr
-    rdev: U32,
-    chunk_info: ChunkInfo,
+pub struct InodeInfo {
+    data: [u8; std::mem::size_of::<u32>()],
+    // union
+    //compressed_blocks: U32,
+    //raw_blkaddr: U32, // block number not addr
+    //rdev: U32,
+    //chunk_info: ChunkInfo,
 }
 
 #[derive(Copy, Clone, Immutable, KnownLayout, FromZeros, IntoBytes)]
@@ -261,6 +273,8 @@ pub struct LogicalClusterIndex {
     block_addr_or_delta: BlockAddrOrDelta,
 }
 
+// TODO if/when these are needed, probably switch to a struct with union-like methods (as
+// InodeInfo)
 #[derive(TryFromBytes, Immutable)]
 #[repr(C)]
 union BlockAddrOrDelta {
@@ -332,14 +346,6 @@ struct ZstdCompressionConfig {
     _reserved: [u8; 4],
 }
 
-impl fmt::Debug for InodeInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let a = unsafe { self.compressed_blocks };
-        let b = unsafe { self.chunk_info.format };
-        write!(f, "{} ({:x}) (chunk={:x})", a, a, b)
-    }
-}
-
 impl fmt::Debug for BlockAddrOrDelta {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let a = unsafe { self.block_addr };
@@ -357,11 +363,17 @@ impl fmt::Debug for FragmentOffsetOrDataSize {
 }
 
 impl InodeInfo {
-    pub fn raw_block(block: u32) -> Self {
+    pub fn new_raw_blkaddr(block: u32) -> Self {
         Self {
-            raw_blkaddr: block.into(),
+            data: U32::new(block).to_bytes(),
         }
     }
+
+    pub fn raw_blkaddr(&self) -> u32 {
+        U32::from_bytes(self.data).into()
+    }
+
+    // TODO this needs to handle the other union fields
 }
 
 #[derive(Debug, Clone)]
@@ -465,17 +477,16 @@ impl Inode<'_> {
     // TODO this is a pretty bad name since these are block numbers and not addrs
     pub fn raw_block_addr(&self) -> u32 {
         match self {
-            Inode::Compact((_, x)) => unsafe { x.info.raw_blkaddr.into() },
-            Inode::Extended((_, x)) => unsafe { x.info.raw_blkaddr.into() },
+            Inode::Compact((_, x)) => x.info.raw_blkaddr(),
+            Inode::Extended((_, x)) => x.info.raw_blkaddr(),
         }
     }
 
     pub fn block_addr(&self) -> Result<u64, Error> {
         match self.file_type() {
-            FileType::RegularFile | FileType::Directory | FileType::Symlink => match self {
-                Inode::Compact((_, x)) => Ok(unsafe { x.info.raw_blkaddr }.into()),
-                Inode::Extended((_, x)) => Ok(unsafe { x.info.raw_blkaddr }.into()),
-            },
+            FileType::RegularFile | FileType::Directory | FileType::Symlink => {
+                Ok(self.raw_block_addr().into())
+            }
             _ => Err(Error::NotRegDirLink),
         }
     }

@@ -388,7 +388,7 @@ fn make_inode(
     i.gid = meta.gid.into();
     i.mtime = meta.mtime.into();
     i.nlink = n_links.into();
-    i.info = InodeInfo::raw_block(start_block);
+    i.info = InodeInfo::new_raw_blkaddr(start_block);
     i.size = size.into();
 
     Ok(i)
