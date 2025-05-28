@@ -3,7 +3,7 @@ use std::num::NonZero;
 
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
-use zerocopy::{FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 pub const EROFS_SUPER_OFFSET: usize = 1024;
 pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
@@ -383,6 +383,31 @@ pub enum Inode<'a> {
 }
 
 impl Inode<'_> {
+    pub fn new(disk_id: u32, data: &[u8]) -> Result<Inode, Error> {
+        // InodeCompact and InodeExtended have the first field of format_layout: U16
+        let (format_layout, _) = U16::read_from_prefix(data).map_err(|_| Error::BadConversion)?;
+        // validate that the layout is valid
+        let _ = Inode::get_layout(format_layout)?;
+        match Inode::get_format(format_layout) {
+            0 => InodeCompact::try_ref_from_prefix(data)
+                .map_err(|_| Error::BadConversion)
+                .map(|(inode, _)| Inode::Compact((disk_id, inode))),
+            1 => InodeExtended::try_ref_from_prefix(data)
+                .map_err(|_| Error::BadConversion)
+                .map(|(inode, _)| Inode::Extended((disk_id, inode))),
+            _ => unreachable!(),
+        }
+    }
+
+    fn get_format(format_layout: U16) -> u16 {
+        (format_layout & 1).into()
+    }
+
+    fn get_layout(format_layout: U16) -> Result<Layout, Error> {
+        let x: u16 = ((format_layout >> 1) & 0x07).into();
+        x.try_into().map_err(|_| Error::BadConversion)
+    }
+
     pub fn format_layout(typ: InodeType, layout: Layout) -> u16 {
         let format = match typ {
             InodeType::Compact => 0u16,
@@ -465,13 +490,11 @@ impl Inode<'_> {
     }
 
     pub fn layout(&self) -> Layout {
-        let format_layout: u16 = match self {
-            Inode::Compact((_, x)) => x.format_layout.into(),
-            Inode::Extended((_, x)) => x.format_layout.into(),
+        let format_layout = match self {
+            Inode::Compact((_, x)) => x.format_layout,
+            Inode::Extended((_, x)) => x.format_layout,
         };
-        ((format_layout >> 1) & 0x07)
-            .try_into()
-            .expect("should be validated on the way in")
+        Inode::get_layout(format_layout).expect("validated in Inode::new")
     }
 
     // TODO this is a pretty bad name since these are block numbers and not addrs
@@ -861,16 +884,7 @@ impl<'a> Erofs<'a> {
 
     pub fn get_inode(&self, disk_id: u32) -> Result<Inode<'a>, Error> {
         let offset = self.raw_inode_offset(disk_id) as usize;
-        let format_layout = self.data.get(offset).ok_or(Error::Oob)?;
-        match format_layout & 1 {
-            0 => InodeCompact::try_ref_from_prefix(&self.data[offset..])
-                .map_err(|_| Error::BadConversion)
-                .map(|(inode, _)| Inode::Compact((disk_id, inode))),
-            1 => InodeExtended::try_ref_from_prefix(&self.data[offset..])
-                .map_err(|_| Error::BadConversion)
-                .map(|(inode, _)| Inode::Extended((disk_id, inode))),
-            _ => unreachable!(),
-        }
+        Inode::new(disk_id, self.data.get(offset..).ok_or(Error::Oob)?)
     }
 
     pub fn get_inode_from_dirent(&self, dirent: &DirentItem<'a>) -> Result<Inode<'a>, Error> {
