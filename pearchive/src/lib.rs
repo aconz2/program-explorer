@@ -40,13 +40,13 @@ const MAX_NAME_LEN: usize = 255; // max len on tmpfs
 ///   | pop:  <tag>
 ///
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum Error {
     Create,
-    OpenAt,
+    OpenAt(rustix::io::Errno),
     Getdents,
     DirTooDeep,
-    MkdirAt,
+    MkdirAt(rustix::io::Errno),
     Fstat,
     OnFile,
     OnDir,
@@ -66,6 +66,12 @@ pub enum Error {
     StackEmpty,
     BadCStr,
     SizeUnderflow,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 pub enum ArchiveFormat1Tag {
@@ -389,6 +395,7 @@ pub fn pack_dir_to_file(dir: &Path, file: File) -> Result<File, Error> {
 
 /// deemed unsafe because we unpack to cwd with no path traversal protection, caller should ensure
 /// we are in a chroot or otherwise protected
+/// even though we use openat2 with RESOLVE_BENEATH, there is no equivalent for mkdirat
 unsafe fn unpack_to_dir(data: &[u8], starting_dir: OwnedFd) -> Result<(), Error> {
     let mut stack: Vec<OwnedFd> = Vec::with_capacity(32); // always non-empty
     stack.push(starting_dir);
@@ -517,8 +524,8 @@ pub fn unpack_to_hashmap(data: &[u8]) -> Result<HashMap<PathBuf, Vec<u8>>, Error
     Ok(visitor.into_hashmap())
 }
 
-pub fn unpack_file_to_hashmap(file: File) -> Result<HashMap<PathBuf, Vec<u8>>, Error> {
-    let mmap = unsafe { MmapOptions::new().map(&file).map_err(|_| Error::Mmap)? };
+pub fn unpack_file_to_hashmap(file: &File) -> Result<HashMap<PathBuf, Vec<u8>>, Error> {
+    let mmap = unsafe { MmapOptions::new().map(file).map_err(|_| Error::Mmap)? };
     unpack_to_hashmap(mmap.as_ref())
 }
 
@@ -655,13 +662,12 @@ mod tests {
             .file("file2", b"yooo")
             .dir("adir")
             .file("adir/another-file", b"some data");
-        // let td2 = TempDir::new().unwrap();
 
         let mut f = pack_dir_to_file(td1.as_ref(), tempfile()).unwrap();
         assert!(f.metadata().unwrap().len() > 0);
 
         f.seek(SeekFrom::Start(0)).unwrap();
-        let hm = unpack_file_to_hashmap(f).unwrap();
+        let hm = unpack_file_to_hashmap(&f).unwrap();
         assert_eq!(hm.len(), 3);
         assert_eq!(hm.get(Path::new("file1")).unwrap(), b"hello world");
         assert_eq!(hm.get(Path::new("file2")).unwrap(), b"yooo");
@@ -669,17 +675,15 @@ mod tests {
             hm.get(Path::new("adir/another-file")).unwrap(),
             b"some data"
         );
-        // can shell out to actual program
-        // but then annoyingly we have to link the tempfile
-        // println!("{}", std::env::current_exe().unwrap().display());
-        // TODO we can't use CLONE_NEWUSER in a threaded program;
-        // thread::scope(|s| {
-        //     s.spawn(|| {
-        //         unpack_file_to_dir_with_unshare_chroot(f, td2.as_ref()).unwrap();
-        //     });
-        // });
 
-        // assert_eq!(td1.digest(), td2.digest());
+        let td2 = TempDir::new();
+        let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
+        // could make opendir take a rustix::Arg
+        let td2_fd = opendir(&CString::new(td2.as_ref().as_os_str().as_encoded_bytes()).unwrap()).unwrap();
+        unsafe { unpack_to_dir(&mmap, td2_fd).unwrap(); }
+        assert_eq!(fs::read(td2.join("file1")).unwrap(), b"hello world");
+        assert_eq!(fs::read(td2.join("file2")).unwrap(), b"yooo");
+        assert_eq!(fs::read(td2.join("adir/another-file")).unwrap(), b"some data");
     }
 
     #[test]
@@ -707,7 +711,7 @@ mod tests {
         v.file("file4", b"data4").unwrap();
         let mut f = v.into_inner().unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();
-        let hm = unpack_file_to_hashmap(f).unwrap();
+        let hm = unpack_file_to_hashmap(&f).unwrap();
         assert_eq!(hm.len(), 4);
         assert_eq!(hm.get(Path::new("file1")).unwrap(), b"data1");
         assert_eq!(hm.get(Path::new("file2")).unwrap(), b"data2");

@@ -633,7 +633,7 @@ curl -v -H 'Accept: application/vnd.oci.image.manifest.v1+json' -v https://quay.
 dbfc4a96e9c4d
 
 example testing
-(cd peimage-service && env PEOCI_AUTH=~/Secure/container-registries.json RUST_LOG=trace cargo run /tmp/peimageservice.sock)
+(cd peimage-service && env RUST_LOG=trace cargo run -- --listen /tmp/peimageservice.sock --auth ~/Secure/container-registries.json)
 (cd peserver && env RUST_LOG=trace cargo run --bin worker -- --image-service /tmp/peimageservice.sock --uds /tmp/peworker.sock --worker-cpuset 30:1:2)
 (cd peserver && env RUST_LOG=trace cargo run --bin lb -- --tcp localhost:6188 --worker uds:/tmp/peworker.sock)
 (cd peserver && cargo run --bin testclient -- echo hi)

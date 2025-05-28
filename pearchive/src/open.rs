@@ -6,6 +6,8 @@ use rustix::{
     fs::{Mode, OFlags, ResolveFlags},
 };
 
+// idk if openat2 is useful here since we work in a chroot anyways
+
 pub(crate) fn openat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
     rustix::fs::openat2(
         fd,
@@ -14,18 +16,18 @@ pub(crate) fn openat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
         Mode::empty(),
         ResolveFlags::BENEATH,
     )
-    .map_err(|_| Error::OpenAt)
+    .map_err(Error::OpenAt)
 }
 
 pub(crate) fn openat_w<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
     rustix::fs::openat2(
         fd,
         name,
-        OFlags::WRONLY | OFlags::CLOEXEC,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::CLOEXEC,
         Mode::from_bits_truncate(FILE_MODE),
         ResolveFlags::BENEATH,
     )
-    .map_err(|_| Error::OpenAt)
+    .map_err(Error::OpenAt)
 }
 
 pub(crate) fn opendir(name: &CStr) -> Result<OwnedFd, Error> {
@@ -34,7 +36,7 @@ pub(crate) fn opendir(name: &CStr) -> Result<OwnedFd, Error> {
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|_| Error::OpenAt)
+    .map_err(Error::OpenAt)
 }
 
 pub(crate) fn opendirat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error> {
@@ -45,7 +47,7 @@ pub(crate) fn opendirat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Error
         Mode::empty(),
         ResolveFlags::BENEATH,
     )
-    .map_err(|_| Error::OpenAt)
+    .map_err(Error::OpenAt)
 }
 
 pub(crate) fn opendirat_cwd(name: &CStr) -> Result<OwnedFd, Error> {
@@ -60,9 +62,9 @@ pub(crate) fn openpathat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<OwnedFd, Erro
         Mode::empty(),
         ResolveFlags::BENEATH,
     )
-    .map_err(|_| Error::OpenAt)
+    .map_err(Error::OpenAt)
 }
 
 pub(crate) fn mkdirat<Fd: AsFd>(fd: &Fd, name: &CStr) -> Result<(), Error> {
-    rustix::fs::mkdirat(fd, name, Mode::from_bits_truncate(MKDIR_MODE)).map_err(|_| Error::MkdirAt)
+    rustix::fs::mkdirat(fd, name, Mode::from_bits_truncate(MKDIR_MODE)).map_err(Error::MkdirAt)
 }

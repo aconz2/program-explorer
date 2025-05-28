@@ -151,8 +151,15 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
         child_fd: 3,
     }];
 
-    //let mut cmd = Command::new("strace").arg("/bin/pearchive");
-    let ret = Command::new("/bin/pearchive")
+    let mut cmd = if config.strace {
+        Command::new("strace")
+    } else {
+        Command::new("/bin/pearchive")
+    };
+    if config.strace {
+        cmd.arg("/bin/pearchive");
+    }
+    let ret = cmd
         .arg("unpackfd")
         .arg("3")
         .arg(dir)
@@ -171,12 +178,21 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
 }
 
 // TODO: maybe do this in process?
-fn pack_output<P: AsRef<OsStr>>(dir: P, archive: OwnedFd) {
+fn pack_output<P: AsRef<OsStr>>(dir: P, archive: OwnedFd, strace: bool) {
     let fd_mappings = vec![FdMapping {
         parent_fd: archive,
         child_fd: 3,
     }];
-    let ret = Command::new("/bin/pearchive")
+
+    let mut cmd = if strace {
+        Command::new("strace")
+    } else {
+        Command::new("/bin/pearchive")
+    };
+    if strace {
+        cmd.arg("/bin/pearchive");
+    }
+    let ret = cmd
         .arg("packfd")
         .arg(dir)
         .arg("3")
@@ -409,7 +425,7 @@ fn main() {
 
         match config.response_format {
             ResponseFormat::PeArchiveV1 => {
-                pack_output("/run/output", f.into());
+                pack_output("/run/output", f.into(), config.strace);
             }
             ResponseFormat::JsonV1 => {}
         }

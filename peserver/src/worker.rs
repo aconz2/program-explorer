@@ -74,6 +74,7 @@ struct HttpRunnerApp {
     initramfs: OsString,
     kernel: OsString,
     ch_console: bool,
+    strace: bool,
     ch_log_level: Option<ChLogLevel>,
     image_service: String,
 }
@@ -205,7 +206,7 @@ impl HttpRunnerApp {
             timeout: RUN_TIMEOUT,
             oci_runtime_config: serde_json::to_string(&runtime_spec).unwrap(),
             stdin: api_req.stdin,
-            strace: false,
+            strace: self.strace,
             crun_debug: false,
             rootfs_dir: None,
             rootfs_kind: peinit::RootfsKind::Erofs,
@@ -370,8 +371,11 @@ struct Args {
     #[arg(long)]
     prom: Option<String>,
 
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     ch_console: bool,
+
+    #[arg(long)]
+    strace: bool,
 
     #[arg(long)]
     ch_log_level: Option<String>,
@@ -466,6 +470,7 @@ fn main() {
         cloud_hypervisor: cwd.join(args.ch).into(),
 
         ch_console: args.ch_console,
+        strace: args.strace,
         ch_log_level: args.ch_log_level.map(|x| x.as_str().try_into().unwrap()),
 
         image_service: args.image_service,

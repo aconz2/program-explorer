@@ -3,10 +3,11 @@ use std::fs::File;
 use std::io::IoSlice;
 use std::io::Seek;
 use std::os::fd::OwnedFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Instant;
 
+use clap::Parser;
 use log::{error, info};
 use moka::future::Cache;
 use oci_spec::{
@@ -225,7 +226,7 @@ async fn make_erofs_image(
     .await?
 }
 
-async fn make_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedFd)> {
+async fn make_img_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedFd)> {
     let cache_dir = blobcache::open_or_create_dir_at(None, dir.as_ref())?;
     let imgs_dir = blobcache::open_or_create_dir_at(Some(&cache_dir), "imgs")?;
     let imgs_dir_clone = imgs_dir.try_clone()?;
@@ -319,39 +320,46 @@ async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Resul
     Ok(())
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    listen: String,
+
+    #[arg(long)]
+    auth: String,
+
+    #[arg(long)]
+    cache: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 10)]
+    backlog: u32,
+
+    #[arg(long, default_value_t = 3600)]
+    persist_period: u64,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
-    let args: Vec<_> = std::env::args().collect();
-    let socket_path = args.get(1).expect("give me a listening socket");
+    let args = Args::parse();
 
-    let auth = if let Some(v) =
-        std::env::vars().find_map(|(k, v)| if k == "PEOCI_AUTH" { Some(v) } else { None })
-    {
-        load_stored_auth(v).unwrap()
-    } else {
-        BTreeMap::new()
-    };
+    let auth = load_stored_auth(args.auth).unwrap();
     info!("loaded {} entries into auth", auth.len());
 
-    let peoci_cache_dir = std::env::vars()
-        .find(|(k, _v)| k == "PEOCI_CACHE")
-        .map(|(_, v)| Path::new(&v).to_owned())
-        .unwrap_or_else(|| {
-            Path::new(
-                &std::env::vars()
-                    .find(|(k, _v)| k == "HOME")
-                    .map(|(_, v)| v)
-                    .unwrap(),
-            )
-            .join(".local/share/peoci")
-        });
+    let cache_dir = args.cache.unwrap_or_else(|| {
+        let home = std::env::vars()
+            .find(|(k, _v)| k == "HOME")
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| "/".to_string());
+        PathBuf::from(home).join(".local/share/peoci")
+    });
 
-    let (cache, imgs_dir) = make_cache(&peoci_cache_dir).await.unwrap();
+    let (cache, imgs_dir) = make_img_cache(&cache_dir).await.unwrap();
     let imgs_dir = Arc::new(imgs_dir);
 
     let client = Client::builder()
-        .dir(peoci_cache_dir)
+        .dir(cache_dir)
         .load_from_disk(true)
         .auth(auth)
         .build()
@@ -361,10 +369,12 @@ async fn main() {
     let worker_semaphore = Arc::new(Semaphore::new(1));
     let counters = Arc::new(Counters::default());
 
-    let _ = std::fs::remove_file(socket_path);
-    let mut socket = UnixSeqpacketListener::bind_with_backlog(socket_path, 10).unwrap();
+    let _ = std::fs::remove_file(&args.listen);
+    let mut socket =
+        UnixSeqpacketListener::bind_with_backlog(args.listen, args.backlog.try_into().unwrap())
+            .unwrap();
 
-    let cache_persist_period = tokio::time::Duration::from_secs(60 * 60);
+    let cache_persist_period = tokio::time::Duration::from_secs(args.persist_period);
     let mut cache_persist_timer = tokio::time::interval(cache_persist_period);
     cache_persist_timer.tick().await; // discard first tick that fires immediately
 
