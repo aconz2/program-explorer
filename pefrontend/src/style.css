@@ -41,7 +41,8 @@ summary { cursor: pointer; }
 
 }
 
-#cmd { width: 90%; }
+input[name="cmd"] { width: 90%; }
+input[name="image"] { width: 90%; }
 #input-output-container { display: flex; }
 #input-container, #output-container { width: 50%; }
 

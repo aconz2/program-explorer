@@ -159,7 +159,7 @@ pub mod v2 {
         use peinit;
         use serde::{Deserialize, Serialize};
 
-        pub const PREFIX: &str = "/api/v1/run2/";
+        pub const PREFIX: &str = "/api/v2/runi/";
 
         #[derive(Serialize, Deserialize)]
         pub struct Request {

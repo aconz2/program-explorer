@@ -68,8 +68,8 @@ export namespace Api {
         },
     };
 
-    export namespace Images {
-        export type Response = {images: Image[]};
+    export function apiv2_runi(reference: string) : string {
+        return `${window.location.origin}/api/v2/runi/${reference}`;
     }
 
 }

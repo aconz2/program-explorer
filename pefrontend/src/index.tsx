@@ -13,7 +13,7 @@ import {UrlHashState, loadUrlHashState, encodeUrlHashState} from './urlstate';
 import './style.css';
 
 // busybox 1.36.0
-const DEFAULT_IMAGE_HASH = "sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
+const DEFAULT_IMAGE = "index.docker.io/library/busybox@sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
 
 const DEFAULT_INPUT_FILES = [
     {path:'test.sh', data:`
@@ -36,7 +36,6 @@ type FileId = string;
 type ImageId = string;
 
 type AppState = {
-    images: Signal<Map<ImageId, Api.Image>>,
     selectedImage: Signal<ImageId | null>,
     selectedStdin: Signal<FileId | null>,
     cmd: Signal<string | null>,
@@ -48,13 +47,12 @@ type AppState = {
 
 const imageName = (info) => `${info.registry}/${info.repository}/${info.tag}`;
 
-function computeFullCommand(image: Api.Image, env: string[] | null, userCmd: string)
-    : {entrypoint: string[], cmd: string[], env: string[]} {
-    let parts = userCmd.length === 0 ? (image.config.config.Cmd ?? []) : shlex.split(userCmd);
-    // let entrypoint = image.config.config.Entrypoint ?? [];
+// TODO entrypoint
+function computeFullCommand(env: string[] | null, userCmd: string)
+    : {entrypoint: string[] | null, cmd: string[] | null, env: string[] | null} {
+    let cmd = userCmd.length === 0 ? null : shlex.split(userCmd);
     let entrypoint = [];
-    env = env ?? image.config.config.Env ?? [];
-    return {entrypoint, cmd: parts, env};
+    return {entrypoint, cmd, env};
 }
 
 type FileContents = string | ArrayBuffer;
@@ -459,8 +457,7 @@ class App extends Component {
     r_moreDetails: RefObject<HTMLDetailsElement> = createRef();
 
     s: AppState = {
-        images: signal(new Map()),
-        selectedImage: signal(null),
+        selectedImage: signal(DEFAULT_IMAGE),
         selectedStdin: signal(null),
         cmd: signal(null),
         env: signal(null),
@@ -488,8 +485,7 @@ class App extends Component {
             this.inputEditor.setFiles(DEFAULT_INPUT_FILES);
         }
         this.s.cmd.value = this.urlHashState.cmd ?? 'sh /run/pe/input/test.sh';
-
-        this.fetchImages();
+        this.s.selectedImage.value = this.urlHashState.image ?? DEFAULT_IMAGE;
 
         if (this.urlHashState.expand.help === true) {
             this.r_helpDetails.current.open = true;
@@ -512,24 +508,14 @@ class App extends Component {
         let cmd = this.s.cmd.value;
         let env = this.s.env.value;
 
-        if (selectedImage === null) {
-            console.warn('cant run without an image');
-            return;
-        }
         if (cmd === null) {
             console.warn('cant run without a cmd');
             return;
         }
 
-        let image = this.s.images.value.get(selectedImage);
-        if (image === undefined) {
-            console.warn('cant run without an image');
-            return;
-        }
-
         let fullCommand;
         try {
-            fullCommand = computeFullCommand(image, env, cmd);
+            fullCommand = computeFullCommand(env, cmd);
         } catch (e) {
             console.warn('cmd bad split');
             console.error(e);
@@ -544,7 +530,7 @@ class App extends Component {
         console.log(runReq);
         let combined = pearchive.combineRequestAndArchive(runReq, archive);
 
-        let req = new Request(window.location.origin + image.links.runi, {
+        let req = new Request(Api.apiv2_runi(selectedImage), {
             method: 'POST',
             body: combined,
             headers: {
@@ -598,26 +584,6 @@ class App extends Component {
         this.s.running.value = false;
     }
 
-    async fetchImages() {
-        let response = await fetch(window.location.origin + '/api/v1/images');
-        if (response.ok) {
-            let json: Api.Images.Response = await response.json();
-            if (json.images?.length > 0) {
-                let images: Map<string, Api.Image> = new Map(json.images.map(image => [image.info.digest, image]));
-                this.s.images.value = images;
-                if (this.urlHashState.image && images.has(this.urlHashState.image)) {
-                    this.s.selectedImage.value = this.urlHashState.image;
-                } else if (images.has(DEFAULT_IMAGE_HASH)) {
-                    this.s.selectedImage.value = DEFAULT_IMAGE_HASH;
-                } else {
-                    this.s.selectedImage.value = images.keys().next()?.value;
-                }
-            }
-        } else {
-            console.error('error getting images', response);
-        }
-    }
-
     onImageSelect(event) {
         this.s.selectedImage.value = event.target.value;
     }
@@ -668,19 +634,11 @@ class App extends Component {
     }
 
     render() {
-        let images = this.s.images.value;
         let selectedImage = this.s.selectedImage.value;
         let cmd = this.s.cmd.value;
         let lastStatus = this.s.lastStatus.value;
         let lastRuntime = this.s.lastRuntime.value;
         let env = this.s.env.value;
-
-        // firefox supports Map().values().map(), but chrome doesn't
-        let imageOptionsArr = Array.from(images.values(), ({info}) => [imageName(info), info]);
-        imageOptionsArr.sort(([sa, _1], [sb, _2]) => sa < sb ? -1 : sa > sb ? 1 : 0);
-        let imageOptions = imageOptionsArr.map(([name, info]) => {
-            return <option key={info.digest} value={info.digest}>{name}</option>;
-        });
 
         let stdinOptions = this.inputEditor?.getFiles().map(file => {
             return <option key={file.id} value={file.path}>{file.path}</option>;
@@ -688,36 +646,36 @@ class App extends Component {
 
         let imageDetails = null;
         let fullCommand = null;
-        if (selectedImage !== null) {
-            let image = images.get(selectedImage);
-            imageDetails = (
-                <details>
-                    <summary>About this image</summary>
-                    <a target="_blank" href={image.links.upstream} rel="nofollow">{imageName(image.info)}</a>
-                    <p>These are a subset of properties defined for this image. See <a href="https://github.com/opencontainers/image-spec/blob/main/config.md#properties" rel="nofollow">the OCI image spec</a> for more information.</p>
-                    <dl>
-                        <dt>Env</dt>
-                        <dd class="mono">{JSON.stringify(image.config.config.Env ?? [])}</dd>
-                        <dt>Entrypoint</dt>
-                        <dd class="mono">{JSON.stringify(image.config.config.Entrypoint ?? [])}</dd>
-                        <dt>Cmd</dt>
-                        <dd class="mono">{JSON.stringify(image.config.config.Cmd ?? [])}</dd>
-                        <dd class="mono">
-
-                        </dd>
-                    </dl>
-                    <details>
-                        <summary>Full <a href="https://github.com/opencontainers/image-spec/blob/main/config.md" rel="nofollow">OCI Image Config</a></summary>
-                        <pre>{JSON.stringify(image.config, null, '  ')}</pre>
-                    </details>
-                </details>
-            );
-            try {
-                fullCommand = computeFullCommand(image, env, cmd);
-            } catch (e) {
-                fullCommand = null;
-            }
-        }
+        //if (selectedImage !== null) {
+        //    let image = images.get(selectedImage);
+        //    imageDetails = (
+        //        <details>
+        //            <summary>About this image</summary>
+        //            <a target="_blank" href={image.links.upstream} rel="nofollow">{imageName(image.info)}</a>
+        //            <p>These are a subset of properties defined for this image. See <a href="https://github.com/opencontainers/image-spec/blob/main/config.md#properties" rel="nofollow">the OCI image spec</a> for more information.</p>
+        //            <dl>
+        //                <dt>Env</dt>
+        //                <dd class="mono">{JSON.stringify(image.config.config.Env ?? [])}</dd>
+        //                <dt>Entrypoint</dt>
+        //                <dd class="mono">{JSON.stringify(image.config.config.Entrypoint ?? [])}</dd>
+        //                <dt>Cmd</dt>
+        //                <dd class="mono">{JSON.stringify(image.config.config.Cmd ?? [])}</dd>
+        //                <dd class="mono">
+        //
+        //                </dd>
+        //            </dl>
+        //            <details>
+        //                <summary>Full <a href="https://github.com/opencontainers/image-spec/blob/main/config.md" rel="nofollow">OCI Image Config</a></summary>
+        //                <pre>{JSON.stringify(image.config, null, '  ')}</pre>
+        //            </details>
+        //        </details>
+        //    );
+        //    try {
+        //        fullCommand = computeFullCommand(image, env, cmd);
+        //    } catch (e) {
+        //        fullCommand = null;
+        //    }
+        //}
         return (
             <div className="mono">
                 <div>
@@ -745,15 +703,13 @@ class App extends Component {
                 <form>
                     <div>
                         <label class="inline-label" for="image">Image</label>
-                        <select value={this.s.selectedImage} name="image" onChange={e => this.onImageSelect(e)}>
-                            {imageOptions}
-                        </select>
+                        <input type="text" value={this.s.selectedImage} name="image" onChange={e => this.onImageSelect(e)} />
                     </div>
                     {imageDetails}
                     <hr />
                     <div>
                         <label class="inline-label" for="cmd">Command</label>
-                        <input autocomplete="off" id="cmd" className="mono" type="text"
+                        <input autocomplete="off" name="cmd" className="mono" type="text"
                                value={cmd} onInput={e => this.onCmdChange(e)} />
                     </div>
                     <details ref={this.r_moreDetails}>

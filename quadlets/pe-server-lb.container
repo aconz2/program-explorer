@@ -17,6 +17,7 @@ Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
 LogDriver=passthrough
 
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
+
 Exec=--uds=${RUNTIME_DIRECTORY}/lb.sock --worker=uds:${RUNTIME_DIRECTORY}/worker.sock
 
 [Install]
