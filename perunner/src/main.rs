@@ -259,7 +259,7 @@ fn main() {
 
     // bit nasty but trying to preserve handling of old multi-image images and new images from
     // image service (at least temporarily
-    let (config, rootfs_dir, image_path_or_fd) = {
+    let (config, rootfs_dir, image_path_or_fd, manifest_digest) = {
         if let Some(index_path) = args.index {
             let mut index = PEImageMultiIndex::new(PEImageMultiIndexKeyType::Name);
             index
@@ -282,12 +282,14 @@ fn main() {
                         config,
                         Some(image_index_entry.image.rootfs.clone()),
                         PathBufOrOwnedFd::Fd(fd),
+                        image_index_entry.image.id.digest.clone(),
                     )
                 } else {
                     (
                         config,
                         Some(image_index_entry.image.rootfs.clone()),
                         PathBufOrOwnedFd::PathBuf(image_index_entry.path.clone()),
+                        image_index_entry.image.id.digest.clone(),
                     )
                 }
             } else {
@@ -315,7 +317,7 @@ fn main() {
             }
             //rustix::io::fcntl_setfd(&res.fd, rustix::io::FdFlags::empty()).unwrap();
 
-            (res.config, None, PathBufOrOwnedFd::Fd(res.fd))
+            (res.config, None, PathBufOrOwnedFd::Fd(res.fd), res.manifest_digest)
         } else {
             panic!("--index and --image-service can't both be none");
         }
@@ -358,6 +360,7 @@ fn main() {
         rootfs_kind: peinit::RootfsKind::Erofs,
         response_format: response_format,
         kernel_inspect: args.kernel_inspect,
+        manifest_digest,
     };
 
     if args.parallel > 0 {

@@ -4,9 +4,11 @@ use std::path::Path;
 
 use oci_spec::{
     distribution::Reference,
-    image::{Arch, Digest, Os},
+    image::{Arch, Os},
 };
 use tokio_seqpacket::{UnixSeqpacket, ancillary::OwnedAncillaryMessage};
+
+const MAX_MESSAG_LEN: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -16,6 +18,7 @@ pub enum Error {
     PeOciSpec(#[from] peoci::spec::Error),
     BadDigest,
     MissingFd,
+    MessageTooBig,
     ServerError(String),
     Unknown,
 
@@ -75,7 +78,7 @@ pub enum WireResponse {
 }
 
 pub struct Response {
-    pub manifest_digest: Digest,
+    pub manifest_digest: String,
     pub config: peoci::spec::ImageConfiguration,
     pub fd: OwnedFd,
 }
@@ -85,7 +88,7 @@ pub async fn request_erofs_image(
     req: Request,
 ) -> Result<Response, Error> {
     let socket = UnixSeqpacket::connect(socket_addr).await?;
-    let mut buf = [0; 1024];
+    let mut buf = [0; MAX_MESSAG_LEN];
     let n = bincode::encode_into_slice(&req, &mut buf, bincode::config::standard())?;
     let _ = socket.send(&buf[..n]).await?;
 
@@ -93,6 +96,10 @@ pub async fn request_erofs_image(
     let (n, ancillary) = socket
         .recv_vectored_with_ancillary(&mut [IoSliceMut::new(&mut buf)], &mut ancillary_buffer)
         .await?;
+
+    if ancillary.is_truncated() {
+        return Err(Error::MessageTooBig);
+    }
 
     let (wire_response, _) =
         bincode::decode_from_slice::<WireResponse, _>(&buf[..n], bincode::config::standard())?;
@@ -114,7 +121,7 @@ pub async fn request_erofs_image(
             },
         ) => Ok(Response {
             config,
-            manifest_digest: manifest_digest.parse().map_err(|_| Error::BadDigest)?,
+            manifest_digest,
             fd,
         }),
         (_, WireResponse::NoMatchingManifest) => Err(Error::NoMatchingManifest),

@@ -209,6 +209,21 @@ impl ClientBuilder {
         self
     }
 
+    pub fn ref_capacity(mut self, cap: u64) -> Self {
+        self.ref_capacity = cap;
+        self
+    }
+
+    pub fn manifest_capacity(mut self, cap: u64) -> Self {
+        self.manifest_capacity = cap;
+        self
+    }
+
+    pub fn blob_capacity(mut self, cap: u64) -> Self {
+        self.blob_capacity = cap;
+        self
+    }
+
     pub async fn build(self) -> Result<Client, Error> {
         if self.load_from_disk && self.cache_dir.is_none() {
             return Err(Error::NoCacheDir);

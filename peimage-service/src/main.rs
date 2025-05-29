@@ -226,13 +226,13 @@ async fn make_erofs_image(
     .await?
 }
 
-async fn make_img_cache(dir: impl AsRef<Path>) -> anyhow::Result<(ImageCache, OwnedFd)> {
+async fn make_img_cache(dir: impl AsRef<Path>, img_capacity: u64) -> anyhow::Result<(ImageCache, OwnedFd)> {
     let cache_dir = blobcache::open_or_create_dir_at(None, dir.as_ref())?;
     let imgs_dir = blobcache::open_or_create_dir_at(Some(&cache_dir), "imgs")?;
     let imgs_dir_clone = imgs_dir.try_clone()?;
 
     let image_cache = Cache::builder()
-        .max_capacity(blobcache::max_capacity(5_000_000_000))
+        .max_capacity(blobcache::max_capacity(img_capacity))
         .weigher(blobcache::weigher)
         .eviction_listener(move |k, v, reason| {
             blobcache::remove_blob("img", &imgs_dir_clone, k, v, reason);
@@ -263,14 +263,13 @@ async fn respond_ok(
         config,
         manifest_digest: digest.to_string(),
     };
-    let mut buf = [0; 1024];
-    let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
+    let buf = bincode::encode_to_vec(&wire_response, bincode::config::standard())?;
 
     let mut ancillary_buffer = [0; 128];
     let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buffer);
     ancillary.add_fds(&[&erofs_fd])?;
 
-    conn.send_vectored_with_ancillary(&[IoSlice::new(&buf[..n])], &mut ancillary)
+    conn.send_vectored_with_ancillary(&[IoSlice::new(&buf)], &mut ancillary)
         .await?;
     Ok(())
 }
@@ -314,9 +313,8 @@ async fn respond_err(conn: UnixSeqpacket, error: anyhow::Error) -> anyhow::Resul
     .unwrap_or_else(|| WireResponse::Err {
         message: "unexpected error".to_string(),
     });
-    let mut buf = [0; 1024];
-    let n = bincode::encode_into_slice(&wire_response, &mut buf, bincode::config::standard())?;
-    conn.send(&buf[..n]).await?;
+    let buf = bincode::encode_to_vec(&wire_response, bincode::config::standard())?;
+    conn.send(&buf).await?;
     Ok(())
 }
 
@@ -337,6 +335,18 @@ struct Args {
 
     #[arg(long, default_value_t = 3600)]
     persist_period: u64,
+
+    #[arg(long, default_value_t = 10_000_000)]
+    ref_capacity: u64,
+
+    #[arg(long, default_value_t = 10_000_000)]
+    manifest_capacity: u64,
+
+    #[arg(long, default_value_t = 50_000_000_000)]
+    blob_capacity: u64,
+
+    #[arg(long, default_value_t = 50_000_000_000)]
+    img_capacity: u64,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -355,13 +365,16 @@ async fn main() {
         PathBuf::from(home).join(".local/share/peoci")
     });
 
-    let (cache, imgs_dir) = make_img_cache(&cache_dir).await.unwrap();
+    let (cache, imgs_dir) = make_img_cache(&cache_dir, args.img_capacity).await.unwrap();
     let imgs_dir = Arc::new(imgs_dir);
 
     let client = Client::builder()
         .dir(cache_dir)
         .load_from_disk(true)
         .auth(auth)
+        .ref_capacity(args.ref_capacity)
+        .manifest_capacity(args.manifest_capacity)
+        .blob_capacity(args.blob_capacity)
         .build()
         .await
         .unwrap();

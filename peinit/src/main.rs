@@ -408,12 +408,14 @@ fn main() {
             rusage: rusage.into(),
             stdout: stdout,
             stderr: stderr,
+            manifest_digest: config.manifest_digest,
         },
         Ok(WaitIdDataOvertime::ExitedOvertime { siginfo, rusage }) => Response::Overtime {
             siginfo: siginfo.into(),
             rusage: rusage.into(),
             stdout: stdout,
             stderr: stderr,
+            manifest_digest: config.manifest_digest,
         },
     };
 

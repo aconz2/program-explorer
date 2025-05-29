@@ -47,6 +47,7 @@ pub struct Config {
     pub rootfs_kind: RootfsKind,
     pub response_format: ResponseFormat,
     pub kernel_inspect: bool,
+    pub manifest_digest: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +60,7 @@ pub enum Response {
         stdout: Option<String>, // not included in ResponseFormat::PeArchiveV1
         #[serde(skip_serializing_if = "Option::is_none")]
         stderr: Option<String>, // not included in ResponseFormat::PeArchiveV1
+        manifest_digest: String,
     },
     Overtime {
         siginfo: SigInfoRedux,
@@ -67,6 +69,7 @@ pub enum Response {
         stdout: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         stderr: Option<String>,
+        manifest_digest: String,
     },
     Panic {
         message: String,

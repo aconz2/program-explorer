@@ -212,6 +212,7 @@ impl HttpRunnerApp {
             rootfs_kind: peinit::RootfsKind::Erofs,
             response_format: response_format,
             kernel_inspect: false,
+            manifest_digest: image_service_res.manifest_digest,
         };
 
         let io_file = {
