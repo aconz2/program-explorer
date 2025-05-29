@@ -459,8 +459,8 @@ class App extends Component {
     s: AppState = {
         selectedImage: signal(DEFAULT_IMAGE),
         selectedStdin: signal(null),
-        cmd: signal(null),
-        env: signal(null),
+        cmd: signal(''),
+        env: signal([]),
         lastStatus: signal(null),
         lastRuntime: signal(null),
         running: signal(false),
@@ -646,6 +646,11 @@ class App extends Component {
 
         let imageDetails = null;
         let fullCommand = null;
+        try {
+            fullCommand = computeFullCommand(env, cmd);
+        } catch (e) {
+            console.error(e);
+        }
         //if (selectedImage !== null) {
         //    let image = images.get(selectedImage);
         //    imageDetails = (
@@ -696,6 +701,8 @@ class App extends Component {
                     <p><code>stdout</code> and <code>stderr</code> are captured</p>
                     <p><code>stdin</code> can be attached to an input file (under More)</p>
                     <p><kbd>Ctrl+Enter</kbd> within text editor will run</p>
+                    <p>Images can be from docker.io and ghcr.io</p>
+                    <p>Images can be a maximum of 2GB total layer size (compressed) and 3GB when uncompressed</p>
                 </details>
 
                 <hr />

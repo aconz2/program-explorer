@@ -17,6 +17,7 @@ pub enum Error {
     Decode(#[from] bincode::error::DecodeError),
     PeOciSpec(#[from] peoci::spec::Error),
     BadDigest,
+    BadReference,
     MissingFd,
     MessageTooBig,
     ServerError(String),
@@ -47,6 +48,9 @@ pub struct Request {
 
 impl Request {
     pub fn new(reference: &str, arch: Arch, os: Os) -> Result<Self, Error> {
+        let Ok(_ref): Result<oci_spec::distribution::Reference, _> = reference.parse() else {
+            return Err(Error::BadReference);
+        };
         Ok(Request {
             reference: reference.to_string(),
             arch: (&arch).try_into()?,

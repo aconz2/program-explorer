@@ -226,7 +226,10 @@ async fn make_erofs_image(
     .await?
 }
 
-async fn make_img_cache(dir: impl AsRef<Path>, img_capacity: u64) -> anyhow::Result<(ImageCache, OwnedFd)> {
+async fn make_img_cache(
+    dir: impl AsRef<Path>,
+    img_capacity: u64,
+) -> anyhow::Result<(ImageCache, OwnedFd)> {
     let cache_dir = blobcache::open_or_create_dir_at(None, dir.as_ref())?;
     let imgs_dir = blobcache::open_or_create_dir_at(Some(&cache_dir), "imgs")?;
     let imgs_dir_clone = imgs_dir.try_clone()?;

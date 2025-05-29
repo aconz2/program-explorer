@@ -329,7 +329,7 @@ impl Client {
                 }))
             }
             StatusCode::NOT_FOUND => Ok(None),
-            status => Err(Error::StatusNotOk(status)),
+            _ => Err(status_not_ok(response).await),
         }
     }
 
@@ -377,7 +377,7 @@ impl Client {
                 Ok(Some((content_type, digest, data)))
             }
             StatusCode::NOT_FOUND => Ok(None),
-            status => Err(Error::StatusNotOk(status)),
+            _ => Err(status_not_ok(response).await),
         }
     }
 
@@ -399,8 +399,8 @@ impl Client {
             StatusCode::NOT_FOUND => {
                 return Ok(None);
             }
-            status => {
-                return Err(Error::StatusNotOk(status));
+            _ => {
+                return Err(status_not_ok(response).await);
             }
         }
 
@@ -591,12 +591,26 @@ impl Client {
                 ratelimit_reset
             );
             let rate_end = Instant::now() + Duration::from_secs(ratelimit_reset as u64);
-            let mut rm = self.ratelimit.write().await;
-            rm.insert(registry.to_string(), rate_end);
+            self.ratelimit.write().await.insert(registry.to_string(), rate_end);
             return Err(Error::RatelimitExceeded);
         }
         Ok(())
     }
+}
+
+async fn status_not_ok(res: Response) -> Error {
+    let status = res.status();
+    if log::log_enabled!(log::Level::Trace) {
+        match res.text().await {
+            Ok(body) => {
+                trace!("status={}, body={}", status, body);
+            }
+            Err(e) => {
+                trace!("unhandled error getting body, status={status}, error={e:?}");
+            }
+        }
+    }
+    Error::StatusNotOk(status)
 }
 
 async fn retreive_token_user_pass(
