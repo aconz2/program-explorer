@@ -1,5 +1,5 @@
 [Unit]
-Description=PE server worker
+Description=PE image service
 
 [Service]
 Restart=always
@@ -8,22 +8,21 @@ RuntimeDirectory=program-explorer
 RuntimeDirectoryPreserve=yes
 
 [Container]
-Image=localhost/pe-server-worker:latest
-Network=none
+Image=localhost/pe-image-service:latest
+Network=host
 
 # okay so using journald doesn't actually pass through JOURNAL_STREAM, so do it manually
 Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
 LogDriver=passthrough
 
+Volume=${HOME}/.local/share/peoci:/peoci:z
 Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
-PodmanArgs=--device=/dev/kvm
 
-Exec=--uds=${RUNTIME_DIRECTORY}/worker.sock \
-     --image-service=${RUNTIME_DIRECTORY}/image-service.sock \
-     --server-cpuset=0-3 \
-     --worker-cpuset=4:2:2
+Secret=container-registries
 
-Tmpfs=/tmp
+Exec=--listen=${RUNTIME_DIRECTORY}/image-service.sock \
+     --auth=/run/secrets/container-registries \
+     --cache=/peoci
 
 [Install]
 WantedBy=default.target
