@@ -322,7 +322,6 @@ impl Client {
         Ok(())
     }
 
-    // TODO I Think this should return the digest of the manifest as well
     pub async fn get_image_manifest_and_configuration(
         &self,
         reference: &Reference,
@@ -579,8 +578,6 @@ async fn retreive_ref(
     arch: Arch,
     os: Os,
 ) -> Result<String, Error> {
-    //let mut client = client.clone();
-    //let client =
     let _permit = semaphore.acquire().await?;
     let descriptor = client
         .get_matching_descriptor_from_index(reference, arch, os)
@@ -598,7 +595,6 @@ async fn retreive_manifest_and_configuration(
     semaphore: &Arc<Semaphore>,
     reference: &Reference,
 ) -> Result<Arc<PackedImageAndConfiguration>, Error> {
-    //let mut client = client.clone();
     let digest: Digest = reference
         .digest()
         .ok_or(Error::MissingDigest)?
@@ -628,7 +624,6 @@ async fn retreive_blob(
     key: &BlobKey,
     fd_tx: tokio::sync::oneshot::Sender<OwnedFd>,
 ) -> Result<u64, Error> {
-    //let mut client = client.clone();
     let _permit = semaphore.acquire().await?;
     let (mut file, guard) = blobcache::openat_create_write_async_with_guard(blob_dir, key)?;
     let mut bw = tokio::io::BufWriter::with_capacity(32 * 1024, &mut file);
@@ -636,7 +631,7 @@ async fn retreive_blob(
         .get_blob(reference, descriptor, &mut bw)
         .await?
         .ok_or(Error::BlobNotFound)?;
-    // get_blob flushes
+    // get_blob flushes the bufwriter
     guard.success()?;
     file.rewind().await?;
     let fd = file.into_std().await.into();

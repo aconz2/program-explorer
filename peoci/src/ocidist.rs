@@ -279,14 +279,27 @@ impl Client {
             .transpose()
     }
 
+    // so ideally we could always get the image index, then filter for the arch+os, but docker will
+    // sometimes respond with a manifest when we ask for an index
+    // this is a bit annoying because even though we have the manifest, we only return the
+    // descriptor since this is what the caching layer is expecting. So then there will be a second
+    // request to get the manifest again. We do check the manifest config.platform for matching
+    // arch+os, but it could be None. Currently, if it is None and the caller isn't asking for
+    // Amd64+Linux then we assume this isn't the right manifest.
     pub async fn get_matching_descriptor_from_index(
         &self,
         reference: &Reference,
         arch: Arch,
         os: Os,
     ) -> Result<Option<Descriptor>, Error> {
-        if let Some(index) = self.get_image_index(reference).await? {
-            let index = index.get()?;
+        let Some((content_type, digest, data)) =
+            self.get_manifest(reference, ACCEPTED_IMAGE_INDEX).await?
+        else {
+            return Ok(None);
+        };
+        if content_type == OCI_IMAGE_INDEX_V1 || content_type == DOCKER_IMAGE_MANIFEST_LIST_V2 {
+            let index_response = ImageIndexResponse { data };
+            let index = index_response.get()?;
             let descriptor = index.manifests().iter().find(|descriptor| {
                 descriptor
                     .platform()
@@ -294,16 +307,42 @@ impl Client {
                     .map(|platform| *platform.architecture() == arch && *platform.os() == os)
                     .unwrap_or(false)
             });
-            //.map(|descriptor| Ok(descriptor.clone()))
-            //.map(|descriptor| descriptor.clone())
-            //.transpose()
             if let Some(descriptor) = descriptor {
                 Ok(Some(descriptor.clone()))
             } else {
                 Err(Error::NoMatchingManifest)
             }
+        } else if content_type == OCI_IMAGE_MANIFEST_V1 || content_type == DOCKER_IMAGE_MANIFEST_V2
+        {
+            let digest = digest.unwrap_or_else(|| digest_from_data(&data));
+            let manifest_response = ImageManifestResponse { data, digest };
+            let manifest = manifest_response.get()?;
+            if let Some(platform) = manifest.config().platform() {
+                if *platform.architecture() != arch || *platform.os() != os {
+                    return Err(Error::NoMatchingManifest);
+                }
+            } else if arch != Arch::Amd64 && os != Os::Linux {
+                error!(
+                    "get_matching_descriptor_from_index ref={} digest={} got image manifest instead of index and no platform on config and didn't request amd64+linux, not okay",
+                    reference,
+                    manifest_response.digest()
+                );
+                return Err(Error::NoMatchingManifest);
+            } else {
+                warn!(
+                    "get_matching_descriptor_from_index ref={} digest={} got image manifest instead of index and no platform on config, assuming amd64+linux is okay",
+                    reference,
+                    manifest_response.digest()
+                );
+            }
+            let descriptor = Descriptor::new(
+                content_type.as_str().into(),
+                manifest_response.data().len() as u64,
+                manifest_response.digest().clone(),
+            );
+            Ok(Some(descriptor))
         } else {
-            Ok(None)
+            Err(Error::BadContentType(content_type))
         }
     }
 
@@ -591,7 +630,10 @@ impl Client {
                 ratelimit_reset
             );
             let rate_end = Instant::now() + Duration::from_secs(ratelimit_reset as u64);
-            self.ratelimit.write().await.insert(registry.to_string(), rate_end);
+            self.ratelimit
+                .write()
+                .await
+                .insert(registry.to_string(), rate_end);
             return Err(Error::RatelimitExceeded);
         }
         Ok(())
