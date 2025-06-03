@@ -40,124 +40,12 @@ impl From<ContentType> for &str {
     }
 }
 
-pub mod v1 {
-    pub mod runi {
-        use super::super::ContentType;
-        use peinit;
-        use serde::{Deserialize, Serialize};
-
-        pub const PREFIX: &str = "/api/v1/runi/";
-
-        #[derive(Serialize, Deserialize)]
-        pub struct Request {
-            pub stdin: Option<String>, // filename that will be set as stdin, noop
-            // for content-type: application/json
-            pub entrypoint: Option<Vec<String>>, // as per oci image config
-            pub cmd: Option<Vec<String>>,        // as per oci image config
-            pub env: Option<Vec<String>>,        // as per oci image config
-        }
-
-        pub type Response = peinit::Response;
-
-        // /api/v1/runi/<algo>:<digest>
-        //              [-------------]
-        // doesn't fully check things, but covers the basics
-        pub fn parse_path(s: &str) -> Option<&str> {
-            let x = s.strip_prefix(PREFIX)?;
-            if x.len() > 135 {
-                return None;
-            } // this is length of sha512:...
-            if x.contains("/") {
-                return None;
-            }
-            Some(x)
-        }
-
-        pub fn parse_request(body: &[u8], content_type: &ContentType) -> Option<(usize, Request)> {
-            match content_type {
-                ContentType::ApplicationJson => {
-                    let req = serde_json::from_slice(body).ok()?;
-                    Some((0, req))
-                }
-                ContentType::PeArchiveV1 => {
-                    if body.len() < 4 {
-                        return None;
-                    }
-                    let json_size =
-                        u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
-                    let slice = body.get(4..4 + json_size)?;
-                    let req = serde_json::from_slice(slice).ok()?;
-                    Some((4 + json_size, req))
-                }
-            }
-        }
-
-        // assumes pearchivev1 format
-        // <u32: response size> <response json> <archive>
-        pub fn parse_response(body: &[u8]) -> Option<(Response, &[u8])> {
-            if body.len() < 4 {
-                return None;
-            }
-            let json_size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
-            let slice = body.get(4..4 + json_size)?;
-            let response: Response = serde_json::from_slice(slice).ok()?;
-            let rem = body.get(4 + json_size..)?;
-            Some((response, rem))
-        }
-    }
-
-    pub mod images {
-        use super::runi;
-        use oci_spec::image as oci_image;
-        use peimage;
-        use serde::{Deserialize, Serialize};
-
-        pub const PATH: &str = "/api/v1/images";
-
-        #[derive(Deserialize, Serialize)]
-        pub struct ImageLinks {
-            pub runi: String,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub upstream: Option<String>,
-        }
-
-        #[derive(Deserialize, Serialize)]
-        pub struct Image {
-            pub links: ImageLinks,
-            pub info: peimage::index::PEImageId,
-            pub config: oci_image::ImageConfiguration,
-        }
-
-        #[derive(Deserialize, Serialize)]
-        pub struct Response {
-            pub images: Vec<Image>,
-        }
-
-        impl From<&peimage::index::PEImageMultiIndex> for Response {
-            fn from(index: &peimage::index::PEImageMultiIndex) -> Self {
-                let images: Vec<_> = index
-                    .map()
-                    .iter()
-                    .map(|(_k, v)| Image {
-                        links: ImageLinks {
-                            runi: format!("{}{}", runi::PREFIX, v.image.id.digest),
-                            upstream: v.image.id.upstream_link(),
-                        },
-                        info: v.image.id.clone(),
-                        config: v.image.config.clone(),
-                    })
-                    .collect();
-                Self { images }
-            }
-        }
-    }
-}
-
 pub mod v2 {
     pub mod runi {
         use super::super::ContentType;
         use peinit;
         use serde::{Deserialize, Serialize};
+        use oci_spec::image::{Arch, Os};
 
         pub const PREFIX: &str = "/api/v2/runi/";
 
@@ -172,14 +60,30 @@ pub mod v2 {
 
         pub type Response = peinit::Response;
 
-        // /api/v2/runi/<reference>
-        pub fn parse_path(s: &str) -> Option<&str> {
-            let x = s.strip_prefix(PREFIX)?;
+        #[derive(Debug)]
+        pub struct ParsedPath<'a> {
+            pub reference: &'a str,
+            pub arch: Arch,
+            pub os: Os,
+        }
+
+        // TODO would be nice to validate the reference I think? Right now we push string all the
+        // way through to image-service so that it is a single string but could probably add a
+        // peoci_spec::Reference with each field registry, repository, and TagOrDigest
+        // /api/v2/runi/<arch>/<os>/<reference>
+        pub fn parse_path<'a>(s: &'a str) -> Option<ParsedPath<'a>> {
+            let rest = s.strip_prefix(PREFIX)?;
+            let (arch, rest) = rest.split_once('/')?;
+            let (os, reference) = rest.split_once('/')?;
             // https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
-            if x.len() > 255 {
+            if reference.len() > 255 {
                 return None;
             }
-            Some(x)
+            Some(ParsedPath {
+                reference,
+                arch: arch.try_into().ok()?,
+                os: os.try_into().ok()?,
+            })
         }
 
         pub fn parse_request(body: &[u8], content_type: &ContentType) -> Option<(usize, Request)> {

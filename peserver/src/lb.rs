@@ -193,10 +193,19 @@ impl LB {
         }
     }
 
-    // Ok(true) means request done, ie the image was missed
+    // Ok(true) means request done, ie we didn't forward to the upstream
     async fn apiv2_runi(&self, session: &mut Session, ctx: &mut LBCtx) -> Result<bool> {
         REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.downstream_session.req_header();
+
+        // TODO here we will parse the arch+os and lookup an appropriate worker
+        if apiv2::runi::parse_path(req_parts.uri.path()).is_none() {
+            return session
+                .downstream_session
+                .write_response_header_ref(&premade_responses::BAD_REQUEST)
+                .await
+                .map(|_| true);
+        }
 
         // if there is no content-length (maybe it is chunked), and the body is too large
         // the worker server will throw an error and that will get propagated back; though it

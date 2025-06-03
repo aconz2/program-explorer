@@ -15,7 +15,7 @@ use pingora_timeout::timeout;
 use async_trait::async_trait;
 use clap::Parser;
 use http::{header, Method, Response, StatusCode};
-use log::{error, info, log_enabled};
+use log::{error, info, log_enabled, trace};
 use oci_spec::image::{Arch, Os};
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter, IntCounter};
@@ -49,7 +49,7 @@ enum Error {
     ReadTimeout,
     Read,
     BadRequest,
-    BadImagePath,
+    BadPath,
     BadReference,
     ImageService,
     IoFileCreate,
@@ -60,6 +60,8 @@ enum Error {
     Worker,
     Internal,
     OciSpec,
+    ArchMismatch,
+    OsMismatch,
 }
 
 #[derive(Serialize)]
@@ -77,6 +79,8 @@ struct HttpRunnerApp {
     strace: bool,
     ch_log_level: Option<ChLogLevel>,
     image_service: String,
+    arch: Arch,
+    os: Os,
 }
 
 //fn response_with_message(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -93,7 +97,7 @@ impl From<Error> for StatusCode {
         use Error::*;
         match val {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
-            Read | BadContentType | BadImagePath | OciSpec | BadReference | BadRequest => {
+            Read | BadContentType | BadPath | OciSpec | BadReference | BadRequest | ArchMismatch | OsMismatch => {
                 StatusCode::BAD_REQUEST
             }
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
@@ -117,11 +121,20 @@ impl HttpRunnerApp {
         REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.req_header();
 
-        let uri_path_reference =
-            apiv2::runi::parse_path(req_parts.uri.path()).ok_or(Error::BadImagePath)?;
+        let parsed_path =
+            apiv2::runi::parse_path(req_parts.uri.path()).ok_or(Error::BadPath)?;
+        trace!("parsed_path {:?}", parsed_path);
+
+        if parsed_path.arch != self.arch {
+            return Err(Error::ArchMismatch);
+        }
+
+        if parsed_path.os != self.os {
+            return Err(Error::OsMismatch);
+        }
 
         let image_service_req =
-            peimage_service::Request::new(uri_path_reference, Arch::Amd64, Os::Linux)
+            peimage_service::Request::new(parsed_path.reference, &self.arch, &self.os)
                 .map_err(|_| Error::BadReference)?;
 
         // TODO rethink error handling and giving better messages
@@ -326,7 +339,7 @@ impl HttpRunnerApp {
 impl ServeHttp for HttpRunnerApp {
     async fn response(&self, session: &mut ServerSession) -> Response<Vec<u8>> {
         let req_parts: &http::request::Parts = session.req_header();
-        //trace!("{} {}", req_parts.method, req_parts.uri.path());
+        trace!("{} {}", req_parts.method, req_parts.uri.path());
         let res = match (&req_parts.method, req_parts.uri.path()) {
             (&Method::GET, "/api/internal/maxconn") => self.api_internal_max_conn(session).await,
             (&Method::POST, path) if path.starts_with(apiv2::runi::PREFIX) => {
@@ -383,6 +396,12 @@ struct Args {
 
     #[arg(long)]
     image_service: String,
+
+    #[arg(long, default_value = "amd64")]
+    arch: Arch,
+
+    #[arg(long, default_value = "linux")]
+    os: Os,
 }
 
 fn parse_cpuset_colon(x: &str) -> Option<(usize, usize, usize)> {
@@ -475,6 +494,9 @@ fn main() {
         ch_log_level: args.ch_log_level.map(|x| x.as_str().try_into().unwrap()),
 
         image_service: args.image_service,
+
+        arch: args.arch,
+        os: args.os,
     };
 
     assert_file_exists(&app.kernel);

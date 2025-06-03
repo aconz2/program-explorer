@@ -68,8 +68,8 @@ export namespace Api {
         },
     };
 
-    export function apiv2_runi(reference: string) : string {
-        return `${window.location.origin}/api/v2/runi/${reference}`;
+    export function apiv2_runi(reference: string, arch: string, os: string) : string {
+        return `${window.location.origin}/api/v2/runi/${arch}/${os}/${reference}`;
     }
 
 }

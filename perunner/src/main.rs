@@ -304,7 +304,7 @@ fn main() {
             }
         } else if let Some(image_service) = args.image_service {
             let request =
-                peimage_service::Request::new(&args.image, Arch::Amd64, Os::Linux).unwrap();
+                peimage_service::Request::new(&args.image, &Arch::Amd64, &Os::Linux).unwrap();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .build()

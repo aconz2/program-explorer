@@ -47,14 +47,14 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn new(reference: &str, arch: Arch, os: Os) -> Result<Self, Error> {
+    pub fn new(reference: &str, arch: &Arch, os: &Os) -> Result<Self, Error> {
         let Ok(_ref): Result<oci_spec::distribution::Reference, _> = reference.parse() else {
             return Err(Error::BadReference);
         };
         Ok(Request {
             reference: reference.to_string(),
-            arch: (&arch).try_into()?,
-            os: (&os).try_into()?,
+            arch: arch.try_into()?,
+            os: os.try_into()?,
         })
     }
 }

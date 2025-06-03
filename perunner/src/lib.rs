@@ -35,7 +35,7 @@ impl std::fmt::Display for Error {
 
 // NOTE: if oci_spec::image::ImageConfiguration was parsed from a vnd.docker.distribution.manifest.v2.json, I'm
 // getting empty strings for a lot of things that are Option
-// the allocations in this make me a bit unhappy, but maybe its all worth it
+// the allocations in this make me a bit unhappy, but maybe its okay
 pub fn create_runtime_spec(
     image_config: &peoci::spec::ImageConfiguration,
     entrypoint: Option<&[String]>,

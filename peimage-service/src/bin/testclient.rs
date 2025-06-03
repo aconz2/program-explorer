@@ -10,7 +10,7 @@ async fn main_() -> anyhow::Result<()> {
     let socket_path = args.get(1).expect("give me a socket path");
     let reference = args.get(2).expect("give me an image reference");
 
-    let request = Request::new(reference, Arch::Amd64, Os::Linux).unwrap();
+    let request = Request::new(reference, &Arch::Amd64, &Os::Linux).unwrap();
     let t0 = Instant::now();
     let response = request_erofs_image(socket_path, request).await?;
     let elapsed = t0.elapsed().as_secs_f32();

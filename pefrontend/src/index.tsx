@@ -14,6 +14,8 @@ import './style.css';
 
 // busybox 1.36.0
 const DEFAULT_IMAGE = "index.docker.io/library/busybox@sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
+const DEFAULT_ARCH = "amd64";
+const DEFAULT_OS = "linux";
 
 const DEFAULT_INPUT_FILES = [
     {path:'test.sh', data:`
@@ -38,6 +40,8 @@ type ImageId = string;
 type AppState = {
     selectedImage: Signal<ImageId | null>,
     selectedStdin: Signal<FileId | null>,
+    selectedArch: Signal<FileId | null>,
+    selectedOs: Signal<FileId | null>,
     cmd: Signal<string | null>,
     env: Signal<string[] | null>,
     lastStatus: Signal<string | null>,
@@ -459,6 +463,8 @@ class App extends Component {
     s: AppState = {
         selectedImage: signal(DEFAULT_IMAGE),
         selectedStdin: signal(null),
+        selectedArch: signal(DEFAULT_ARCH),
+        selectedOs: signal(DEFAULT_OS),
         cmd: signal(''),
         env: signal([]),
         lastStatus: signal(null),
@@ -505,6 +511,8 @@ class App extends Component {
     async run() {
         let selectedImage = this.s.selectedImage.value;
         let selectedStdin = this.s.selectedStdin.value;
+        let selectedArch = this.s.selectedArch.value;
+        let selectedOs = this.s.selectedOs.value;
         let cmd = this.s.cmd.value;
         let env = this.s.env.value;
 
@@ -530,7 +538,7 @@ class App extends Component {
         console.log(runReq);
         let combined = pearchive.combineRequestAndArchive(runReq, archive);
 
-        let req = new Request(Api.apiv2_runi(selectedImage), {
+        let req = new Request(Api.apiv2_runi(selectedImage, selectedArch, selectedOs), {
             method: 'POST',
             body: combined,
             headers: {
@@ -721,11 +729,26 @@ class App extends Component {
                     </div>
                     <details ref={this.r_moreDetails}>
                         <summary>More</summary>
+                        <label for="arch">Architecture</label>
+                        <select value={this.s.selectedArch} name="arch" onChange={e => this.onArchSelect(e)}>
+                            <option value="amd64">amd64</option>
+                        </select>
+
+                        <br />
+
+                        <label for="os">OS</label>
+                        <select value={this.s.selectedOs} name="os" onChange={e => this.onOsSelect(e)}>
+                            <option value="linux">linux</option>
+                        </select>
+
+                        <br />
+
                         <label for="stdin">stdin</label>
                         <select value={this.s.selectedStdin} name="stdin" onChange={e => this.onStdinSelect(e)}>
                             <option value="/dev/null">/dev/null</option>
                             {stdinOptions}
                         </select>
+
                         <div id="env-editor">
                             <label for="env">env</label>
                             <SimpleEditor

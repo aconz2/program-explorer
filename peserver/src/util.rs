@@ -163,6 +163,8 @@ pub mod premade_responses {
         Lazy::new(|| error_resp::gen_error_response(StatusCode::SERVICE_UNAVAILABLE.into()));
     pub static PAYLOAD_TOO_LARGE: Lazy<ResponseHeader> =
         Lazy::new(|| error_resp::gen_error_response(StatusCode::PAYLOAD_TOO_LARGE.into()));
+    pub static BAD_REQUEST: Lazy<ResponseHeader> =
+        Lazy::new(|| error_resp::gen_error_response(StatusCode::BAD_REQUEST.into()));
 
     pub static TOO_MANY_REQUESTS: Lazy<ResponseHeader> = Lazy::new(|| {
         let mut header = ResponseHeader::build(StatusCode::TOO_MANY_REQUESTS, Some(3)).unwrap();
