@@ -245,7 +245,11 @@ impl CloudHypervisor {
                 x.arg("--pmem");
             }
             for (path, mode) in pmem_paths_modes.iter() {
-                x.arg(format!("file={:?},discard_writes={}", path, mode.discard_writes()));
+                x.arg(format!(
+                    "file={:?},discard_writes={}",
+                    path,
+                    mode.discard_writes()
+                ));
             }
             if config.keep_args {
                 args.extend(x.get_args().map(|x| x.into()));

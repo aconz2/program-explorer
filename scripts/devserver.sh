@@ -6,6 +6,8 @@ trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
 
 export RUST_LOG=debug
 
+cargo build --bin peimage-service --bin lb --bin worker
+
 cargo run --bin peimage-service -- --listen /tmp/image.sock --auth ~/Secure/container-registries.json &
 
 cargo run --bin lb -- --uds /tmp/lb.sock --worker uds:/tmp/worker.sock &

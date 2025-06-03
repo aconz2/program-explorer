@@ -317,7 +317,12 @@ fn main() {
             }
             //rustix::io::fcntl_setfd(&res.fd, rustix::io::FdFlags::empty()).unwrap();
 
-            (res.config, None, PathBufOrOwnedFd::Fd(res.fd), res.manifest_digest)
+            (
+                res.config,
+                None,
+                PathBufOrOwnedFd::Fd(res.fd),
+                res.manifest_digest,
+            )
         } else {
             panic!("--index and --image-service can't both be none");
         }

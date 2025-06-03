@@ -1,14 +1,16 @@
 use crossbeam::channel;
 use crossbeam::channel::{Receiver, Sender};
-use std::os::fd::{AsFd};
+use std::os::fd::AsFd;
 use std::thread;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
 use waitid_timeout::{Siginfo, WaitIdDataOvertime};
 
 use log::trace;
-use nix;
-use nix::sched::{sched_getaffinity, sched_setaffinity, CpuSet};
+//use nix;
+//use nix::sched::{sched_getaffinity, sched_setaffinity, CpuSet};
+use rustix;
+use rustix::thread::{sched_getaffinity, sched_setaffinity, CpuSet};
 
 use crate::cloudhypervisor;
 use crate::cloudhypervisor::{
@@ -101,7 +103,7 @@ fn spawn_worker(
 ) -> JoinHandleT {
     spawn(move || {
         trace!("starting worker {id}");
-        sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
+        sched_setaffinity(None, &cpuset).unwrap();
         for msg in input.iter() {
             match output.send(run(msg)) {
                 Ok(_) => {}
@@ -162,107 +164,76 @@ pub fn run(input: Input) -> OutputResult {
     })
 }
 
-pub fn cpuset_all_ht() -> nix::Result<Vec<CpuSet>> {
-    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
-    let mut ret = vec![];
-    let mut i = 0;
-    let count = CpuSet::count();
-    loop {
-        if i > count {
-            break;
-        }
-        if all.is_set(i).unwrap_or(false) && all.is_set(i + 1).unwrap_or(false) {
-            let mut c = CpuSet::new();
-            c.set(i)?;
-            c.set(i + 1)?;
-            ret.push(c);
-        }
-        i += 2;
-    }
-    Ok(ret)
-}
+//pub fn cpuset_all_ht() -> Option<Vec<CpuSet>> {
+//    let all = sched_getaffinity(None).ok()?;
+//    let mut ret = vec![];
+//    let mut i = 0usize;
+//    let count = CpuSet::new().count() as usize;
+//    loop {
+//        if i > count {
+//            break;
+//        }
+//        if all.is_set(i) && all.is_set(i + 1) {
+//            let mut c = CpuSet::new();
+//            c.set(i);
+//            c.set(i + 1);
+//            ret.push(c);
+//        }
+//        i += 2;
+//    }
+//    Some(ret)
+//}
 
 pub fn cpuset(
     core_offset: usize,
     n_workers: usize,
     n_cores_per_worker: usize,
-) -> nix::Result<Vec<CpuSet>> {
+) -> Option<Vec<CpuSet>> {
     // restrict to even offset and even cores per worker to keep workers
     // on separate physical cores
     if core_offset % 2 == 1 {
-        return nix::Result::Err(nix::errno::Errno::EINVAL);
+        return None;
     }
     if n_cores_per_worker % 2 == 1 {
-        return nix::Result::Err(nix::errno::Errno::EINVAL);
+        return None;
     }
-    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
+    let all = sched_getaffinity(None).ok()?; // None means current thread
     let mut ret = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
         let mut c = CpuSet::new();
         for j in 0..n_cores_per_worker {
             let k = core_offset + i * n_cores_per_worker + j;
-            if !all.is_set(k)? {
-                return nix::Result::Err(nix::errno::Errno::ENAVAIL);
+            if !all.is_set(k) {
+                return None;
             }
-            c.set(k)?;
+            c.set(k);
         }
         ret.push(c);
     }
-    Ok(ret)
+    Some(ret)
 }
 
-pub fn cpuset_range(begin: usize, end: Option<usize>) -> nix::Result<CpuSet> {
-    let all = sched_getaffinity(nix::unistd::Pid::from_raw(0))?; // pid 0 means us
+pub fn cpuset_range(begin: usize, end: Option<usize>) -> Option<CpuSet> {
+    let all = sched_getaffinity(None).ok()?;
     let mut c = CpuSet::new();
     if let Some(end) = end {
         if begin > end {
-            return nix::Result::Err(nix::errno::Errno::EINVAL);
+            return None;
         }
         for i in begin..=end {
-            if !all.is_set(i)? {
-                return nix::Result::Err(nix::errno::Errno::ENAVAIL);
+            if !all.is_set(i) {
+                return None;
             }
-            c.set(i)?;
+            c.set(i);
         }
     } else {
-        for i in begin..CpuSet::count() {
-            if all.is_set(i)? {
-                c.set(i)?;
+        for i in begin..(all.count() as usize) {
+            if all.is_set(i) {
+                c.set(i);
             }
         }
     }
-    Ok(c)
-}
-
-fn cpuset_count(x: &CpuSet) -> usize {
-    let mut ret = 0;
-    for i in 0..CpuSet::count() {
-        if x.is_set(i).unwrap_or(false) {
-            ret += 1;
-        }
-    }
-    ret
-}
-
-pub fn cpuset_replicate(x: &CpuSet) -> Vec<CpuSet> {
-    let mut ret = vec![];
-    let count = cpuset_count(x);
-    ret.resize(count, *x);
-    ret
-}
-
-pub fn cpusets_string(xs: &[CpuSet]) -> String {
-    let n = CpuSet::count();
-    xs.iter()
-        .map(|c| {
-            (0..n)
-                .filter(|i| c.is_set(*i).unwrap_or(false))
-                .map(|i| format!("{}", i))
-                .collect::<Vec<String>>()
-                .join(",")
-        })
-        .collect::<Vec<String>>()
-        .join(" ")
+    Some(c)
 }
 
 #[cfg(feature = "asynk")]
@@ -306,7 +277,7 @@ pub mod asynk {
     fn spawn_worker(id: usize, cpuset: CpuSet, input: Receiver<SenderElement>) -> JoinHandleT {
         spawn(move || {
             trace!("starting worker {id}");
-            sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpuset).unwrap();
+            sched_setaffinity(None, &cpuset).unwrap();
             for (msg, output) in input.iter() {
                 match output.send(run(msg)) {
                     Ok(_) => {}
@@ -327,24 +298,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cpuset_good() {
-        // TODO bad test only works on this machine
-        const N: usize = 32;
-        let set = cpuset(2, 15, 2).unwrap();
-        //println!("{:?}", set);
-        for x in set {
-            let s: String = (0..N)
-                .map(|i| if x.is_set(i).unwrap() { '1' } else { '_' })
-                .collect();
-            println!("{:?}", s);
-        }
+    fn test_cpuset() {
+        let xs = cpuset(2, 2, 2).unwrap(); // requires at least 6 cores for this to pass
+        assert!(xs.iter().all(|x| !x.is_set(0) && !x.is_set(1)));
+        let x = xs[0];
+        assert!(x.is_set(2) && x.is_set(3));
+
+        assert!(cpuset(1, 1, 2).is_none()); // odd offset
+        assert!(cpuset(0, 1, 1).is_none()); // odd cores per worker
+        assert!(cpuset(2, 16, 2).is_none()); // too many workers (on a 32 core machine)
     }
 
     #[test]
-    fn test_cpuset_bad() {
-        // no longer requiring this pedantry
-        //let _ = cpuset(1, 1, 2).unwrap_err();  // odd offset
-        //let _ = cpuset(0, 1, 1).unwrap_err();  // odd cores per worker
-        let _ = cpuset(2, 16, 2).unwrap_err(); // too many cores
+    fn test_cpuset_range() {
+        let x = cpuset_range(2, None).unwrap();
+        assert!(!x.is_set(0) && !x.is_set(1));
+        assert!(x.is_set(2));
+
+        let x = cpuset_range(2, Some(3)).unwrap();
+        assert!(!x.is_set(0) && !x.is_set(1));
+        assert!(x.is_set(2) && x.is_set(3));
+        assert!(!x.is_set(4));
     }
 }

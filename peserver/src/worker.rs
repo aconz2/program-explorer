@@ -364,16 +364,12 @@ struct Args {
     #[arg(long, default_value = "../target/debug/initramfs")]
     initramfs: OsString,
 
-    #[arg(long)]
-    server_cpuset: Option<String>,
+    #[arg(long, default_value = "0-4")]
+    server_cpuset: String,
 
-    // can either be
     // 1) offset:num_workers:cores_per_worker
-    //   apply an exclusive mask
-    // 2) begin-end
-    //   apply the same mask to end-begin+1 workers
-    #[arg(long)]
-    worker_cpuset: Option<String>,
+    #[arg(long, default_value = "4:2:2")]
+    worker_cpuset: String,
 
     #[arg(long)]
     tcp: Option<String>,
@@ -448,31 +444,18 @@ fn main() {
     info!("config {:#?}", my_server.configuration);
 
     let server_cpuset = {
-        if let Some(cpuspec) = args.server_cpuset {
-            let (begin, end) = parse_cpuset_range(&cpuspec).unwrap();
-            worker::cpuset_range(begin, end).unwrap()
-        } else {
-            worker::cpuset_range(0, Some(3)).unwrap()
-        }
+        let (begin, end) = parse_cpuset_range(&args.server_cpuset).unwrap();
+        worker::cpuset_range(begin, end).unwrap()
     };
     let worker_cpuset = {
-        if let Some(cpuspec) = args.worker_cpuset {
-            if cpuspec.contains(":") {
-                let (offset, workers, cores_per) = parse_cpuset_colon(&cpuspec).unwrap();
-                worker::cpuset(offset, workers, cores_per).unwrap()
-            } else {
-                let (begin, end) = parse_cpuset_range(&cpuspec).unwrap();
-                worker::cpuset_replicate(&worker::cpuset_range(begin, end).unwrap())
-            }
-        } else {
-            worker::cpuset_replicate(&worker::cpuset_range(4, None).unwrap())
-        }
+        let (offset, workers, cores_per) = parse_cpuset_colon(&args.worker_cpuset).unwrap();
+        worker::cpuset(offset, workers, cores_per).unwrap()
     };
 
     let pool = worker::asynk::Pool::new(&worker_cpuset);
     info!("using {} workers", pool.len());
 
-    nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &server_cpuset).unwrap();
+    rustix::thread::sched_setaffinity(None, &server_cpuset).unwrap();
 
     let max_conn = pool.len() * 2; // TODO is this a good amount?
     let app = HttpRunnerApp {
