@@ -27,3 +27,7 @@ for package in peinit pearchive peserver peimage-service; do
 done
 
 ./scripts/build-initramfs.sh "$profile"
+
+if [ "$profile" = "release" ]; then
+    (cd pefrontend && npm run build)
+fi
