@@ -51,9 +51,8 @@ dir /run/bundle/rootfs 0755 0 0
 
 dir /run/crun 0777 0 0
 
-# this is a mount point for a tmpfs so we don't create /run/output/dir here
-# this tmpfs then gets bind mounted into /mnt/upper/run/pe/output by crun into /run/pe/output
 dir /run/input      0777 1000 1000
+# this is a mount point for a tmpfs so we don't create /run/output/dir here
 dir /run/output     0777 1000 1000
 
 dir /bin   0755 0 0

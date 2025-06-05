@@ -138,8 +138,6 @@ fn parent_rootfs(_pivot_dir: &CStr) -> io::Result<()> {
     Ok(())
 }
 
-// kinda intended to do this in-process but learned you can't do unshare(CLONE_NEWUSER) in a
-// threaded program
 fn unpack_input(archive: &str, dir: &str) -> Config {
     let mut file: File = open(archive, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
         .unwrap()
@@ -177,7 +175,6 @@ fn unpack_input(archive: &str, dir: &str) -> Config {
     config
 }
 
-// TODO: maybe do this in process?
 fn pack_output<P: AsRef<OsStr>>(dir: P, archive: OwnedFd, strace: bool) {
     let fd_mappings = vec![FdMapping {
         parent_fd: archive,
@@ -291,7 +288,6 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
         .parse::<i32>()
         .unwrap();
 
-    // Command::new("/bin/busybox").arg("cat").arg("/run/crun/cid-1234/status").spawn().unwrap().wait().unwrap();
     // this can verify the Uid/Gid is not 0 0 0 0 DOES NOT WORK WITH STRACE
     // Command::new("/bin/busybox").arg("cat").arg(format!("/proc/{}/status", pid)).spawn().unwrap();
     let mut pidfd = PidFd::open(pid, 0).unwrap();
@@ -346,13 +342,9 @@ fn main() {
     } else {
         mount(IMAGE_DEVICE, c"/mnt/rootfs", rootfs_kind, MS::SILENT, None).unwrap();
     }
-    // bind mount the actual rootfs to /mnt/rootfs (or we could change the lowerdir
-    //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/index").spawn().unwrap().wait();
-    //Command::new("busybox").arg("ls").arg("-l").arg("/mnt/").spawn().unwrap().wait().unwrap();
-    //Command::new("busybox").arg("ls").arg("-l").arg("/run/input").spawn().unwrap().wait().unwrap();
 
-    //let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
-
+    // We have to use an overlayfs because we have a read only rootfs and want to mount in
+    // /run/pe/{input,output} and be writable
     mount(
         c"none",
         c"/run/bundle/rootfs",
@@ -361,8 +353,6 @@ fn main() {
         Some(c"lowerdir=/mnt/rootfs,upperdir=/mnt/upper,workdir=/mnt/work"),
     )
     .unwrap();
-
-    // let _ = Command::new("busybox").arg("ls").arg("-lh").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     // println!("V config is {config:?}");
     fs::write(
@@ -383,8 +373,6 @@ fn main() {
         })
         .unwrap();
     }
-
-    // let _ = Command::new("busybox").arg("ls").arg("-ln").arg("/mnt/rootfs").spawn().unwrap().wait();
 
     let container_output = run_container(&config);
 

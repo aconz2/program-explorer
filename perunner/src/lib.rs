@@ -50,9 +50,7 @@ pub fn create_runtime_spec(
         return Err(Error::BadOs);
     }
 
-    //let spec: oci_runtime::Spec = Default::default();
     let mut spec = oci_runtime::Spec::rootless(UID, UID);
-    // ugh this api is horrible
     spec.set_hostname(Some("programexplorer".to_string()));
 
     // doing spec.set_uid_mappings sets the volume mount idmap, not the user namespace idmap
