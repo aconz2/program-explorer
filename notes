@@ -123,6 +123,11 @@ wget https://www.busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
 vsock uses a context identifier cid and a port. cid is assigned at vm start time and is unique per vm.
 from inside the guest, connecting to the host is always with cid=2.
 we can have many connections, one per port, and per cid / sock
+https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/vsock.md
+a process on the host creates a socket at the path given to cloud-hypervisor with _<port> appended to it (!)
+socat - UNIX-LISTEN:/tmp/ch.vsock_42
+cloud-hypervisor ... --vsock cid=123,socket=/tmp/ch.vsock
+and connections from host to guest start with a message "CONNECT <port>\n" to establish connection to the right port
 
 todo could get cloud hypervisor to catch kernel panics with --pvpanic and --event-monitor but not sure this actually exits, I think the process still needs to exit/kill
 
@@ -637,3 +642,20 @@ example testing
 (cd peserver && env RUST_LOG=trace cargo run --bin worker -- --image-service /tmp/peimageservice.sock --uds /tmp/peworker.sock --worker-cpuset 30:1:2)
 (cd peserver && env RUST_LOG=trace cargo run --bin lb -- --tcp localhost:6188 --worker uds:/tmp/peworker.sock)
 (cd peserver && cargo run --bin testclient -- echo hi)
+
+socat - UNIX-LISTEN:/tmp/ch.vsock_42
+cloud-hypervisor --kernel vmlinux --initramfs target/debug/initramfs --cpus boot=1 --memory size=1024M --cmdline console=hvc0 --
+vsock cid=42,socket=/tmp/ch.vsock --api-socket=/tmp/ch-api.sock
+./ch-remote-static --api-socket /tmp/ch-api.sock pause
+mkdir /tmp/vmsnap
+./ch-remote-static --api-socket /tmp/ch-api.sock snapshot file:///tmp/vmsnap
+./ch-remote-static --api-socket /tmp/ch-api.sock info | jq
+under vsock we see the id is _vsock0
+./ch-remote-static --api-socket /tmp/ch-api.sock remove-device _vsock0
+
+/tmp/vmsnap/memory-ranges is 1G and compresses down to 18M with gzip. it is mainly 0's and c's in upper ranges
+
+initial snapshot test
+taskset -c 30,31 cargo run --bin snapshot-test
+looks like boot to vsock ready is 115 ms and restoring from snapshot is 152 ms
+I assume some of this is from reading the memory range from disk?

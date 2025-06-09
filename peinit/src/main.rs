@@ -326,6 +326,28 @@ fn main() {
         .unwrap();
     }
 
+    // snapshotting
+    // TODO move this behind a feature? or work in a branch...
+    if false {
+        use std::io::Write;
+        use vsock::{VsockStream, VMADDR_CID_HOST};
+        let mut vsock = {
+            loop {
+                match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, 42) {
+                    Ok(sock) => { break sock; }
+                    Err(e) => {
+                        println!("error connecting {:?}", e);
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+
+            }
+        };
+        let mut buf = [0u8; 1];
+        vsock.write_all(&mut buf).unwrap(); // signal ready
+        vsock.read_exact(&mut buf).unwrap(); // wait for wakeup; expect to get a connection reset
+    }
+
     let config = unpack_input(INOUT_DEVICE, "/run/input");
 
     // mount index

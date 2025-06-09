@@ -62,6 +62,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    // looking back, dup2 does the close, right?
     ret = close(fd);
     if (ret < 0) {perror("close fd"); exit(EXIT_FAILURE);}
 
