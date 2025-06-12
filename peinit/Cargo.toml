@@ -28,3 +28,6 @@ vsock = "0.5.1"
 
 [lints]
 workspace = true
+
+[features]
+snapshotting = []

@@ -8,6 +8,8 @@ use serde_json;
 
 use api_client;
 
+// cargo build --features=snapshotting --package=peinit --profile=dev --target x86_64-unknown-linux-musl && (cd .. && ./scripts/build-initramfs.sh)
+
 // there is no API way that I know of to modify the zone from shared to private, so we have to
 // modify the config.json directly. There is not easy way to use cloud_hypervisor::vmm::VmConfig
 // unfortunately
@@ -58,7 +60,8 @@ fn main() {
             //.arg("--memory").arg(format!("size={},hotplug_size={}", mem_initial, mem_add))
             //.arg("--memory").arg(format!("size={},hotplug_size={},hotplug_method=virtio-mem", mem_initial, mem_add))
 
-            .arg("--memory").arg("size=0,hotplug_method=virtio-mem")
+            .arg("--memory").arg("size=0")
+            //.arg("--memory").arg("size=0,hotplug_method=virtio-mem")
             .arg("--memory-zone").arg(format!("id=0,size={},file=memfile,shared=true", mem_initial))
 
             .arg("--cmdline").arg("console=hvc0")

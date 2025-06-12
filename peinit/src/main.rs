@@ -330,9 +330,10 @@ fn main() {
     }
     println!("{} ms: mount stuff", t0.elapsed().as_millis());
 
-    // snapshotting
-    // TODO move this behind a feature? or work in a branch...
-    if true {
+    let snapshot_wait = false;
+    #[cfg(feature="snapshotting")]
+    let snapshot_wait = true;
+    if snapshot_wait {
         use std::io::Write;
         use vsock::{VsockStream, VMADDR_CID_HOST};
         let mut vsock = {
