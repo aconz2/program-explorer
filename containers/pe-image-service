@@ -1,0 +1,8 @@
+FROM scratch
+
+COPY target/x86_64-unknown-linux-musl/release/peimage-service /bin/peimage-service
+
+ENV RUST_LOG=info
+
+ENTRYPOINT ["/bin/peimage-service"]
+
