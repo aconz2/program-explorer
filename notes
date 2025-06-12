@@ -658,4 +658,14 @@ under vsock we see the id is _vsock0
 initial snapshot test
 taskset -c 30,31 cargo run --bin snapshot-test
 looks like boot to vsock ready is 115 ms and restoring from snapshot is 152 ms
-I assume some of this is from reading the memory range from disk?
+I assume some of this is from reading the memory range from disk? true
+
+read_volatile_from took 23 ms for 128M
+13 ms in resume for resizing
+
+env PATH=~/Repos/cloud-hypervisor/target/debug/:"$PATH" cargo run --bin snapshot-test && python ../viewtrace.py
+
+env PATH=~/Repos/cloud-hypervisor/target/profiling/:"$PATH" cargo run --bin snapshot-test && perf script -F +pid > /tmp/ch.perf
+
+https://profiler.firefox.com/
+

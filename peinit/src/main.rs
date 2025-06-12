@@ -297,9 +297,12 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
 }
 
 fn main() {
+    let t0 = std::time::Instant::now();
     setup_panic();
+    println!("{} ms: setup_panic", t0.elapsed().as_millis());
 
     parent_rootfs(c"/abc").unwrap();
+    println!("{} ms: parent_rootfs", t0.elapsed().as_millis());
 
     {
         // initial mounts
@@ -325,10 +328,11 @@ fn main() {
         )
         .unwrap();
     }
+    println!("{} ms: mount stuff", t0.elapsed().as_millis());
 
     // snapshotting
     // TODO move this behind a feature? or work in a branch...
-    if false {
+    if true {
         use std::io::Write;
         use vsock::{VsockStream, VMADDR_CID_HOST};
         let mut vsock = {
@@ -337,15 +341,25 @@ fn main() {
                     Ok(sock) => { break sock; }
                     Err(e) => {
                         println!("error connecting {:?}", e);
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
 
             }
         };
+        println!("{} ms: connected to vsock", t0.elapsed().as_millis());
         let mut buf = [0u8; 1];
         vsock.write_all(&mut buf).unwrap(); // signal ready
-        vsock.read_exact(&mut buf).unwrap(); // wait for wakeup; expect to get a connection reset
+        println!("{} ms: written to vsock", t0.elapsed().as_millis());
+        // read doesn't error out if we disconnect the vsock after pause + before snapshot
+        match vsock.read_exact(&mut buf) {
+            Ok(_) => {println!("got okay from read");}
+            Err(e) => {println!("got error was expecting from read {:?}", e);}
+        }
+        println!("{} ms: vsock read", t0.elapsed().as_millis());
+        //std::thread::sleep(std::time::Duration::from_millis(500));
+        println!("{} ms: exiting", t0.elapsed().as_millis());
+        exit();
     }
 
     let config = unpack_input(INOUT_DEVICE, "/run/input");

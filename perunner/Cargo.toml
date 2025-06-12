@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "snapshot-test"
 path = "src/snapshot-test.rs"
 
+[[bin]]
+name = "snapshot-read"
+path = "src/snapshot-read.rs"
+
 [dependencies]
 api_client = { version = "0.1.0", path = "../../cloud-hypervisor/api_client" }
 pearchive = { version = "0.1.0", path = "../pearchive" }
@@ -41,6 +45,9 @@ peoci = { version = "0.1.0", path = "../peoci" }
 thiserror = "2.0.12"
 peimage-service = { version = "0.1.0", path = "../peimage-service" }
 command-fds = "0.3.1"
+#cloud-hypervisor = { version = "46.0.0", path = "../../cloud-hypervisor" }
+#cloud-hypervisor = { git = 'https://github.com/cloud-hypervisor/cloud-hypervisor', tag = "v46.0"}
+# vmm = {workspace = true}
 
 [features]
 default = ["asynk"]
