@@ -296,6 +296,42 @@ fn run_container(config: &Config) -> io::Result<WaitIdDataOvertime> {
     waiter.wait_timeout_or_kill(config.timeout)
 }
 
+#[cfg(not(feature="snapshotting"))]
+fn snapshot() {
+}
+
+#[cfg(feature="snapshotting")]
+fn snapshot() {
+    use std::io::Write;
+    use vsock::{VsockStream, VMADDR_CID_HOST};
+    let mut vsock = {
+        loop {
+            match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, 42) {
+                Ok(sock) => { break sock; }
+                Err(e) => {
+                    println!("error connecting {:?}", e);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+
+        }
+    };
+    println!("{} ms: connected to vsock", t0.elapsed().as_millis());
+    let mut buf = [0u8; 1];
+    vsock.write_all(&mut buf).unwrap(); // signal ready
+    println!("{} ms: written to vsock", t0.elapsed().as_millis());
+    // read doesn't error out if we disconnect the vsock after pause + before snapshot
+    match vsock.read_exact(&mut buf) {
+        Ok(_) => {println!("got okay from read");}
+        Err(e) => {println!("got error was expecting from read {:?}", e);}
+    }
+    println!("{} ms: vsock read", t0.elapsed().as_millis());
+    //std::thread::sleep(std::time::Duration::from_millis(500));
+    println!("{} ms: exiting", t0.elapsed().as_millis());
+    // TODO This is still WIP experimental so we just exit immediately to measure resume time
+    exit();
+}
+
 fn main() {
     let t0 = std::time::Instant::now();
     setup_panic();
@@ -330,38 +366,7 @@ fn main() {
     }
     println!("{} ms: mount stuff", t0.elapsed().as_millis());
 
-    let snapshot_wait = false;
-    #[cfg(feature="snapshotting")]
-    let snapshot_wait = true;
-    if snapshot_wait {
-        use std::io::Write;
-        use vsock::{VsockStream, VMADDR_CID_HOST};
-        let mut vsock = {
-            loop {
-                match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, 42) {
-                    Ok(sock) => { break sock; }
-                    Err(e) => {
-                        println!("error connecting {:?}", e);
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                }
-
-            }
-        };
-        println!("{} ms: connected to vsock", t0.elapsed().as_millis());
-        let mut buf = [0u8; 1];
-        vsock.write_all(&mut buf).unwrap(); // signal ready
-        println!("{} ms: written to vsock", t0.elapsed().as_millis());
-        // read doesn't error out if we disconnect the vsock after pause + before snapshot
-        match vsock.read_exact(&mut buf) {
-            Ok(_) => {println!("got okay from read");}
-            Err(e) => {println!("got error was expecting from read {:?}", e);}
-        }
-        println!("{} ms: vsock read", t0.elapsed().as_millis());
-        //std::thread::sleep(std::time::Duration::from_millis(500));
-        println!("{} ms: exiting", t0.elapsed().as_millis());
-        exit();
-    }
+    snapshot();
 
     let config = unpack_input(INOUT_DEVICE, "/run/input");
 

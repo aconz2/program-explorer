@@ -45,9 +45,6 @@ peoci = { version = "0.1.0", path = "../peoci" }
 thiserror = "2.0.12"
 peimage-service = { version = "0.1.0", path = "../peimage-service" }
 command-fds = "0.3.1"
-#cloud-hypervisor = { version = "46.0.0", path = "../../cloud-hypervisor" }
-#cloud-hypervisor = { git = 'https://github.com/cloud-hypervisor/cloud-hypervisor', tag = "v46.0"}
-# vmm = {workspace = true}
 
 [features]
 default = ["asynk"]

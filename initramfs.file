@@ -65,6 +65,6 @@ file /init             target/x86_64-unknown-linux-musl/$PROFILE/peinit    0555 
 # TODO pull these from maybe somewhere else
 # busybox is https://www.busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
 # but strace was a custom build locally
-file /bin/busybox busybox 0555 0 0
-slink /bin/sh /bin/busybox 0555 0 0
-file /bin/strace strace 0555 0 0
+file /bin/busybox busybox 0555 0 0 #@ REMOVE_IN_RELEASE
+slink /bin/sh /bin/busybox 0555 0 0 #@ REMOVE_IN_RELEASE
+file /bin/strace strace 0555 0 0 #@ REMOVE_IN_RELEASE
