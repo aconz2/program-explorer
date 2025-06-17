@@ -1,10 +1,10 @@
-use std::process::Command;
-use std::os::unix::net::{UnixListener,UnixStream};
-use std::io::Read;
-use std::time::{Instant, Duration};
-use std::fs;
-use std::path::Path;
 use serde_json;
+use std::fs;
+use std::io::Read;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use api_client;
 
@@ -41,11 +41,17 @@ fn main() {
     //let _ = fs::remove_dir_all(snapshot_dir);
 
     let mem_total = 1 << 30; // 1G
-    // mem has to be in multiples of 128
+                             // mem has to be in multiples of 128
     let mem_initial = 128 * 1 << 20; // 128M == 2**27
     let mem_add = mem_total - mem_initial;
 
-    Command::new("truncate").arg("--size=128M").arg(memfile).spawn().unwrap().wait().unwrap();
+    Command::new("truncate")
+        .arg("--size=128M")
+        .arg(memfile)
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
 
     if !fs::exists(snapshot_dir).unwrap_or(false) {
         let _ = fs::create_dir(snapshot_dir);
@@ -53,22 +59,32 @@ fn main() {
         println!("{} ms: pre spawn", 0);
         let mut child = Command::new("cloud-hypervisor")
             //.arg("-v")
-            .arg("--kernel").arg("../vmlinux")
-            .arg("--initramfs").arg("../target/debug/initramfs")
-            .arg("--cpus").arg("boot=1")
+            .arg("--kernel")
+            .arg("../vmlinux")
+            .arg("--initramfs")
+            .arg("../target/debug/initramfs")
+            .arg("--cpus")
+            .arg("boot=1")
             //.arg("--memory").arg("size=1G")
             //.arg("--memory").arg(format!("size={},hotplug_size={}", mem_initial, mem_add))
             //.arg("--memory").arg(format!("size={},hotplug_size={},hotplug_method=virtio-mem", mem_initial, mem_add))
-
-            .arg("--memory").arg("size=0")
+            .arg("--memory")
+            .arg("size=0")
             //.arg("--memory").arg("size=0,hotplug_method=virtio-mem")
-            .arg("--memory-zone").arg(format!("id=0,size={},file=memfile,shared=true", mem_initial))
-
-            .arg("--cmdline").arg("console=hvc0")
-            .arg("--console").arg("file=/tmp/ch-console")
+            .arg("--memory-zone")
+            .arg(format!(
+                "id=0,size={},file=memfile,shared=true",
+                mem_initial
+            ))
+            .arg("--cmdline")
+            .arg("console=hvc0")
+            .arg("--console")
+            .arg("file=/tmp/ch-console")
             //.arg("--console").arg("null")
-            .arg("--api-socket").arg(format!("path={}", api_path))
-            .arg("--vsock").arg(format!("cid=4,socket={}", vsock_prefix))
+            .arg("--api-socket")
+            .arg(format!("path={}", api_path))
+            .arg("--vsock")
+            .arg(format!("cid=4,socket={}", vsock_prefix))
             .spawn()
             .unwrap();
 
@@ -84,7 +100,8 @@ fn main() {
         // already connected socket
         let mut api_sock = UnixStream::connect(api_path).unwrap();
 
-        api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.pause", None).unwrap();
+        api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.pause", None)
+            .unwrap();
         // we can either remove the vsock once we are paused, that way the restored guest doesn't
         // resume with it, or after restore and before resume, init waiting on the read will just get
         // conn interrupted or w/e either way
@@ -94,13 +111,21 @@ fn main() {
 
         let command = r#"{"destination_url": "file://DIR"}"#.replace("DIR", snapshot_dir);
         println!("{} ms: snapshotting", t0.elapsed().as_millis());
-        api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.snapshot", Some(&command)).unwrap();
+        api_client::simple_api_full_command_and_response(
+            &mut api_sock,
+            "PUT",
+            "vm.snapshot",
+            Some(&command),
+        )
+        .unwrap();
         println!("{} ms: snapshotted", t0.elapsed().as_millis());
-        api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.shutdown", None).unwrap();
+        api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.shutdown", None)
+            .unwrap();
         println!("{} ms: shutdown", t0.elapsed().as_millis());
 
         child.kill().unwrap();
-        child.wait().unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success());
         let console_text = fs::read_to_string("/tmp/ch-console").unwrap();
         fs::write(Path::new(snapshot_dir).join("console"), &console_text).unwrap();
         println!("{} ms: child exited", t0.elapsed().as_millis());
@@ -112,7 +137,6 @@ fn main() {
         serde_json::to_writer(&mut f, &config_updated).unwrap();
     }
 
-
     // ch complains if the vsock prefix exists
     let _ = fs::remove_file(&vsock_prefix);
     let _ = fs::remove_file(&api_path);
@@ -120,14 +144,16 @@ fn main() {
     let t0 = Instant::now();
     println!("{} ms: starting from snapshot", t0.elapsed().as_millis());
     let mut child = Command::new("cloud-hypervisor")
-    // getting some weird error about locking memory so using -m1
-    //let mut child = Command::new("perf").arg("record").arg("--call-graph=dwarf").arg("-F5000").arg("-m32")/*.arg("--all-user")*/.arg("--").arg("cloud-hypervisor")
-    // couldn't get perf kvm stat to work Error:No permissions to read /sys/kernel/tracing//events/kvm/kvm_entry
-    //let mut child = Command::new("perf").arg("kvm").arg("stat").arg("record").arg("cloud-hypervisor")
-    //let mut child = Command::new("strace").arg("-f").arg("-o").arg("strace.out").arg("--absolute-timestamps=precision:ms").arg("--relative-timestamps=ms").arg("cloud-hypervisor")
+        // getting some weird error about locking memory so using -m1
+        //let mut child = Command::new("perf").arg("record").arg("--call-graph=dwarf").arg("-F5000").arg("-m32")/*.arg("--all-user")*/.arg("--").arg("cloud-hypervisor")
+        // couldn't get perf kvm stat to work Error:No permissions to read /sys/kernel/tracing//events/kvm/kvm_entry
+        //let mut child = Command::new("perf").arg("kvm").arg("stat").arg("record").arg("cloud-hypervisor")
+        //let mut child = Command::new("strace").arg("-f").arg("-o").arg("strace.out").arg("--absolute-timestamps=precision:ms").arg("--relative-timestamps=ms").arg("cloud-hypervisor")
         .arg("-v")
-        .arg("--api-socket").arg(format!("path={}", api_path))
-        .arg("--restore").arg(format!("source_url=file://{}", snapshot_dir))
+        .arg("--api-socket")
+        .arg(format!("path={}", api_path))
+        .arg("--restore")
+        .arg(format!("source_url=file://{}", snapshot_dir))
         //.arg("--console").arg("file=/tmp/ch-console-2")
         .spawn()
         .unwrap();
@@ -135,7 +161,9 @@ fn main() {
     let mut api_sock = (|| {
         for _ in 0..1000 {
             match UnixStream::connect(api_path) {
-                Ok(sock) => { return sock; },
+                Ok(sock) => {
+                    return sock;
+                }
                 Err(_) => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -149,7 +177,13 @@ fn main() {
     let remove_vsock = true;
     if remove_vsock {
         let command = r#"{"id": "_vsock0"}"#;
-        api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.remove-device", Some(&command)).unwrap();
+        api_client::simple_api_full_command_and_response(
+            &mut api_sock,
+            "PUT",
+            "vm.remove-device",
+            Some(&command),
+        )
+        .unwrap();
     } else {
         todo!("will hang, idk how to restore the vsock");
     }
@@ -171,7 +205,8 @@ fn main() {
     //}
 
     println!("{} ms: resuming", t0.elapsed().as_millis());
-    api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.resume", None).unwrap();
+    api_client::simple_api_full_command_and_response(&mut api_sock, "PUT", "vm.resume", None)
+        .unwrap();
     println!("{} ms: resumed", t0.elapsed().as_millis());
 
     //std::thread::sleep(Duration::from_millis(500));
@@ -180,11 +215,13 @@ fn main() {
     //println!("{} ms: shutdown", t0.elapsed().as_millis());
 
     //child.kill().unwrap();
-    child.wait().unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success());
     println!("{} ms: exited", t0.elapsed().as_millis());
 
     println!("console reconstructed");
-    let original_console_text = fs::read_to_string(Path::new(snapshot_dir).join("console")).unwrap();
+    let original_console_text =
+        fs::read_to_string(Path::new(snapshot_dir).join("console")).unwrap();
     let console_text = fs::read_to_string("/tmp/ch-console").unwrap();
     println!("{}", original_console_text);
     println!("--------- resume --------------");

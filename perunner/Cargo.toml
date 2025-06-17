@@ -15,6 +15,10 @@ path = "src/snapshot-test.rs"
 name = "snapshot-read"
 path = "src/snapshot-read.rs"
 
+[[bin]]
+name = "blocktest"
+path = "src/blocktest.rs"
+
 [dependencies]
 api_client = { version = "0.1.0", path = "../../cloud-hypervisor/api_client" }
 pearchive = { version = "0.1.0", path = "../pearchive" }

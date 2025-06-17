@@ -332,12 +332,40 @@ fn snapshot() {
     exit();
 }
 
+#[cfg(not(feature="blocktesting"))]
+fn block_testing() {
+}
+
+#[cfg(feature="blocktesting")]
+fn block_testing() {
+    use std::io::Seek;
+    let mut buf = vec![0; 4096];
+    //Command::new("busybox").arg("ls").arg("-l").arg("/dev").spawn().unwrap().wait().unwrap();
+    let mut f = File::open("/dev/vda").unwrap();
+    f.read_exact(&mut buf).unwrap();
+    for byte in buf.iter() {
+        print!("{:x}", byte);
+    }
+    println!("\n----------------------------");
+    for _ in 0..2046 {
+        f.read_exact(&mut buf).unwrap();
+    }
+    f.read_exact(&mut buf).unwrap();
+    for byte in buf.iter() {
+        print!("{:x}", byte);
+    }
+    println!("");
+}
+
 fn main() {
+    #[cfg(feature="snapshotting")]
     let t0 = std::time::Instant::now();
     setup_panic();
+    #[cfg(feature="snapshotting")]
     println!("{} ms: setup_panic", t0.elapsed().as_millis());
 
     parent_rootfs(c"/abc").unwrap();
+    #[cfg(feature="snapshotting")]
     println!("{} ms: parent_rootfs", t0.elapsed().as_millis());
 
     {
@@ -364,9 +392,11 @@ fn main() {
         )
         .unwrap();
     }
+    #[cfg(feature="snapshotting")]
     println!("{} ms: mount stuff", t0.elapsed().as_millis());
 
     snapshot();
+    block_testing();
 
     let config = unpack_input(INOUT_DEVICE, "/run/input");
 

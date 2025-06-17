@@ -3,6 +3,8 @@ use std::env;
 use peimage::mkfs::squash_erofs;
 use peoci::ocidir::load_layers_from_oci;
 
+// NOTE this uses mkfs.erofs
+
 fn main() {
     let args: Vec<_> = env::args().collect();
     let dir = args.get(1).expect("give me an oci dir");

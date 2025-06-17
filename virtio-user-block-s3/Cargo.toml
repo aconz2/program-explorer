@@ -1,0 +1,14 @@
+[package]
+name = "virtio-user-block-s3"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.27"
+vhost = { version = "0.14.0", features = ["vhost-user-backend"] }
+vhost-user-backend = "0.19.0"
+vm-memory = { version = "0.16.2", features = ["backend-atomic", "backend-mmap"] }
+vmm-sys-util = "0.14.0"
+
+[lints]
+workspace = true

@@ -216,9 +216,9 @@ impl CloudHypervisor {
             //             --cmdline console=hvc0 --console null does work though
             if config.console {
                 x.arg("--cmdline")
-                 .arg("console=hvc0")
-                 .arg("--console")
-                 .arg(format!("file={:?}", con_file.path()));
+                    .arg("console=hvc0")
+                    .arg("--console")
+                    .arg(format!("file={:?}", con_file.path()));
             } else {
                 x.arg("--console").arg("off");
             }

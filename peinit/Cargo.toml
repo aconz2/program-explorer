@@ -31,3 +31,4 @@ workspace = true
 
 [features]
 snapshotting = ["dep:vsock"]
+blocktesting = []
