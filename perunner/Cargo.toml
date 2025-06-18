@@ -49,6 +49,7 @@ peoci = { version = "0.1.0", path = "../peoci" }
 thiserror = "2.0.12"
 peimage-service = { version = "0.1.0", path = "../peimage-service" }
 command-fds = "0.3.1"
+env_logger = "0.11.8"
 
 [features]
 default = ["asynk"]

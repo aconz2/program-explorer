@@ -1,3 +1,4 @@
+use clap::Parser;
 use std::fs::File;
 use std::process::Command;
 
@@ -6,11 +7,34 @@ use std::process::Command;
 // with vhost_user_block in cloud-hypervisor/vhost_user_block
 // cargo run -- --block-backend path=../../program-explorer/busybox.erofs,socket=/tmp/vhost_user_block.sock,readonly=true
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    strace: bool,
+
+    #[arg(long)]
+    user_block: Option<String>,
+
+    #[arg(long)]
+    disk: Option<String>,
+}
 fn main() {
-    let strace = false;
-    let ch_vhost_user_block = true;
-    let mut cmd = Command::new(if strace { "strace" } else { "cloud-hypervisor" });
-    if strace {
+    env_logger::init();
+    let args = Args::parse();
+
+    if args.user_block.is_none() && args.disk.is_none()
+        || args.user_block.is_some() && args.disk.is_some()
+    {
+        println!("must give --user-block or --disk");
+    }
+
+    let mut cmd = Command::new(if args.strace {
+        "strace"
+    } else {
+        "cloud-hypervisor"
+    });
+    if args.strace {
         cmd.arg("-o")
             .arg("/tmp/strace.out")
             .arg("-f")
@@ -19,7 +43,7 @@ fn main() {
     }
     cmd.arg("-v")
         .arg("--memory")
-        .arg("size=1G")
+        .arg("size=1G,shared=on")
         .arg("--cpus")
         .arg("boot=1")
         .arg("--kernel")
@@ -32,14 +56,15 @@ fn main() {
         .arg("file=/tmp/ch-console")
         .arg("--log-file")
         .arg("/tmp/ch-log");
-    if ch_vhost_user_block {
-        cmd
-            .arg("--disk")
-            .arg("path=../busybox.erofs,readonly=on,id=12345");
+
+    if let Some(disk) = args.disk {
+        cmd.arg("--disk")
+            .arg(format!("path={},readonly=on,id=12345", disk));
+    } else if let Some(socket) = args.user_block {
+        cmd.arg("--disk")
+            .arg(format!("vhost_user=on,socket={},id=12345,readonly=on", socket));
     } else {
-        cmd
-            .arg("--disk")
-            .arg("socket=/tmp/vhost_user_block.sock");
+        panic!("no --disk or --user-block");
     }
 
     let mut child = cmd.spawn().unwrap();
@@ -56,7 +81,7 @@ fn main() {
         &mut std::io::stdout(),
     )
     .unwrap();
-    if strace {
+    if args.strace {
         std::io::copy(
             &mut File::open("/tmp/strace.out").unwrap(),
             &mut std::io::stdout(),

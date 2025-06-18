@@ -339,7 +339,7 @@ fn block_testing() {
 #[cfg(feature="blocktesting")]
 fn block_testing() {
     use std::io::Seek;
-    let mut buf = vec![0; 4096];
+    let mut buf = vec![0; 512];
     //Command::new("busybox").arg("ls").arg("-l").arg("/dev").spawn().unwrap().wait().unwrap();
     let mut f = File::open("/dev/vda").unwrap();
     f.read_exact(&mut buf).unwrap();
