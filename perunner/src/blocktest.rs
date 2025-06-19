@@ -14,6 +14,9 @@ struct Args {
     strace: bool,
 
     #[arg(long)]
+    ch_log: bool,
+
+    #[arg(long)]
     user_block: Option<String>,
 
     #[arg(long)]
@@ -76,11 +79,13 @@ fn main() {
         &mut std::io::stdout(),
     )
     .unwrap();
-    std::io::copy(
-        &mut File::open("/tmp/ch-log").unwrap(),
-        &mut std::io::stdout(),
-    )
-    .unwrap();
+    if args.ch_log {
+        std::io::copy(
+            &mut File::open("/tmp/ch-log").unwrap(),
+            &mut std::io::stdout(),
+        )
+        .unwrap();
+    }
     if args.strace {
         std::io::copy(
             &mut File::open("/tmp/strace.out").unwrap(),
