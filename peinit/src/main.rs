@@ -343,7 +343,7 @@ fn block_testing() {
     //Command::new("busybox").arg("ls").arg("-l").arg("/dev").spawn().unwrap().wait().unwrap();
     let mut f = File::open("/dev/vda").unwrap();
     f.read_exact(&mut buf).unwrap();
-    for byte in buf.iter() {
+    for byte in buf.iter().take(100) {
         print!("{:x}", byte);
     }
     println!("\n----------------------------");
@@ -351,7 +351,7 @@ fn block_testing() {
         f.read_exact(&mut buf).unwrap();
     }
     f.read_exact(&mut buf).unwrap();
-    for byte in buf.iter() {
+    for byte in buf.iter().take(100) {
         print!("{:x}", byte);
     }
     println!("");

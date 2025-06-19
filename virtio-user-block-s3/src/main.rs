@@ -95,10 +95,17 @@ impl From<Error> for std::io::Error {
     }
 }
 
+#[derive(Default, Debug)]
+struct Metrics {
+    reads: usize,
+    segments: usize,
+}
+
 struct VhostUserService {
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
     config: VirtioBlockConfig,
     exit_evt: EventFd,
+    metrics: Metrics,
 }
 
 fn read_virtio_blk_outhdr<B: Bitmap + 'static>(
@@ -131,7 +138,7 @@ impl VhostUserBackendMut for VhostUserService {
         (1 << VIRTIO_BLK_F_SEG_MAX)
             | (1 << VIRTIO_BLK_F_SIZE_MAX)
             | (1 << VIRTIO_BLK_F_BLK_SIZE)
-            //| (1 << VIRTIO_BLK_F_TOPOLOGY)
+            | (1 << VIRTIO_BLK_F_TOPOLOGY)
             | (1 << VIRTIO_BLK_F_RO)
             | (1 << VIRTIO_F_VERSION_1)
             //| (1 << VIRTIO_RING_F_EVENT_IDX)
@@ -219,6 +226,7 @@ impl VhostUserBackendMut for VhostUserService {
                 error!("got a header not expecting {}", header.type_);
                 return Err(Error::NotARead.into());
             }
+            // sector is in 512 byte offset (regardless of block size)
             debug!("sector read starting at {}", header.sector);
             // TODO VIRTIO_BLK_T_GET_ID
 
@@ -246,10 +254,10 @@ impl VhostUserBackendMut for VhostUserService {
             //);
             // TODO write the actual response data
             let mut total_len = 0;
-            for desc in requests {
+            for desc in &requests {
                 let _addr = desc.addr();
                 let len = desc.len();
-                debug!("read {:?} {}", _addr, len);
+                //debug!("read {:?} {}", _addr, len);
                 if true {
                     use vm_memory::GuestMemory;
                     let buf = vec![42u8; len as usize];
@@ -263,6 +271,8 @@ impl VhostUserBackendMut for VhostUserService {
 
             // the linux kernel doesn't seem to actually care about the len written in the used
             // descriptor
+            self.metrics.reads += 1;
+            self.metrics.segments += requests.len();
 
             chain
                 .memory()
@@ -323,22 +333,22 @@ fn main() {
     let socket = args.get(1).expect("give me a socket path");
 
     let fake_size = 8388608; // size of busybox.erofs
-    // TODO can't get any block size besides 512 to work with or without F_TOPOLOGY
-    let block_size: u32 = 512 * 1;
-    assert!(fake_size % block_size == 0);
-    let num_blocks = (fake_size as u64) / (block_size as u64);
+    let block_size: u32 = 512 * 8;
+    assert!(fake_size % 512 == 0);
+    let num_sectors = (fake_size as u64) / 512;
     let physical_block_exp = block_size.ilog2();
     assert!(1 << physical_block_exp == block_size);
 
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
     let backend = Arc::new(RwLock::new(VhostUserService {
+        metrics: Metrics::default(),
         mem: mem.clone(),
         exit_evt: EventFd::new(EFD_NONBLOCK).unwrap(),
         config: VirtioBlockConfig {
-            capacity: num_blocks, // number of sectors in 512-byte sectors,
+            capacity: num_sectors, // number of sectors in 512-byte sectors,
             blk_size: block_size,   // block size if VIRTIO_BLK_F_BLK_SIZE
             size_max: 65536, // maximum segment size if VIRTIO_BLK_F_SIZE_MAX
-            seg_max: 1,      // The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX)
+            seg_max: 10,      // The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX)
             num_queues: 1,   // number of vqs, only available when VIRTIO_BLK_F_MQ is set
             alignment_offset: 0,
             physical_block_exp: physical_block_exp.try_into().unwrap(),
@@ -353,7 +363,7 @@ fn main() {
     let listener = Listener::new(socket, unlink).unwrap();
 
     let name = "virtio-user-block-s3";
-    let mut daemon = VhostUserDaemon::new(name.to_string(), backend, mem).unwrap();
+    let mut daemon = VhostUserDaemon::new(name.to_string(), backend.clone(), mem).unwrap();
 
     if let Err(e) = daemon.start(listener) {
         error!("Failed to start daemon: {:?}\n", e);
@@ -362,5 +372,6 @@ fn main() {
 
     if let Err(e) = daemon.wait() {
         error!("Error from the main thread: {:?}", e);
+        info!("metrics {:?}", backend.read().unwrap().metrics);
     }
 }
