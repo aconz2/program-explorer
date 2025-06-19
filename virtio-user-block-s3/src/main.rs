@@ -1,9 +1,9 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use log::{debug, error, info, warn};
 use vhost::vhost_user::message::VHOST_USER_CONFIG_OFFSET;
 use vhost::vhost_user::{Listener, VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT};
+use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT, VringState};
 use virtio_bindings::virtio_blk::{VIRTIO_BLK_S_OK, VIRTIO_BLK_T_IN};
 use virtio_bindings::virtio_blk::{
     virtio_blk_config as VirtioBlockConfig, virtio_blk_outhdr as VirtioBlockHeader,
@@ -99,6 +99,7 @@ impl From<Error> for std::io::Error {
 struct Metrics {
     reads: usize,
     segments: usize,
+    notifications_skipped: usize,
 }
 
 struct VhostUserService {
@@ -106,6 +107,7 @@ struct VhostUserService {
     config: VirtioBlockConfig,
     exit_evt: EventFd,
     metrics: Metrics,
+    event_idx: bool,
 }
 
 fn read_virtio_blk_outhdr<B: Bitmap + 'static>(
@@ -118,66 +120,9 @@ fn read_virtio_blk_outhdr<B: Bitmap + 'static>(
         .0)
 }
 
-impl VhostUserBackendMut for VhostUserService {
-    type Bitmap = ();
-    type Vring = VringRwLock;
-
-    fn num_queues(&self) -> usize {
-        1
-    }
-
-    fn max_queue_size(&self) -> usize {
-        1024
-    }
-
-    fn features(&self) -> u64 {
-        use virtio_bindings::virtio_blk::*;
-        use virtio_bindings::virtio_config::*;
-        use virtio_bindings::virtio_ring::*;
-
-        (1 << VIRTIO_BLK_F_SEG_MAX)
-            | (1 << VIRTIO_BLK_F_SIZE_MAX)
-            | (1 << VIRTIO_BLK_F_BLK_SIZE)
-            | (1 << VIRTIO_BLK_F_TOPOLOGY)
-            | (1 << VIRTIO_BLK_F_RO)
-            | (1 << VIRTIO_F_VERSION_1)
-            //| (1 << VIRTIO_RING_F_EVENT_IDX)
-            // this is VHOST_USER_F_PROTOCOL_FEATURES
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
-    }
-
-    fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        // this is VHOST_USER_PROTOCOL_F_CONFIG
-        VhostUserProtocolFeatures::CONFIG
-    }
-
-    fn update_memory(&mut self, _mem: GuestMemoryAtomic<GuestMemoryMmap>) -> std::io::Result<()> {
-        debug!("update memory");
-        Ok(())
-    }
-
-    fn set_event_idx(&mut self, event_idx: bool) {
-        if event_idx {
-            //panic!("unsupported");
-        }
-    }
-
-    fn handle_event(
-        &mut self,
-        device_event: u16,
-        evset: EventSet,
-        vrings: &[VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>],
-        _thread_id: usize,
-    ) -> std::io::Result<()> {
-        debug!("handle_event");
-        // TODO I think we should be responding with error instead of returning early with error
-        if evset != EventSet::IN {
-            return Err(Error::EventNotEpollIn.into());
-        }
-
-        // vhost-user-backend/src/event_loop.rs
-        // our caller has already checked that device_event is a valid index into vrings
-        let mut vring = vrings[device_event as usize].get_mut();
+impl VhostUserService {
+    fn process_queue(&mut self, vring: &mut RwLockWriteGuard<'_, VringState>) -> Result<bool, Error> {
+        let mut used_any = false;
 
         // this is almost equivalent, but makes it so there's a double mut borrow at the end when
         // we do vring.add_used
@@ -201,7 +146,7 @@ impl VhostUserBackendMut for VhostUserService {
 
             if head_desc.is_write_only() {
                 error!("head not readable");
-                return Err(Error::NeedRead.into());
+                return Err(Error::NeedRead);
             }
 
             if false {
@@ -224,7 +169,7 @@ impl VhostUserBackendMut for VhostUserService {
 
             if header.type_ != VIRTIO_BLK_T_IN {
                 error!("got a header not expecting {}", header.type_);
-                return Err(Error::NotARead.into());
+                return Err(Error::NotARead);
             }
             // sector is in 512 byte offset (regardless of block size)
             debug!("sector read starting at {}", header.sector);
@@ -235,7 +180,7 @@ impl VhostUserBackendMut for VhostUserService {
             while let Some(desc) = chain.next() {
                 // we only serve reads which must be writeable by us
                 if !desc.is_write_only() {
-                    return Err(Error::NeedWrite.into());
+                    return Err(Error::NeedWrite);
                 }
                 if desc.has_next() {
                     requests.push(desc);
@@ -246,7 +191,7 @@ impl VhostUserBackendMut for VhostUserService {
             let status_desc = status_desc.ok_or(Error::NoStatus)?;
 
             if status_desc.len() < 1 {
-                return Err(Error::StatusDescTooSmall.into());
+                return Err(Error::StatusDescTooSmall);
             }
             //debug!(
             //    "head {:?} status {:?} requests {:?}",
@@ -281,17 +226,103 @@ impl VhostUserBackendMut for VhostUserService {
 
             // only have to return the head descriptor to the used ring, and for reads we write the
             // total amount of data written (written by us, read by them)
+            used_any = true;
             vring
                 .add_used(chain.head_index(), total_len)
                 .unwrap();
+
+            // needs_notification takes care of checking the proper condition when event_idx is
+            // enabled
+            debug!("vring event_idx_enabled {}", vring.get_queue().event_idx_enabled());
+            //use std::ops::Deref;
+            // aha! with event_idx enabled, I see queue needs_notification=true and vring
+            // needs_notification=false. This is just because needs_notification is a modifying
+            // operation which resets the num_added field to 0
+            if vring.needs_notification().unwrap() {
+                debug!("needs_notification? true");
+                vring.signal_used_queue().unwrap();
+            }
+        }
+        Ok(used_any)
+    }
+}
+
+impl VhostUserBackendMut for VhostUserService {
+    type Bitmap = ();
+    type Vring = VringRwLock;
+
+    fn num_queues(&self) -> usize {
+        1
+    }
+
+    fn max_queue_size(&self) -> usize {
+        1024
+    }
+
+    fn features(&self) -> u64 {
+        use virtio_bindings::virtio_blk::*;
+        use virtio_bindings::virtio_config::*;
+        use virtio_bindings::virtio_ring::*;
+
+        (1 << VIRTIO_BLK_F_SEG_MAX)
+            | (1 << VIRTIO_BLK_F_SIZE_MAX)
+            | (1 << VIRTIO_BLK_F_BLK_SIZE)
+            | (1 << VIRTIO_BLK_F_TOPOLOGY)
+            | (1 << VIRTIO_BLK_F_RO)
+            | (1 << VIRTIO_F_VERSION_1)
+            | (1 << VIRTIO_RING_F_EVENT_IDX)
+            // this is VHOST_USER_F_PROTOCOL_FEATURES
+            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+    }
+
+    fn protocol_features(&self) -> VhostUserProtocolFeatures {
+        // this is VHOST_USER_PROTOCOL_F_CONFIG
+        VhostUserProtocolFeatures::CONFIG
+    }
+
+    fn update_memory(&mut self, _mem: GuestMemoryAtomic<GuestMemoryMmap>) -> std::io::Result<()> {
+        debug!("update memory");
+        Ok(())
+    }
+
+    fn set_event_idx(&mut self, event_idx: bool) {
+        debug!("event_idx enabled? {}", event_idx);
+        self.event_idx = event_idx;
+    }
+
+    fn handle_event(
+        &mut self,
+        device_event: u16,
+        evset: EventSet,
+        vrings: &[VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>],
+        _thread_id: usize,
+    ) -> std::io::Result<()> {
+        debug!("handle_event");
+        // TODO I think we should be responding with error instead of returning early with error
+        if evset != EventSet::IN {
+            return Err(Error::EventNotEpollIn.into());
         }
 
-        // needs_notification takes care of checking the proper condition when event_idx is
-        // enabled
-        debug!("vring event_idx_enabled {}", vring.get_queue().event_idx_enabled());
-        if vring.needs_notification().unwrap() {
-            debug!("needs_notification? true");
-            vring.signal_used_queue().unwrap();
+        // vhost-user-backend/src/event_loop.rs
+        // our caller has already checked that device_event is a valid index into vrings
+        let mut vring = vrings[device_event as usize].get_mut();
+
+        loop {
+            use std::ops::Deref;
+            vring.get_queue_mut().enable_notification(self.mem.memory().deref()).unwrap();
+            match self.process_queue(&mut vring) {
+                Ok(true) => {
+                    // we did work, need to keep trying
+                }
+                Ok(false) => {
+                    break;
+                }
+                Err(e) => {
+                    // TODO we need to still respond
+                    error!("error when processing queue {e}");
+                }
+            }
+
         }
 
         Ok(())
@@ -344,10 +375,13 @@ fn main() {
         metrics: Metrics::default(),
         mem: mem.clone(),
         exit_evt: EventFd::new(EFD_NONBLOCK).unwrap(),
+        event_idx: false,
         config: VirtioBlockConfig {
             capacity: num_sectors, // number of sectors in 512-byte sectors,
             blk_size: block_size,   // block size if VIRTIO_BLK_F_BLK_SIZE
             size_max: 65536, // maximum segment size if VIRTIO_BLK_F_SIZE_MAX
+            // TODO looks like we need to cap this to 2 less than our queue size (1 for header, 1
+            // for status)
             seg_max: 10,      // The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX)
             num_queues: 1,   // number of vqs, only available when VIRTIO_BLK_F_MQ is set
             alignment_offset: 0,
