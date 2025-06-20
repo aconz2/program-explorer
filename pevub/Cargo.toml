@@ -1,5 +1,5 @@
 [package]
-name = "virtio-user-block-s3"
+name = "pevub"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,6 +8,7 @@ event_idx = []
 
 [dependencies]
 env_logger = "0.11.8"
+# TODO probably want to bring this up to workspace
 log = { version = "0.4.27", features= ["release_max_level_warn"] }
 smallvec = "1.15.1"
 thiserror = "2.0.12"

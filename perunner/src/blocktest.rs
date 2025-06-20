@@ -2,10 +2,21 @@ use clap::Parser;
 use std::fs::File;
 use std::process::Command;
 
+// build a peinit with blocktesting
 // cargo build --features=blocktesting --package=peinit --profile=dev --target x86_64-unknown-linux-musl && (cd .. && ./scripts/build-initramfs.sh)
 //
-// with vhost_user_block in cloud-hypervisor/vhost_user_block
+// with vhost_user_block from ch
+// cargo run -- --user-block /tmp/vhost_user_block.sock
+// cd ~/Repos/cloud-hypervisor/vhost_user_block
 // cargo run -- --block-backend path=../../program-explorer/busybox.erofs,socket=/tmp/vhost_user_block.sock,readonly=true
+//
+// with pevub
+// cargo run -- --user-block /tmp/pevub.sock
+// cd pevub
+// env RUST_LOG=trace cargo run -- /tmp/pevub.sock
+//
+// with disk
+// cargo run -- --disk ../busybox.erofs
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

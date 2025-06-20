@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
-use log::{trace, error, info, warn};
+use log::{error, info, trace, warn};
 use smallvec::{SmallVec, smallvec};
 use vhost::vhost_user::message::VHOST_USER_CONFIG_OFFSET;
 use vhost::vhost_user::{Listener, VhostUserProtocolFeatures, VhostUserVirtioFeatures};
@@ -160,7 +160,7 @@ impl VhostUserService {
             .get_queue_mut()
             .pop_descriptor_chain(self.mem.memory())
         {
-            let (len, status, addr) = match self.process_item(vring, &mut chain) {
+            let (len, status, addr) = match self.process_item(&mut chain) {
                 Ok(ProcessItemResponse {
                     status,
                     len,
@@ -187,7 +187,6 @@ impl VhostUserService {
 
     fn process_item<M>(
         &mut self,
-        vring: &mut RwLockWriteGuard<'_, VringState>,
         chain: &mut DescriptorChain<M>,
     ) -> Result<ProcessItemResponse, Error>
     where

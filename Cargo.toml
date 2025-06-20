@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["pearchive", "pearchive/fuzz", "peerofs", "peerofs/fuzz", "peimage", "peimage-service", "peinit", "peoci", "perunner", "peserver", "virtio-user-block-s3", "waitid_timeout"]
+members = ["pearchive", "pearchive/fuzz", "peerofs", "peerofs/fuzz", "peimage", "peimage-service", "peinit", "peoci", "perunner", "peserver", "pevub", "waitid_timeout"]
 
 [workspace.lints.clippy]
 redundant_field_names = "allow"
@@ -8,3 +8,8 @@ redundant_field_names = "allow"
 # reminder on how to do this
 # [patch.crates-io]
 # libz-ng-sys = { path = '../libz-sys' }
+
+# in testing pevub, added some debug/trace logs to these
+# [patch.crates-io]
+# vhost-user-backend = { path = '../vhost/vhost-user-backend' }
+# vhost = { path = '../vhost/vhost' }

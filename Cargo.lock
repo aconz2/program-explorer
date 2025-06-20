@@ -2011,6 +2011,7 @@ dependencies = [
  "clap 4.5.39",
  "command-fds",
  "crossbeam",
+ "env_logger",
  "libc",
  "log",
  "memmap2",
@@ -2067,6 +2068,22 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "pevub"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "smallvec",
+ "thiserror 2.0.12",
+ "vhost",
+ "vhost-user-backend",
+ "virtio-bindings",
+ "virtio-queue",
+ "vm-memory",
+ "vmm-sys-util 0.14.0",
 ]
 
 [[package]]
@@ -2937,9 +2954,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.14.0"
+version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
+checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
@@ -3513,17 +3530,6 @@ checksum = "efd3ef6079fc0de4d687a6ff364a5f5633f3aabcd29982ef866bc49fba0349a4"
 dependencies = [
  "log",
  "virtio-bindings",
- "vm-memory",
- "vmm-sys-util 0.14.0",
-]
-
-[[package]]
-name = "virtio-user-block-s3"
-version = "0.1.0"
-dependencies = [
- "log",
- "vhost",
- "vhost-user-backend",
  "vm-memory",
  "vmm-sys-util 0.14.0",
 ]
