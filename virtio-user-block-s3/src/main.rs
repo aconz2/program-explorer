@@ -1,20 +1,28 @@
+use std::ops::Deref;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
-use log::{debug, error, info, warn};
+use log::{trace, error, info, warn};
+use smallvec::{SmallVec, smallvec};
 use vhost::vhost_user::message::VHOST_USER_CONFIG_OFFSET;
 use vhost::vhost_user::{Listener, VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT, VringState};
-use virtio_bindings::virtio_blk::{VIRTIO_BLK_S_OK, VIRTIO_BLK_T_IN};
+use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringState, VringT};
+use virtio_bindings::virtio_blk::{
+    VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_OK, VIRTIO_BLK_S_UNSUPP, VIRTIO_BLK_T_IN,
+};
 use virtio_bindings::virtio_blk::{
     virtio_blk_config as VirtioBlockConfig, virtio_blk_outhdr as VirtioBlockHeader,
 };
-use virtio_queue::QueueT;
+use virtio_queue::{DescriptorChain, QueueT, desc::split::Descriptor};
 use vm_memory::{
     ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap,
     bitmap::Bitmap,
 };
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
+
+const QUEUE_SIZE: usize = 1024;
+// max len of iovec (essentially), governs size of smallvec
+const SEG_MAX: usize = 16;
 
 // NOTES:
 // Resources:
@@ -73,13 +81,11 @@ unsafe impl ByteValued for VirtioBlockHeaderReader {}
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    EventNotEpollIn,
     NoHead,
     NeedRead,
     NeedWrite,
     NoStatus,
     Mem,
-    NotARead,
     StatusDescTooSmall,
 }
 
@@ -107,6 +113,7 @@ struct VhostUserService {
     config: VirtioBlockConfig,
     exit_evt: EventFd,
     metrics: Metrics,
+    #[cfg(feature = "event_idx")]
     event_idx: bool,
 }
 
@@ -120,130 +127,153 @@ fn read_virtio_blk_outhdr<B: Bitmap + 'static>(
         .0)
 }
 
-impl VhostUserService {
-    fn process_queue(&mut self, vring: &mut RwLockWriteGuard<'_, VringState>) -> Result<bool, Error> {
-        let mut used_any = false;
+struct ProcessItemResponse {
+    status: u8,
+    status_addr: GuestAddress,
+    len: u32,
+}
 
-        // this is almost equivalent, but makes it so there's a double mut borrow at the end when
-        // we do vring.add_used
-        // for mut chain in vring.get_queue().iter(self.mem.memory()).unwrap() {
+impl ProcessItemResponse {
+    fn ok(len: u32, status_desc: &Descriptor) -> Self {
+        ProcessItemResponse {
+            status: VIRTIO_BLK_S_OK as u8,
+            len,
+            status_addr: status_desc.addr(),
+        }
+    }
+    fn unsupp(status_desc: &Descriptor) -> Self {
+        ProcessItemResponse {
+            status: VIRTIO_BLK_S_UNSUPP as u8,
+            len: 1,
+            status_addr: status_desc.addr(),
+        }
+    }
+}
+
+impl VhostUserService {
+    fn process_queue(
+        &mut self,
+        vring: &mut RwLockWriteGuard<'_, VringState>,
+    ) -> Result<bool, Error> {
+        let mut used_any = false;
         while let Some(mut chain) = vring
             .get_queue_mut()
             .pop_descriptor_chain(self.mem.memory())
         {
-            // the chain looks like
-            // header : readble
-            // Out/In : readable for writes, writable for reads
-            // status : writeable
-            //debug!("{:?}", chain);
-            for (i, x) in chain.clone().enumerate() {
-                debug!("{i} {x:?}");
-            }
-            let head_desc = chain
-                .next()
-                .ok_or(Error::NoHead)
-                .inspect_err(|_| error!("no head"))?;
-
-            if head_desc.is_write_only() {
-                error!("head not readable");
-                return Err(Error::NeedRead);
-            }
-
-            if false {
-                use vm_memory::GuestMemory;
-                eprintln!("header raw data");
-                let mut buf = vec![0; head_desc.len() as usize];
-                let _ = chain.memory().get_slice(head_desc.addr(), head_desc.len() as usize).unwrap().copy_to(&mut buf);
-                for byte in buf {
-                    eprint!("{:x}", byte);
+            let (len, status, addr) = match self.process_item(vring, &mut chain) {
+                Ok(ProcessItemResponse {
+                    status,
+                    len,
+                    status_addr,
+                }) => (len, status, Some(status_addr)),
+                Err(e) => {
+                    error!("error process_item {e}");
+                    (1, VIRTIO_BLK_S_IOERR as u8, None)
                 }
-                eprintln!();
+            };
+
+            if let Some(addr) = addr {
+                chain.memory().write_obj(status, addr).unwrap();
             }
-
-            let header =
-                read_virtio_blk_outhdr(chain.memory(), head_desc.addr())
-                .inspect_err(|e| error!("read head {e}"))
-                .map_err(|_| Error::Mem)?;
-
-            debug!("header {:?}", header);
-
-            if header.type_ != VIRTIO_BLK_T_IN {
-                error!("got a header not expecting {}", header.type_);
-                return Err(Error::NotARead);
-            }
-            // sector is in 512 byte offset (regardless of block size)
-            debug!("sector read starting at {}", header.sector);
-            // TODO VIRTIO_BLK_T_GET_ID
-
-            let mut requests = vec![];
-            let mut status_desc = None;
-            while let Some(desc) = chain.next() {
-                // we only serve reads which must be writeable by us
-                if !desc.is_write_only() {
-                    return Err(Error::NeedWrite);
-                }
-                if desc.has_next() {
-                    requests.push(desc);
-                } else {
-                    status_desc = Some(desc);
-                }
-            }
-            let status_desc = status_desc.ok_or(Error::NoStatus)?;
-
-            if status_desc.len() < 1 {
-                return Err(Error::StatusDescTooSmall);
-            }
-            //debug!(
-            //    "head {:?} status {:?} requests {:?}",
-            //    head_desc, status_desc, requests
-            //);
-            // TODO write the actual response data
-            let mut total_len = 0;
-            for desc in &requests {
-                let _addr = desc.addr();
-                let len = desc.len();
-                //debug!("read {:?} {}", _addr, len);
-                if true {
-                    use vm_memory::GuestMemory;
-                    let buf = vec![42u8; len as usize];
-                    chain.memory()
-                        .get_slice(_addr, len as usize)
-                        .unwrap()
-                        .copy_from(&buf);
-                }
-                total_len += len;
-            }
-
-            // the linux kernel doesn't seem to actually care about the len written in the used
-            // descriptor
-            self.metrics.reads += 1;
-            self.metrics.segments += requests.len();
-
-            chain
-                .memory()
-                .write_obj(VIRTIO_BLK_S_OK as u8, status_desc.addr())
-                .unwrap();
 
             // only have to return the head descriptor to the used ring, and for reads we write the
             // total amount of data written (written by us, read by them)
             used_any = true;
-            vring
-                .add_used(chain.head_index(), total_len)
-                .unwrap();
+            vring.add_used(chain.head_index(), len).unwrap();
+        }
 
-            // needs_notification takes care of checking the proper condition when event_idx is
-            // enabled
-            debug!("vring event_idx_enabled {}", vring.get_queue().event_idx_enabled());
-            //use std::ops::Deref;
-            // aha! with event_idx enabled, I see queue needs_notification=true and vring
-            // needs_notification=false. This is just because needs_notification is a modifying
-            // operation which resets the num_added field to 0
-            if vring.needs_notification().unwrap() {
-                debug!("needs_notification? true");
-                vring.signal_used_queue().unwrap();
+        Ok(used_any)
+    }
+
+    fn process_item<M>(
+        &mut self,
+        vring: &mut RwLockWriteGuard<'_, VringState>,
+        chain: &mut DescriptorChain<M>,
+    ) -> Result<ProcessItemResponse, Error>
+    where
+        M: Deref<Target = GuestMemoryMmap<()>>,
+    {
+        // this is almost equivalent, but makes it so there's a double mut borrow at the end when
+        // we do vring.add_used
+        // for mut chain in vring.get_queue().iter(self.mem.memory()).unwrap() {
+        // the chain looks like
+        // header : readble
+        // Out/In : readable for writes, writable for reads
+        // status : writeable
+        //debug!("{:?}", chain);
+        //for (i, x) in chain.clone().enumerate() {
+        //    debug!("{i} {x:?}");
+        //}
+        let head_desc = chain
+            .next()
+            .ok_or(Error::NoHead)
+            .inspect_err(|_| error!("no head"))?;
+
+        if head_desc.is_write_only() {
+            error!("head not readable");
+            return Err(Error::NeedRead);
+        }
+
+        let header = read_virtio_blk_outhdr(chain.memory(), head_desc.addr())
+            .inspect_err(|e| error!("read head {e}"))
+            .map_err(|_| Error::Mem)?;
+
+        trace!("header {:?}", header);
+
+        // sector is in 512 byte offset (regardless of block size)
+        trace!("sector read starting at {}", header.sector);
+
+        let mut requests: SmallVec<[_; SEG_MAX]> = smallvec![];
+        let mut status_desc = None;
+        while let Some(desc) = chain.next() {
+            // we only serve reads which must be writeable by us
+            if !desc.is_write_only() {
+                return Err(Error::NeedWrite);
+            }
+            if desc.has_next() {
+                requests.push(desc);
+            } else {
+                status_desc = Some(desc);
             }
         }
-        Ok(used_any)
+        let status_desc = status_desc.ok_or(Error::NoStatus)?;
+
+        // TODO VIRTIO_BLK_T_GET_ID
+
+        // we check this after trying to get the status_desc
+        if header.type_ != VIRTIO_BLK_T_IN {
+            error!("got a header not expecting {}", header.type_);
+            return Ok(ProcessItemResponse::unsupp(&status_desc));
+        }
+
+        if status_desc.len() < 1 {
+            return Err(Error::StatusDescTooSmall);
+        }
+
+        // TODO write the actual response data
+        let mut total_len = 0;
+        for desc in &requests {
+            let _addr = desc.addr();
+            let len = desc.len();
+            //debug!("read {:?} {}", _addr, len);
+            if true {
+                use vm_memory::GuestMemory;
+                let buf = vec![42u8; len as usize];
+                chain
+                    .memory()
+                    .get_slice(_addr, len as usize)
+                    .unwrap()
+                    .copy_from(&buf);
+            }
+            total_len += len;
+        }
+
+        // the linux kernel doesn't seem to actually care about the len written in the used
+        // descriptor
+        self.metrics.reads += 1;
+        self.metrics.segments += requests.len();
+
+        Ok(ProcessItemResponse::ok(total_len, &status_desc))
     }
 }
 
@@ -256,13 +286,18 @@ impl VhostUserBackendMut for VhostUserService {
     }
 
     fn max_queue_size(&self) -> usize {
-        1024
+        QUEUE_SIZE
     }
 
     fn features(&self) -> u64 {
         use virtio_bindings::virtio_blk::*;
         use virtio_bindings::virtio_config::*;
-        use virtio_bindings::virtio_ring::*;
+
+        #[cfg(feature = "event_idx")]
+        let enable_event_idx = 1 << virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+
+        #[cfg(not(feature = "event_idx"))]
+        let enable_event_idx = 0;
 
         (1 << VIRTIO_BLK_F_SEG_MAX)
             | (1 << VIRTIO_BLK_F_SIZE_MAX)
@@ -270,7 +305,7 @@ impl VhostUserBackendMut for VhostUserService {
             | (1 << VIRTIO_BLK_F_TOPOLOGY)
             | (1 << VIRTIO_BLK_F_RO)
             | (1 << VIRTIO_F_VERSION_1)
-            | (1 << VIRTIO_RING_F_EVENT_IDX)
+            | enable_event_idx
             // this is VHOST_USER_F_PROTOCOL_FEATURES
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
@@ -281,13 +316,21 @@ impl VhostUserBackendMut for VhostUserService {
     }
 
     fn update_memory(&mut self, _mem: GuestMemoryAtomic<GuestMemoryMmap>) -> std::io::Result<()> {
-        debug!("update memory");
         Ok(())
     }
 
+    #[cfg(feature = "event_idx")]
     fn set_event_idx(&mut self, event_idx: bool) {
-        debug!("event_idx enabled? {}", event_idx);
+        trace!("event_idx enabled? {}", event_idx);
         self.event_idx = event_idx;
+    }
+
+    #[cfg(not(feature = "event_idx"))]
+    fn set_event_idx(&mut self, event_idx: bool) {
+        // should never happen
+        if event_idx {
+            error!("event_idx unsupported");
+        }
     }
 
     fn handle_event(
@@ -297,32 +340,74 @@ impl VhostUserBackendMut for VhostUserService {
         vrings: &[VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>],
         _thread_id: usize,
     ) -> std::io::Result<()> {
-        debug!("handle_event");
-        // TODO I think we should be responding with error instead of returning early with error
+        // I'm not sure this condition can ever happen
         if evset != EventSet::IN {
-            return Err(Error::EventNotEpollIn.into());
+            warn!("handle_event called for non IN event");
+            return Ok(());
         }
 
         // vhost-user-backend/src/event_loop.rs
         // our caller has already checked that device_event is a valid index into vrings
         let mut vring = vrings[device_event as usize].get_mut();
 
-        loop {
-            use std::ops::Deref;
-            vring.get_queue_mut().enable_notification(self.mem.memory().deref()).unwrap();
-            match self.process_queue(&mut vring) {
-                Ok(true) => {
-                    // we did work, need to keep trying
-                }
-                Ok(false) => {
+        if self
+            .process_queue(&mut vring)
+            .inspect_err(|e| error!("error while processing queue {e}"))
+            .unwrap_or(false)
+        {
+            if vring.needs_notification().unwrap() {
+                trace!("needs_notification? true");
+                vring.signal_used_queue().unwrap();
+            } else {
+                self.metrics.notifications_skipped += 1;
+            }
+        }
+
+        trace!(
+            "vring event_idx_enabled {}",
+            vring.get_queue().event_idx_enabled()
+        );
+
+        #[cfg(feature = "event_idx")]
+        let event_idx = self.event_idx;
+
+        #[cfg(not(feature = "event_idx"))]
+        let event_idx = false;
+
+        // the event_idx thing is kinda crazy, every impl I can find has something to this effect
+        if event_idx {
+            loop {
+                vring
+                    .get_queue_mut()
+                    .enable_notification(self.mem.memory().deref())
+                    .unwrap();
+
+                if self
+                    .process_queue(&mut vring)
+                    .inspect_err(|e| error!("error while processing queue {e}"))
+                    .unwrap_or(false)
+                {
+                    if vring.needs_notification().unwrap() {
+                        trace!("needs_notification? true");
+                        vring.signal_used_queue().unwrap();
+                    } else {
+                        self.metrics.notifications_skipped += 1;
+                    }
+                } else {
                     break;
                 }
-                Err(e) => {
-                    // TODO we need to still respond
-                    error!("error when processing queue {e}");
+            }
+        } else {
+            if self
+                .process_queue(&mut vring)
+                .inspect_err(|e| error!("error while processing queue {e}"))
+                .unwrap_or(false)
+            {
+                if vring.needs_notification().unwrap() {
+                    trace!("needs_notification? true");
+                    vring.signal_used_queue().unwrap();
                 }
             }
-
         }
 
         Ok(())
@@ -348,12 +433,10 @@ impl VhostUserBackendMut for VhostUserService {
     }
 
     fn queues_per_thread(&self) -> Vec<u64> {
-        debug!("queues_per_thread");
         vec![1]
     }
 
     fn exit_event(&self, _thread_index: usize) -> Option<EventFd> {
-        debug!("exit_event");
         self.exit_evt.try_clone().ok()
     }
 }
@@ -372,24 +455,23 @@ fn main() {
 
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
     let backend = Arc::new(RwLock::new(VhostUserService {
-        metrics: Metrics::default(),
         mem: mem.clone(),
         exit_evt: EventFd::new(EFD_NONBLOCK).unwrap(),
-        event_idx: false,
         config: VirtioBlockConfig {
-            capacity: num_sectors, // number of sectors in 512-byte sectors,
-            blk_size: block_size,   // block size if VIRTIO_BLK_F_BLK_SIZE
-            size_max: 65536, // maximum segment size if VIRTIO_BLK_F_SIZE_MAX
-            // TODO looks like we need to cap this to 2 less than our queue size (1 for header, 1
-            // for status)
-            seg_max: 10,      // The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX)
-            num_queues: 1,   // number of vqs, only available when VIRTIO_BLK_F_MQ is set
+            capacity: num_sectors,
+            blk_size: block_size,
+            size_max: 65536,
+            seg_max: SEG_MAX.try_into().unwrap(),
+            num_queues: 1,
             alignment_offset: 0,
             physical_block_exp: physical_block_exp.try_into().unwrap(),
             min_io_size: 1,
             opt_io_size: 1,
             ..Default::default()
         },
+        metrics: Metrics::default(),
+        #[cfg(feature = "event_idx")]
+        event_idx: false,
     }));
     info!("listening on {}", socket);
 
