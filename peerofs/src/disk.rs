@@ -452,7 +452,7 @@ impl Inode<'_> {
         }
     }
 
-    fn xattr_size(&self) -> Option<usize> {
+    fn xattr_len(&self) -> Option<usize> {
         let len = xattr_count_to_len(self.xattr_count());
         if len == 0 {
             None
@@ -860,7 +860,7 @@ impl<'a> Erofs<'a> {
     fn inode_end(&self, inode: &Inode<'a>) -> u64 {
         let start = self.inode_offset(inode);
         let inode_size = inode.size();
-        let xattr_size = inode.xattr_size().unwrap_or(0) as u64;
+        let xattr_size = inode.xattr_len().unwrap_or(0) as u64;
         start + inode_size as u64 + xattr_size
     }
 
@@ -958,7 +958,7 @@ impl<'a> Erofs<'a> {
     }
 
     pub fn get_xattrs(&self, inode: &Inode<'a>) -> Result<Option<Xattrs<'a>>, Error> {
-        if let Some(size) = inode.xattr_size() {
+        if let Some(size) = inode.xattr_len() {
             let offset = (self.inode_offset(inode) + inode.size() as u64) as usize;
             let data = self.data.get(offset..offset + size).ok_or(Error::Oob)?;
             let shared_data = self.xattr_shared_data()?;
