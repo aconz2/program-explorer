@@ -160,21 +160,20 @@ impl VhostUserService {
             .get_queue_mut()
             .pop_descriptor_chain(self.mem.memory())
         {
-            let (len, status, addr) = match self.process_item(&mut chain) {
+            let len = match self.process_item(&mut chain) {
                 Ok(ProcessItemResponse {
                     status,
                     len,
                     status_addr,
-                }) => (len, status, Some(status_addr)),
+                }) => {
+                    chain.memory().write_obj(status, status_addr).unwrap();
+                    len
+                }
                 Err(e) => {
                     error!("error process_item {e}");
-                    (1, VIRTIO_BLK_S_IOERR as u8, None)
+                    1
                 }
             };
-
-            if let Some(addr) = addr {
-                chain.memory().write_obj(status, addr).unwrap();
-            }
 
             // only have to return the head descriptor to the used ring, and for reads we write the
             // total amount of data written (written by us, read by them)
@@ -248,6 +247,44 @@ impl VhostUserService {
         if status_desc.len() < 1 {
             return Err(Error::StatusDescTooSmall);
         }
+
+        // so my current thoughts on how to service the actual read are:
+        // calculate the blocks required to satisfy the read. Blocks will be likely 1-4MB or so?
+        // fast path for a single block is to try openat(cache_dir, {id}_{block}), if it succeeds
+        // then we can do the read and we're done
+        // we get the cache_dir fd from the cache service which we'll connect to via unix sock
+        // stream socket with an initial hello message
+        // if we don't get fast path then we send a message to the cache service with our image id,
+        // sector, and total length. The cache service then fetches any blocks it needs to from
+        // object storage and saves them to files {id}_{block}, then it sendfile's the data over
+        // the socket where we have done a readv(socket, iov) to fill in the data
+        //
+        // having another process we have to relay to isn't amazing, but managing a bounded size
+        // cache between processes is a bit hard if they are "independent" especially around
+        // managing any kind of lru. And I think the fast path is a decent compromise, and reading
+        // directly into the guest memory is better than getting back the fd's and then doing it.
+        // This would be a blocking communication over the socket, which for single core guest
+        // isn't a problem. A main hurdle in all of this is the epoll-first nature of using this
+        // trait which I'm not sure how to integrate with async. That might open more possibility
+        // to doing the object retreival in process and concurrently, but tbd how to best do that.
+        //
+        // what I don't have a clear vision of right now is what kind of id to use for these
+        // images, since it is kind of a manifest digest as id vs content address of erofs image
+        // id, but if we use the latter then we have to store that mapping somewhere (object tag?).
+        // And the cache service has to know what bucket url to use and will it take that as config
+        // or be oblivious and we provide that somehow. Does it scan the bucket periodically to get
+        // the list of pre-baked images it will service and relay that to the server-worker so it
+        // knows whether to spawn with --pmem or --disk vhost_user=on, or should the
+        // peimage-service know about this and respond with either one? Should we be using object
+        // storage for all of the images or intelligently for some of them? Initially my plan was
+        // to support it for the compiler explorer ones which are a) large b) not rapidly changing
+        //
+        // One aspect of object storage when used in a caching manner is that we could get
+        // concurrent usage and deletion, so if we do that eventually we have to use versioning so
+        // that if we start a container running that expects to have an image available on object
+        // storage, it needs to get the version of that object when it starts because otherwise it
+        // might get deleted. And then a bucket with NoncurrentVersionExpiration will take care of
+        // fully deleting old objects (assuming max container runtime < NoncurrentDays)
 
         // TODO write the actual response data
         let mut total_len = 0;
@@ -339,28 +376,22 @@ impl VhostUserBackendMut for VhostUserService {
         vrings: &[VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>],
         _thread_id: usize,
     ) -> std::io::Result<()> {
+        // TODO returning Err in here will cause the whole process to get torn down
+        //
+        // TODO same thing here, if we add things to the epoll handler then we could get different
+        // event types
         // I'm not sure this condition can ever happen
         if evset != EventSet::IN {
             warn!("handle_event called for non IN event");
             return Ok(());
         }
 
+        // TODO this is only true because we have not registered any other events with the epoll
+        // handler, if/when we do to actually service the reads in an async fashion, we can check
+        // that here
         // vhost-user-backend/src/event_loop.rs
         // our caller has already checked that device_event is a valid index into vrings
         let mut vring = vrings[device_event as usize].get_mut();
-
-        if self
-            .process_queue(&mut vring)
-            .inspect_err(|e| error!("error while processing queue {e}"))
-            .unwrap_or(false)
-        {
-            if vring.needs_notification().unwrap() {
-                trace!("needs_notification? true");
-                vring.signal_used_queue().unwrap();
-            } else {
-                self.metrics.notifications_skipped += 1;
-            }
-        }
 
         trace!(
             "vring event_idx_enabled {}",
@@ -427,6 +458,7 @@ impl VhostUserBackendMut for VhostUserService {
     }
 
     fn set_config(&mut self, _offset: u32, _buf: &[u8]) -> std::io::Result<()> {
+        // TODO when is this called and do we have to support it?
         warn!("set_config called, ignoring");
         Ok(())
     }
@@ -477,7 +509,7 @@ fn main() {
     let unlink = true;
     let listener = Listener::new(socket, unlink).unwrap();
 
-    let name = "virtio-user-block-s3";
+    let name = "pevub";
     let mut daemon = VhostUserDaemon::new(name.to_string(), backend.clone(), mem).unwrap();
 
     if let Err(e) = daemon.start(listener) {
@@ -487,6 +519,6 @@ fn main() {
 
     if let Err(e) = daemon.wait() {
         error!("Error from the main thread: {:?}", e);
-        info!("metrics {:?}", backend.read().unwrap().metrics);
     }
+    info!("metrics {:?}", backend.read().unwrap().metrics);
 }

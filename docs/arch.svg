@@ -24,14 +24,15 @@
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
      inkscape:zoom="2.8284271"
-     inkscape:cx="656.37188"
+     inkscape:cx="953.35673"
      inkscape:cy="182.96388"
      inkscape:window-width="3436"
      inkscape:window-height="1417"
      inkscape:window-x="0"
      inkscape:window-y="0"
      inkscape:window-maximized="0"
-     inkscape:current-layer="layer1" />
+     inkscape:current-layer="layer1"
+     showgrid="false" />
   <defs
      id="defs1">
     <rect
@@ -367,7 +368,7 @@
          style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.82222px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
          x="213.47188"
          y="72.174004"
-         id="tspan50">/dev/pmem0: image (ro)</tspan><tspan
+         id="tspan50">/dev/{vda,pmem0}: image (ro)</tspan><tspan
          sodipodi:role="line"
          style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.82222px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
          x="213.47188"
@@ -748,7 +749,7 @@
          id="tspan147">pack</tspan></text>
     <path
        style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-end:url(#Triangle)"
-       d="m 251.82626,71.479968 28.66379,-14.182567 3.2006,-0.03245"
+       d="m 253.20677,70.283258 27.28328,-12.985857 3.2006,-0.03245"
        id="path148"
        sodipodi:nodetypes="ccc" />
     <text
@@ -833,7 +834,7 @@
        transform="rotate(-41.536187,78.035858,39.175779)"><tspan
          x="214.44466"
          y="191.9877"
-         id="tspan3">lowerdir</tspan></text>
+         id="tspan25">lowerdir</tspan></text>
     <text
        xml:space="preserve"
        style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:1.05833px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
@@ -968,13 +969,13 @@
     <text
        xml:space="preserve"
        style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
-       x="155.37927"
-       y="35.562988"
+       x="156.26538"
+       y="35.543987"
        id="text16"><tspan
          sodipodi:role="line"
          style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
-         x="155.37927"
-         y="35.562988"
+         x="156.26538"
+         y="35.543987"
          id="tspan16">index.docker.io/library/busybox:latest</tspan></text>
     <g
        id="g18"
@@ -1017,5 +1018,97 @@
          x="160.37103"
          y="85.916512"
          id="tspan22">memfd</tspan></text>
+    <g
+       id="g5"
+       transform="translate(185.0282,-39.565406)">
+      <text
+         xml:space="preserve"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:3.175px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+         x="72.998787"
+         y="45.637585"
+         id="text5"><tspan
+           sodipodi:role="line"
+           id="tspan5"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+           x="72.998787"
+           y="45.637585">Object Storage</tspan></text>
+    </g>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+       x="153.42799"
+       y="38.435825"
+       id="text6"><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+         x="153.42799"
+         y="38.435825"
+         id="tspan6">ghcr.io/aconz2/ce-clang:20.1.0</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+       x="196.55669"
+       y="16.728786"
+       id="text9"><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+         x="196.55669"
+         y="16.728786"
+         id="tspan9">index.docker.io/library/busybox:latest</tspan></text>
+    <path
+       style="fill:none;stroke:#000000;stroke-width:0.5;stroke-dasharray:none;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 258.77248,9.9153454 -8.22389,12.9661636 -58.71321,-0.08687"
+       id="path9"
+       sodipodi:nodetypes="ccc" />
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+       x="263.33017"
+       y="10.814301"
+       id="text10"><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+         x="263.33017"
+         y="10.814301"
+         id="tspan10">s3://bucket/erofs/ce-clang:20.1.0</tspan></text>
+    <g
+       id="g23"
+       transform="translate(164.99234,-12.762321)">
+      <g
+         id="g24">
+        <text
+           xml:space="preserve"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:3.175px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+           x="79.317139"
+           y="44.933212"
+           id="text18"><tspan
+             sodipodi:role="line"
+             id="tspan18"
+             style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+             x="79.317139"
+             y="44.933212">pevub</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:1.41111px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+           x="78.941147"
+           y="47.096039"
+           id="text23"><tspan
+             sodipodi:role="line"
+             style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:1.41111px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+             x="78.941147"
+             y="47.096039"
+             id="tspan23">pevub/main.rs</tspan></text>
+      </g>
+    </g>
+    <path
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-end:url(#Triangle)"
+       d="m 228.96637,69.985816 4.66566,-2.071198 12.55684,-31.241845"
+       id="path24"
+       sodipodi:nodetypes="ccc" />
+    <path
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-end:url(#Triangle);marker-start:url(#Triangle)"
+       d="m 253.8952,28.881485 7.58378,-18.773477"
+       id="path25"
+       sodipodi:nodetypes="cc" />
   </g>
 </svg>

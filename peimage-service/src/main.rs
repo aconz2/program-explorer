@@ -127,6 +127,10 @@ async fn handle_conn(
     let digest: Digest = image_and_config.manifest_digest.into();
     let config = image_and_config.configuration;
 
+    // if let Some(id, version) = object_storage.get(digest)
+    // return Ok(Remote{digest, config, id, version})
+    // else return Ok(Local{digest, config, fd})
+
     let (fd_tx, fd_rx) = tokio::sync::oneshot::channel();
 
     let key = BlobKey::new(digest.to_string()).ok_or(Error::BadDigest)?;
