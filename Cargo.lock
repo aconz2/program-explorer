@@ -698,15 +698,6 @@ checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -2701,7 +2692,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "memmap2",
- "rand 0.8.5",
+ "rand 0.9.1",
  "rustix 1.0.7",
  "thiserror 2.0.12",
 ]
@@ -2765,7 +2756,7 @@ name = "peimage-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bincode 2.0.1",
+ "bincode",
  "clap 4.5.40",
  "env_logger",
  "log",
@@ -2788,7 +2779,7 @@ name = "peinit"
 version = "0.1.0"
 dependencies = [
  "base16ct 0.2.0",
- "bincode 1.3.3",
+ "bincode",
  "byteorder",
  "command-fds",
  "libc",
@@ -2805,7 +2796,7 @@ name = "peoci"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "bincode 2.0.1",
+ "bincode",
  "bytes",
  "clap 4.5.40",
  "env_logger",
@@ -2851,7 +2842,7 @@ dependencies = [
  "peimage-service",
  "peinit",
  "peoci",
- "rand 0.8.5",
+ "rand 0.9.1",
  "rustix 1.0.7",
  "serde",
  "serde_json",

@@ -9,9 +9,9 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-libc = "0.2.159"
-mio = { version = "1.0.2", features = ["os-ext"] }
-mio-pidfd = "0.4.0"
+libc = { workspace = true }
+mio = { workspace = true, features = ["os-ext"] }
+mio-pidfd = { workspace = true }
 # syscalls = { version = "0.6.18", default-features = false, features = ["std"] }
 
 [lints]

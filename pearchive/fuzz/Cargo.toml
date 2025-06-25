@@ -8,10 +8,8 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-
-[dependencies.pearchive]
-path = ".."
+libfuzzer-sys = { workspace = true }
+pearchive = { workspace = true }
 
 [[bin]]
 name = "fuzz_target_1"

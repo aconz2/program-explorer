@@ -14,13 +14,13 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-byteorder = "1.5.0"
-memmap2 = "0.9.5"
-rustix = { version = "1.0.7", features = ["fs", "process", "thread"] }
-thiserror = "2.0.12"
+byteorder = { workspace = true }
+memmap2 = { workspace = true }
+rustix = { workspace = true, features = ["fs", "process", "thread"] }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-rand = "0.8.5"
+rand = { workspace = true }
 
 [lints]
 workspace = true

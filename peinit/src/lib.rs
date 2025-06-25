@@ -4,8 +4,11 @@ use std::time::Duration;
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use serde::{Deserialize, Serialize};
+use bincode::{Encode, Decode};
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Encode, Decode)]
 pub enum RootfsKind {
     Sqfs,
     Erofs,
@@ -27,13 +30,13 @@ impl RootfsKind {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Encode, Decode)]
 pub enum ResponseFormat {
     PeArchiveV1,
     JsonV1,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Encode, Decode)]
 pub struct Config {
     // https://github.com/opencontainers/runtime-spec/blob/main/config.md
     // fully filled in config.json ready to pass to crun
@@ -50,6 +53,7 @@ pub struct Config {
     pub manifest_digest: String,
 }
 
+// this is returned in the API json response, maybe not the right place for it
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Response {
@@ -215,7 +219,7 @@ pub fn write_io_file_config<W: Write>(
     config: &Config,
     archive_size: u32,
 ) -> Result<(), Error> {
-    let config_bytes = bincode::serialize(&config).map_err(|_| Error::Ser)?;
+    let config_bytes = bincode::encode_to_vec(&config, BINCODE_CONFIG).map_err(|_| Error::Ser)?;
     let config_size: u32 = config_bytes.len().try_into().unwrap();
     write_u32_le_slice(file, &[archive_size, config_size]).map_err(|_| Error::Io)?;
     file.write_all(&config_bytes).map_err(|_| Error::Io)?;
@@ -226,7 +230,7 @@ pub fn read_io_file_config<R: Read>(file: &mut R) -> Result<(u32, Config), Error
     let (archive_size, response_size) = read_u32_le_pair(file).map_err(|_| Error::Io)?;
     let mut buf = vec![0; response_size as usize];
     file.read_exact(&mut buf).map_err(|_| Error::Io)?;
-    let config = bincode::deserialize(&buf).map_err(|_| Error::Ser)?;
+    let (config, _) = bincode::decode_from_slice(&buf, BINCODE_CONFIG).map_err(|_| Error::Ser)?;
     Ok((archive_size, config))
 }
 
