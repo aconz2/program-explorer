@@ -24,8 +24,8 @@
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
      inkscape:zoom="2.8284271"
-     inkscape:cx="953.35673"
-     inkscape:cy="182.96388"
+     inkscape:cx="698.44473"
+     inkscape:cy="177.66058"
      inkscape:window-width="3436"
      inkscape:window-height="1417"
      inkscape:window-x="0"
@@ -368,7 +368,7 @@
          style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.82222px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
          x="213.47188"
          y="72.174004"
-         id="tspan50">/dev/{vda,pmem0}: image (ro)</tspan><tspan
+         id="tspan50">/dev/{vda|pmem0}: image (ro)</tspan><tspan
          sodipodi:role="line"
          style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.82222px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
          x="213.47188"
@@ -834,7 +834,7 @@
        transform="rotate(-41.536187,78.035858,39.175779)"><tspan
          x="214.44466"
          y="191.9877"
-         id="tspan25">lowerdir</tspan></text>
+         id="tspan38">lowerdir</tspan></text>
     <text
        xml:space="preserve"
        style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:1.05833px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
@@ -1055,22 +1055,17 @@
          x="196.55669"
          y="16.728786"
          id="tspan9">index.docker.io/library/busybox:latest</tspan></text>
-    <path
-       style="fill:none;stroke:#000000;stroke-width:0.5;stroke-dasharray:none;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
-       d="m 258.77248,9.9153454 -8.22389,12.9661636 -58.71321,-0.08687"
-       id="path9"
-       sodipodi:nodetypes="ccc" />
     <text
        xml:space="preserve"
        style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
-       x="263.33017"
-       y="10.814301"
+       x="261.62701"
+       y="9.6406116"
        id="text10"><tspan
          sodipodi:role="line"
          style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
-         x="263.33017"
-         y="10.814301"
-         id="tspan10">s3://bucket/erofs/ce-clang:20.1.0</tspan></text>
+         x="261.62701"
+         y="9.6406116"
+         id="tspan10">s3://bucket/erofs/sha256:ffaabbcc...</tspan></text>
     <g
        id="g23"
        transform="translate(164.99234,-12.762321)">
@@ -1105,10 +1100,132 @@
        d="m 228.96637,69.985816 4.66566,-2.071198 12.55684,-31.241845"
        id="path24"
        sodipodi:nodetypes="ccc" />
+    <g
+       id="g37"
+       transform="translate(134.23927,-16.852693)">
+      <g
+         id="g36"
+         transform="translate(-0.08915944,0.3285014)">
+        <g
+           id="g38"
+           transform="translate(-4.7002374,0.02228986)">
+          <text
+             xml:space="preserve"
+             style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:3.175px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+             x="79.317139"
+             y="44.933212"
+             id="text28"><tspan
+               sodipodi:role="line"
+               id="tspan25"
+               style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+               x="79.317139"
+               y="44.933212">pevub-cache</tspan></text>
+          <text
+             xml:space="preserve"
+             style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:1.41111px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+             x="81.843582"
+             y="47.024784"
+             id="text36"><tspan
+               sodipodi:role="line"
+               style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:1.41111px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+               x="81.843582"
+               y="47.024784"
+               id="tspan28">pevub-cache/main.rs</tspan></text>
+        </g>
+      </g>
+    </g>
     <path
-       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-end:url(#Triangle);marker-start:url(#Triangle)"
-       d="m 253.8952,28.881485 7.58378,-18.773477"
-       id="path25"
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 188.79602,24.002198 18.7594,3.053778"
+       id="path38"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 231.25931,28.28916 11.68693,2.645252"
+       id="path39"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;stroke:#000000;stroke-width:0.5;stroke-dasharray:none;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 234.17544,25.314715 23.38362,-14.95599"
+       id="path40"
+       sodipodi:nodetypes="cc" />
+    <g
+       id="g49"
+       transform="translate(183.99008,-25.19283)">
+      <text
+         xml:space="preserve"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:3.175px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+         x="72.998787"
+         y="45.637585"
+         id="text49"><tspan
+           sodipodi:role="line"
+           id="tspan48"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+           x="72.998787"
+           y="45.637585">Disk</tspan></text>
+    </g>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+       x="256.99146"
+       y="23.586391"
+       id="text51"><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+         x="256.99146"
+         y="23.586391"
+         id="tspan49">dir/sha256:ffaabbcc..._1</tspan></text>
+    <path
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 233.86905,27.547017 21.1572,-4.259489"
+       id="path51"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 253.67633,28.97101 3.81386,-4.063996"
+       id="path52"
+       sodipodi:nodetypes="cc" />
+    <g
+       id="g53"
+       transform="translate(55.453951,-38.44872)">
+      <text
+         xml:space="preserve"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:3.175px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+         x="72.998787"
+         y="45.637585"
+         id="text53"><tspan
+           sodipodi:role="line"
+           id="tspan53"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+           x="72.998787"
+           y="45.637585">Disk</tspan></text>
+    </g>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+       x="128.45532"
+       y="10.330502"
+       id="text55"><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+         x="128.45532"
+         y="10.330502"
+         id="tspan54">dir/blobs/sha256/fafafa...</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';fill:#000000;stroke-width:0.264583"
+       x="128.31245"
+       y="13.030864"
+       id="text64"><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:2.11667px;font-family:'DejaVu Sans Mono';-inkscape-font-specification:'DejaVu Sans Mono';stroke-width:0.264583"
+         x="128.31245"
+         y="13.030864"
+         id="tspan64">dir/imgs/sha256/ddeeff...</tspan></text>
+    <path
+       style="fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.264999;stroke-dasharray:0.264999, 0.264999;stroke-dashoffset:0;stroke-opacity:1;marker-start:url(#Triangle);marker-end:url(#Triangle)"
+       d="m 150.41325,15.758603 7.35941,4.727345"
+       id="path64"
        sodipodi:nodetypes="cc" />
   </g>
 </svg>

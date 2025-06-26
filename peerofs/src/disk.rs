@@ -29,6 +29,16 @@ pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 // always used FlatInline, you would store 1 block and 4095 bytes inline; whereas with FlatPlain
 // you just store in 2 blocks
 // - TODO compressed storage
+// - CompressedFull
+//   - https://lwn.net/Articles/851132/
+//   - immediately following the inode and xattr goes a MapHeader followed by a number of
+//   LogicalClusterIndex. The logical clusters are then grouped into a physical cluster, with the
+//   first lcluster having a HEAD type. The NONHEAD lclusters store an offset in both directions
+//   delta[2] to get to the HEAD of its pcluster and the next HEAD (of the next pcluster). A
+//   pcluster can have only 1 lcluster and it will be HEAD type. The number of clusters in a
+//   pcluster is stored in the first NONHEAD lcluster (second cluster of the pcluster), except for
+//   pclusters with only 1 lcluster, which can be differentiated by looking at the next lcluster
+//   and checking if it is also HEAD. TBD how to tell the number of lclusters in an inode?
 //
 // Directories
 // - dirents are stored in blocks up to the block size. A single directory may span multiple blocks

@@ -668,3 +668,5 @@ env PATH=~/Repos/cloud-hypervisor/target/debug/:"$PATH" cargo run --bin snapshot
 env PATH=~/Repos/cloud-hypervisor/target/profiling/:"$PATH" cargo run --bin snapshot-test && perf script -F +pid > /tmp/ch.perf
 
 https://profiler.firefox.com/
+
+        for mut chain in vring.get_queue_mut().iter(self.mem.memory()).unwrap() {
