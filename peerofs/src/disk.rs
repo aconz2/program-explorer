@@ -107,6 +107,7 @@ pub enum Error {
     NotExpectingBlockData,
     BlockLenShouldBeZero,
     NotCompressed,
+    NotCompressedFull,
     InvalidXattrPrefix,
     BuiltinPrefixTooBig,
     XattrPrefixTableNotHandled,
@@ -200,7 +201,7 @@ pub enum InodeType {
 #[derive(Debug, Immutable, FromZeros, IntoBytes)]
 #[repr(C)]
 pub struct InodeInfo {
-    data: [u8; std::mem::size_of::<u32>()],
+    data: [u8; 4],
     // union
     //compressed_blocks: U32,
     //raw_blkaddr: U32, // block number not addr
@@ -263,7 +264,8 @@ pub struct Dirent {
     _reserved: u8,
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Debug, FromZeros, Immutable, KnownLayout)]
+#[repr(C)]
 pub struct MapHeader {
     fragment_offset_or_data_size: FragmentOffsetOrDataSize,
     config: U16, // see MapHeaderConfig (bitwise)
@@ -276,7 +278,8 @@ pub struct MapHeader {
     cluster_bits: u8,
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[derive(Immutable, KnownLayout, FromZeros)]
+#[repr(C)]
 pub struct LogicalClusterIndex {
     advise: U16, // I think this is just type
     cluster_offset: U16,
@@ -285,26 +288,38 @@ pub struct LogicalClusterIndex {
 
 // TODO if/when these are needed, probably switch to a struct with union-like methods (as
 // InodeInfo)
-#[derive(TryFromBytes, Immutable)]
+#[derive(Immutable, KnownLayout, FromZeros)]
 #[repr(C)]
-union BlockAddrOrDelta {
-    block_addr: U32,
-    delta: [U16; 2],
+pub struct BlockAddrOrDelta {
+    buf: [u8; 4],
+}
+impl BlockAddrOrDelta {
+    fn block_addr(&self) -> U32 {
+        self.buf.into()
+    }
+
+    fn delta(&self) -> [U16; 2] {
+        let a = [self.buf[0], self.buf[1]];
+        let b = [self.buf[2], self.buf[3]];
+        [a.into(), b.into()]
+    }
 }
 
-#[derive(TryFromBytes, Immutable)]
+#[derive(FromZeros, Immutable)]
 #[repr(C)]
 union FragmentOffsetOrDataSize {
     fragment_offset: U32,
     data_size: MapDataSize,
 }
 
-#[derive(Debug, TryFromBytes, Immutable, KnownLayout, Copy, Clone)]
+#[derive(Debug, FromZeros, Immutable, KnownLayout, Copy, Clone)]
+#[repr(C)]
 struct MapDataSize {
     _reserved: U16,
     data_size: U16,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum LogicalClusterType {
     Plain = 0,
     Head1 = 1,
@@ -330,6 +345,7 @@ pub enum CompressionType {
 
 // I think all of these are either preceded or post-ceded by a 2 byte length field
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
 struct Lz4CompressionConfig {
     max_distance: U16,
     max_pcluster_blocks: U16,
@@ -337,6 +353,7 @@ struct Lz4CompressionConfig {
 }
 
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
 struct LzmaCompressionConfig {
     dict_size: U32,
     format: U16,
@@ -344,12 +361,14 @@ struct LzmaCompressionConfig {
 }
 
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
 struct DeflateCompressionConfig {
     window_bits: u8,
     _reserved: [u8; 5],
 }
 
 #[derive(Debug, TryFromBytes, Immutable, KnownLayout)]
+#[repr(C)]
 struct ZstdCompressionConfig {
     format: u8,
     window_log: u8,
@@ -358,9 +377,46 @@ struct ZstdCompressionConfig {
 
 impl fmt::Debug for BlockAddrOrDelta {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let a = unsafe { self.block_addr };
-        let (d1, d2) = unsafe { (self.delta[0], self.delta[1]) };
-        write!(f, "{} ({:x}) (delta=[{} {}])", a, a, d1, d2)
+        f.debug_struct("BlockAddrOrDelta")
+            .field("blockaddr", &self.block_addr())
+            .field("delta", &self.delta())
+            .finish()
+    }
+}
+
+impl fmt::Debug for LogicalClusterIndex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO CBLKCNT
+        use LogicalClusterType::*;
+        let t = self.typ();
+        let mut d = f.debug_struct("LogicalClusterIndex");
+        d.field("type", &t)
+            .field("advise[3..15]", &(self.advise >> 2))
+            .field("advise[0..15]", &self.advise)
+            .field("cluster_offset", &self.cluster_offset);
+        match t {
+            Head1 | Head2 => {
+                d.field("blkaddr", &self.block_addr_or_delta.block_addr());
+            }
+            _ => {
+                d.field("delta", &self.block_addr_or_delta.delta());
+            }
+        }
+        d.finish()
+    }
+}
+
+impl LogicalClusterIndex {
+    // idk how much I like r#type vs typ vs kind
+    pub fn typ(&self) -> LogicalClusterType {
+        use LogicalClusterType::*;
+        match u16::from(self.advise) & 0b11 {
+            0 => Plain,
+            1 => Head1,
+            2 => NonHead,
+            3 => Head2,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -380,6 +436,10 @@ impl InodeInfo {
     }
 
     pub fn raw_blkaddr(&self) -> u32 {
+        U32::from_bytes(self.data).into()
+    }
+
+    pub fn raw_compressed_blocks(&self) -> u32 {
         U32::from_bytes(self.data).into()
     }
 
@@ -512,6 +572,13 @@ impl Inode<'_> {
         match self {
             Inode::Compact((_, x)) => x.info.raw_blkaddr(),
             Inode::Extended((_, x)) => x.info.raw_blkaddr(),
+        }
+    }
+
+    pub fn raw_compressed_blocks(&self) -> u32 {
+        match self {
+            Inode::Compact((_, x)) => x.info.raw_compressed_blocks(),
+            Inode::Extended((_, x)) => x.info.raw_compressed_blocks(),
         }
     }
 
@@ -1003,15 +1070,27 @@ impl<'a> Erofs<'a> {
         if !inode.layout().is_compressed() {
             return Err(Error::NotCompressed);
         }
-        // for non compact, it is
-        // full index_align is round_up(x, 8) + sizeof(MapHeader) + 8
-        // it is Z_EROFS_FULL_INDEX_ALIGN(self.inode_offset() + inode_size + xattr_size)
-        // //
-        //  from there you can lookup a LogicalClusterIndex by logical cluster number (lcn) (I
-        //  think)
-        // for compact I think this is right
         let start = round_up_to::<8usize>(self.inode_end(inode) as usize);
         MapHeader::try_ref_from_prefix(self.data.get(start..).ok_or(Error::Oob)?)
+            .map_err(|_| Error::BadConversion)
+            .map(|(x, _)| x)
+    }
+
+    pub fn get_logical_cluster_index(
+        &self,
+        inode: &Inode<'a>,
+        i: usize,
+    ) -> Result<&'a LogicalClusterIndex, Error> {
+        if inode.layout() != Layout::CompressedFull {
+            return Err(Error::NotCompressedFull);
+        }
+        // TODO bounds check i
+        // TBD why there is a +8 here
+        let start = round_up_to::<8usize>(self.inode_end(inode) as usize)
+            + std::mem::size_of::<MapHeader>()
+            + 8;
+        let offset = i * std::mem::size_of::<LogicalClusterIndex>();
+        LogicalClusterIndex::try_ref_from_prefix(self.data.get(start + offset..).ok_or(Error::Oob)?)
             .map_err(|_| Error::BadConversion)
             .map(|(x, _)| x)
     }
@@ -1026,6 +1105,57 @@ impl<'a> Erofs<'a> {
             return Err(Error::NotExpectingBlockData);
         }
         Ok(tail)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn inspect(&self, inode: &Inode<'a>, after: usize) -> Result<(), Error> {
+        fn p(xs: &[u8]) -> () {
+            for (i, byte) in xs.iter().enumerate() {
+                if i > 0 && i % 4 == 0 {
+                    print!(" ");
+                }
+                print!("{byte:02x}")
+            }
+        }
+
+        let start = self.inode_offset(inode) as usize;
+        let size = inode.size();
+        let xattr_start = start + size;
+        let xattr_len = inode.xattr_len();
+
+        println!("inode: {start:x}-{:x}:", start + size);
+        p(self.data.get(start..start + size).ok_or(Error::Oob)?);
+        println!();
+        if let Some(xattr_len) = xattr_len {
+            println!("xattr: {xattr_start:x}-{:x}:", xattr_start + xattr_len);
+            p(self
+                .data
+                .get(xattr_start..xattr_start + xattr_len)
+                .ok_or(Error::Oob)?);
+            println!();
+        }
+
+        let after_start = if inode.layout().is_compressed() {
+            let start = round_up_to::<8usize>(self.inode_end(inode) as usize);
+            let len = std::mem::size_of::<MapHeader>();
+            println!("map_header: {start:x}-{:x}:", start + len);
+            p(self.data.get(start..start + len).ok_or(Error::Oob)?);
+            println!();
+            start + len
+        } else {
+            xattr_start + xattr_len.unwrap_or(0)
+        };
+
+        if after > 0 {
+            println!("after: {after_start:x}-{:x}:", after_start + after);
+            p(self
+                .data
+                .get(after_start..after_start + after)
+                .ok_or(Error::Oob)?);
+            println!();
+        }
+
+        Ok(())
     }
 
     //pub fn iter(&'a self) -> Result<ErofsIterator<'a>, Error> {
@@ -1209,6 +1339,7 @@ mod tests {
         assert_eq!(12, std::mem::size_of::<Dirent>(), "Dirent");
         assert_eq!(12, std::mem::size_of::<XattrHeader>(), "XattrHeader");
         assert_eq!(4, std::mem::size_of::<XattrEntry>(), "XattrEntry");
+        assert_eq!(8, std::mem::size_of::<MapHeader>(), "MapHeader");
         assert_eq!(
             8,
             std::mem::size_of::<LogicalClusterIndex>(),

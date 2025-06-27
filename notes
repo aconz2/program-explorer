@@ -669,4 +669,12 @@ env PATH=~/Repos/cloud-hypervisor/target/profiling/:"$PATH" cargo run --bin snap
 
 https://profiler.firefox.com/
 
-        for mut chain in vring.get_queue_mut().iter(self.mem.memory()).unwrap() {
+use -Elegacy-compress to get COMPRESSED_FULL
+mkfs.erofs test.erofs testerofs/ -d5 -zlz4 -Elegacy-compress
+have vmlinux in testerofs
+the inode gives compressed_blocks=3039, size=35331992
+but at lci 243, I see the blkaddr shoot up from 2 to 4259842 so that is weird. the cluster_offset
+according to some printf debugging of dump.erofs --cat, I see a max lcn of 8625
+yeah so at 241 I see m_la go from 0 to 991297 with m_pa=8192 (previously always 4096)
+looking at the loading of lclusters, I think 0-241 inclusive forms 1 pcluster maybe? b/c I think when it loads an lcn it also loads the head lcn, then the pattern repeats with 242-495
+okay something is actually wrong, getting head2 type when shouldn't be... oof it was b/c I was missing repr(C)

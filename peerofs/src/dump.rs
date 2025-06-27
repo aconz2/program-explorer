@@ -4,7 +4,7 @@ use std::fs::File;
 use memmap2::MmapOptions;
 use rustix::fs::FileType;
 
-use peerofs::disk::{DirentFileType, Erofs, Error, Inode};
+use peerofs::disk::{DirentFileType, Erofs, Error, Inode, Layout};
 
 #[allow(dead_code)]
 fn all_inodes<'a>(erofs: &Erofs<'a>) -> Result<Vec<Inode<'a>>, Error> {
@@ -123,6 +123,29 @@ fn main() {
             _ => {}
         }
         println!();
+
+        match item.file_type {
+            DirentFileType::RegularFile => {
+                let inode = erofs.get_inode_from_dirent(&item).unwrap();
+                match inode.layout() {
+                    Layout::CompressedFull => {
+                        let n_compressed_blocks = inode.raw_compressed_blocks();
+                        // weird thing is compressed_blocks isn't read during decompression or
+                        // anything
+                        println!("compressed_blocks={}", n_compressed_blocks);
+                        erofs.inspect(&inode, 64).unwrap();
+                        let header = erofs.get_map_header(&inode).unwrap();
+                        println!("{:?}", header);
+                        for i in 0..245 {
+                            let lci = erofs.get_logical_cluster_index(&inode, i as usize).unwrap();
+                            println!("{i} {:?}", lci);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
     }
 
     //let inodes = all_inodes(&erofs).expect("inode gather fail");
