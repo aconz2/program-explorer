@@ -1,5 +1,6 @@
 use std::fmt;
 use std::num::NonZero;
+use std::io::Write;
 
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
@@ -111,6 +112,8 @@ pub enum Error {
     InvalidXattrPrefix,
     BuiltinPrefixTooBig,
     XattrPrefixTableNotHandled,
+    Decompress,
+    Write,
     LayoutNotHandled(Layout),
 }
 
@@ -272,13 +275,14 @@ pub struct MapHeader {
     // bit 0-3: algorithm of head 1
     // bit 4-7: algorithm of head 2
     algorithm: u8,
+    // NOTE: its actually the super block blocksize bits, not 12
     // bit 0-2: logical cluster bits - 12 (0 for 4096)
     // if bit 7 is set, then this whole 8 byte struct is interpreted as le64 with the high bit
     // cleared as the fragment offset
     cluster_bits: u8,
 }
 
-#[derive(Immutable, KnownLayout, FromZeros)]
+#[derive(Immutable, KnownLayout, FromBytes)]
 #[repr(C)]
 pub struct LogicalClusterIndex {
     advise: U16, // I think this is just type
@@ -288,7 +292,7 @@ pub struct LogicalClusterIndex {
 
 // TODO if/when these are needed, probably switch to a struct with union-like methods (as
 // InodeInfo)
-#[derive(Immutable, KnownLayout, FromZeros)]
+#[derive(Immutable, KnownLayout, FromBytes)]
 #[repr(C)]
 pub struct BlockAddrOrDelta {
     buf: [u8; 4],
@@ -395,7 +399,7 @@ impl fmt::Debug for LogicalClusterIndex {
             .field("advise[0..15]", &self.advise)
             .field("cluster_offset", &self.cluster_offset);
         match t {
-            Head1 | Head2 => {
+            Head1 | Head2 | Plain => {
                 d.field("blkaddr", &self.block_addr_or_delta.block_addr());
             }
             _ => {
@@ -416,6 +420,13 @@ impl LogicalClusterIndex {
             2 => NonHead,
             3 => Head2,
             _ => unreachable!(),
+        }
+    }
+
+    pub fn is_head(&self) -> bool {
+        match self.typ() {
+            LogicalClusterType::Head1 | LogicalClusterType::Head2 => true,
+            _ => false,
         }
     }
 }
@@ -444,6 +455,13 @@ impl InodeInfo {
     }
 
     // TODO this needs to handle the other union fields
+}
+
+impl MapHeader {
+    fn cluster_size_bits(&self) -> u8 {
+        // bits 0-2
+        self.cluster_bits & 0b111
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1076,21 +1094,20 @@ impl<'a> Erofs<'a> {
             .map(|(x, _)| x)
     }
 
-    pub fn get_logical_cluster_index(
-        &self,
-        inode: &Inode<'a>,
-        i: usize,
-    ) -> Result<&'a LogicalClusterIndex, Error> {
+    pub fn get_logical_cluster_indices(&self, inode: &Inode<'a>) -> Result<&'a [LogicalClusterIndex], Error> {
         if inode.layout() != Layout::CompressedFull {
             return Err(Error::NotCompressedFull);
         }
-        // TODO bounds check i
-        // TBD why there is a +8 here
+        // NOTE the raw_compressed_blocks count is the number of physical clusters I think,
+        // the number of LCI's is just the number of blocks necessary to cover the whole file size
+        // TODO whether this is in superblock block size blocks or the map header block size
+        let n = inode.data_size().div_ceil(self.block_size()) as usize;
+        // TBD why there is a +8 here (it might be so that looking up the -1 LCI is valid?)
         let start = round_up_to::<8usize>(self.inode_end(inode) as usize)
             + std::mem::size_of::<MapHeader>()
             + 8;
-        let offset = i * std::mem::size_of::<LogicalClusterIndex>();
-        LogicalClusterIndex::try_ref_from_prefix(self.data.get(start + offset..).ok_or(Error::Oob)?)
+        let data = self.data.get(start..).ok_or(Error::Oob)?;
+        <[LogicalClusterIndex]>::ref_from_prefix_with_elems(data, n)
             .map_err(|_| Error::BadConversion)
             .map(|(x, _)| x)
     }
@@ -1105,6 +1122,67 @@ impl<'a> Erofs<'a> {
             return Err(Error::NotExpectingBlockData);
         }
         Ok(tail)
+    }
+
+    #[cfg(all(debug_assertions, feature="lz4"))]
+    pub fn get_compressed_data<W>(&self, inode: &Inode<'a>, writer: &mut W) -> Result<(), Error>
+        where W: Write
+    {
+        // TODO assumes lz4
+        let map_header = self.get_map_header(inode)?;
+        let block_len = 1usize << (self.sb.blkszbits + map_header.cluster_size_bits());
+
+        fn pcluster_len<'a>(lcis: &'a [LogicalClusterIndex], i: usize, block_len: usize) -> Result<usize, Error> {
+            debug_assert!(lcis[i].is_head());
+            // should always be ok b/c there is always a Plain LCI at the end
+            let next = lcis.get(i + 1).ok_or(Error::Oob)?;
+            match next.typ() {
+                LogicalClusterType::Head1 | LogicalClusterType::Head2 |  LogicalClusterType::Plain => {
+                    // pcluster is one block long
+                    Ok(block_len + (u16::from(next.cluster_offset) as usize))
+                }
+                LogicalClusterType::NonHead => {
+                    // delta[1] is number of lcis to skip over to get to next head, our current
+                    // head counts as 1
+                    let n = u16::from(next.block_addr_or_delta.delta()[1]) as usize;
+                    let next_head = lcis.get(i + 1 + n).ok_or(Error::Oob)?;
+                    debug_assert!(next_head.is_head());
+                    Ok(block_len * (n + 1) + (u16::from(next_head.cluster_offset) as usize))
+                }
+            }
+        }
+
+        let lcis = self.get_logical_cluster_indices(inode)?;
+
+        for (i, lci )in lcis.iter().enumerate() {
+            match lci.typ() {
+                LogicalClusterType::Head1 | LogicalClusterType::Head2 => {
+                    let _co: usize  = u16::from(lci.cluster_offset) as usize;
+                    let block_addr: u32 = lci.block_addr_or_delta.block_addr().into();
+                    let data_begin = self.block_offset(block_addr) as usize;
+                    let data = self.data
+                        .get(data_begin..data_begin + block_len + _co)
+                        .ok_or(Error::Oob)?;
+                    let decompress_len = pcluster_len(&lcis, i, block_len)?;
+                    println!("lci {i} decompress_len={decompress_len}");
+                    let decompressed = lz4::block::decompress(&data, Some(decompress_len.try_into().map_err(|_| Error::Decompress)?))
+                        .inspect_err(|e| {
+                            eprintln!("error on lci {i} {e:?}\nlci: {:?}", lci);
+                        })
+                        .map_err(|_| Error::Decompress)?;
+                    println!("lci {i} decompressed to {} bytes", decompressed.len());
+                    writer.write_all(&decompressed)
+                        .map_err(|_| Error::Write)?;
+                    writer.flush().unwrap();
+                }
+                LogicalClusterType::NonHead => {
+                }
+                LogicalClusterType::Plain => {
+                    todo!("plain type")
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(debug_assertions)]

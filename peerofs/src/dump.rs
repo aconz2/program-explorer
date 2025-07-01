@@ -136,10 +136,15 @@ fn main() {
                         erofs.inspect(&inode, 64).unwrap();
                         let header = erofs.get_map_header(&inode).unwrap();
                         println!("{:?}", header);
-                        for i in 0..245 {
-                            let lci = erofs.get_logical_cluster_index(&inode, i as usize).unwrap();
+                        for (i, lci) in erofs.get_logical_cluster_indices(&inode).unwrap().iter().enumerate() {
                             println!("{i} {:?}", lci);
                         }
+                        let mut f = File::create("/tmp/out").unwrap();
+                        erofs.get_compressed_data(&inode, &mut f).unwrap();
+                        //for (i, byte) in data.iter().enumerate() {
+                        //    print!("{byte:02x}");
+                        //    if i > 0 && i % 64 == 0 { println!(); }
+                        //}
                     }
                     _ => {}
                 }
