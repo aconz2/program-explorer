@@ -2366,6 +2366,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzzzz"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb42ba2edf1f0491b2e2c85fd49cf2a7adad3cab92ea0e29bff82d6fdafcefda"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "match_cfg"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2731,6 +2740,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "lz4",
+ "lzzzz",
  "memmap2",
  "rustix 1.0.7",
  "tempfile",

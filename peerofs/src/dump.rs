@@ -132,13 +132,26 @@ fn main() {
                         let n_compressed_blocks = inode.raw_compressed_blocks();
                         // weird thing is compressed_blocks isn't read during decompression or
                         // anything
-                        println!("compressed_blocks={}", n_compressed_blocks);
+                        println!(
+                            "size={} compressed_blocks={}",
+                            inode.data_size(),
+                            n_compressed_blocks
+                        );
                         erofs.inspect(&inode, 64).unwrap();
                         let header = erofs.get_map_header(&inode).unwrap();
                         println!("{:?}", header);
-                        for (i, lci) in erofs.get_logical_cluster_indices(&inode).unwrap().iter().enumerate() {
-                            println!("{i} {:?}", lci);
-                        }
+                        //for size in 1..20000 {
+                        //    if let Ok(data) = erofs.try_decompress_block(39, size) {
+                        //        println!("success! len={size}");
+                        //    }
+                        //}
+                        //println!("done");
+                        //return;
+                        //for (i, lci) in erofs.get_logical_cluster_indices(&inode).unwrap().iter().enumerate() {
+                        //    if lci.is_head() {
+                        //        println!("{i} {:?}", lci);
+                        //    }
+                        //}
                         let mut f = File::create("/tmp/out").unwrap();
                         erofs.get_compressed_data(&inode, &mut f).unwrap();
                         //for (i, byte) in data.iter().enumerate() {

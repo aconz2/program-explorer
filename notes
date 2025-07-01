@@ -679,11 +679,30 @@ yeah so at 241 I see m_la go from 0 to 991297 with m_pa=8192 (previously always 
 looking at the loading of lclusters, I think 0-241 inclusive forms 1 pcluster maybe? b/c I think when it loads an lcn it also loads the head lcn, then the pattern repeats with 242-495
 okay something is actually wrong, getting head2 type when shouldn't be... oof it was b/c I was missing repr(C)
 
-okay so the first physical cluster should be 991232 long (lots of zeros in vmlinux at the beginning)
-when passed to lz4::block::decompress with None, it decodes into a 991295 byte buffer
-991295 - 991232 = 63 bytes
-okay duh 242*4096 = 991232, so each LCI maps to one block
+okay so the first physical cluster should be 991297 long (lots of zeros in vmlinux at the beginning)
+242*4096 + 64 = 991297;
+so each LCI maps to one block
 the next head is LCI 242 with cluster_offset=65
 
 okay so first cluster should be 991297 and that decodes the first block correctly
 so to compute that size, we have to first figure out how many blocks are in our pcluster, which we can get by looking at the next lci (if it exists) and delta[1] + 1. That also lets us look up the clusterofs of the next head cluster which we should add to the total length like block_size * n_clusters + clusterofs. Clusterofs should always be < the the block size
+This is equivalent to:
+the logical address in the decompressed file that an LCI corresponds to is the lci_index * block_size + cluster_offset. This logical address should always be in the range [lci_index * block_size, (lci_index + 1) * block_size]
+so the decompressed size is the difference in logical address of consecutive LCI
+ie for two heads i and j:
+  (j*block_size + lci[j].cluster_offset) - (i*block_size + lci[i].cluster_offset)
+  ==
+  j*block_size + j_cluster_offset - i*block_size - i_cluster_offset
+  ==
+  (j-i)*block_size + j_cluster_offset - i_cluster_offset
+
+0: cluseter_offset=0, decoded_length=991297 = 242*4096 + 65, n_clusters=242
+242: cluster_offset=64, decoded_length=1041954 = 254*4096 + 1635 - 65, n_clusters=254
+total real size is
+
+35332080
+we write 35333642 which is 1562 too many bytes
+agree up to 16777216
+this is lcn 4096 oddly enough
+so up to block 4095 (written 16778854) we are good
+4096 has cluster_offset 0

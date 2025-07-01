@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-lz4 = ["dep:lz4"]
+lz4 = ["dep:lzzzz"]
 
 [dependencies]
 byteorder = { workspace = true }
 bytes = { workspace = true }
-lz4 = { workspace = true, optional = true }
+lzzzz = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
 thiserror = { workspace = true }

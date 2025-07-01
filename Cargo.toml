@@ -72,7 +72,7 @@ zerocopy = "0.8.24"
 zstd = "0.13.3"
 bincode = "2.0.1"
 rand = "0.9.1"
-lz4 = "1.28.1"
+lzzzz = "2.0.0"
 
 # reminder on how to do this
 # [patch.crates-io]
