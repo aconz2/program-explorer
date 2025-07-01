@@ -672,6 +672,7 @@ https://profiler.firefox.com/
 use -Elegacy-compress to get COMPRESSED_FULL
 mkfs.erofs test.erofs testerofs/ -d5 -zlz4 -Elegacy-compress
 have vmlinux in testerofs
+cargo run --features lz4 --bin erofs-dump -- test.erofs
 the inode gives compressed_blocks=3039, size=35331992
 but at lci 243, I see the blkaddr shoot up from 2 to 4259842 so that is weird. the cluster_offset
 according to some printf debugging of dump.erofs --cat, I see a max lcn of 8625
@@ -695,6 +696,7 @@ ie for two heads i and j:
   j*block_size + j_cluster_offset - i*block_size - i_cluster_offset
   ==
   (j-i)*block_size + j_cluster_offset - i_cluster_offset
+This also applies for Plain type blocks, but we only ever have j=i+1
 
 0: cluseter_offset=0, decoded_length=991297 = 242*4096 + 65, n_clusters=242
 242: cluster_offset=64, decoded_length=1041954 = 254*4096 + 1635 - 65, n_clusters=254
@@ -706,3 +708,4 @@ agree up to 16777216
 this is lcn 4096 oddly enough
 so up to block 4095 (written 16778854) we are good
 4096 has cluster_offset 0
+

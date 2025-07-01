@@ -113,6 +113,7 @@ pub enum Error {
     BuiltinPrefixTooBig,
     XattrPrefixTableNotHandled,
     Decompress,
+    LciMalformed,
     Write,
     LayoutNotHandled(Layout),
 }
@@ -424,10 +425,10 @@ impl LogicalClusterIndex {
     }
 
     pub fn is_head(&self) -> bool {
-        match self.typ() {
-            LogicalClusterType::Head1 | LogicalClusterType::Head2 => true,
-            _ => false,
-        }
+        matches!(
+            self.typ(),
+            LogicalClusterType::Head1 | LogicalClusterType::Head2
+        )
     }
 
     pub fn cluster_offset(&self) -> usize {
@@ -1136,7 +1137,6 @@ impl<'a> Erofs<'a> {
     where
         W: Write,
     {
-        //let file_size = inode.data_size() as usize;
         // TODO assumes lz4
         let map_header = self.get_map_header(inode)?;
         let block_len = 1usize << (self.sb.blkszbits + map_header.cluster_size_bits());
@@ -1145,11 +1145,11 @@ impl<'a> Erofs<'a> {
         // length of pcluster is difference in logical address of the two heads
         // LA of an LCI = LCI_index * block_len + LCI_cluster_offset
         // with rearranging, you get (j-i)*block_len + next_cluster_offset + cur_cluster_offset
-        fn pcluster_len<'a>(
-            lcis: &'a [LogicalClusterIndex],
+        fn pcluster_len(
+            lcis: &[LogicalClusterIndex],
             i: usize,
             block_len: usize,
-        ) -> Result<usize, Error> {
+        ) -> Result<(usize, usize), Error> {
             debug_assert!(lcis[i].is_head());
             // should always be ok b/c there is always a Plain LCI at the end
             let cur = lcis.get(i).ok_or(Error::Oob)?;
@@ -1169,32 +1169,45 @@ impl<'a> Erofs<'a> {
                 }
             };
             // j > i
-            Ok((j - i) * block_len + next_head.cluster_offset() - cur.cluster_offset())
+            let len = (j - i) * block_len + next_head.cluster_offset() - cur.cluster_offset();
+            Ok((j, len))
         }
 
         let lcis = self.get_logical_cluster_indices(inode)?;
 
-        let mut total: usize = 0;
+        // not sure this is possible (and if so whether malformed or not)
+        if lcis.is_empty() {
+            return Ok(());
+        }
 
-        for (i, lci) in lcis.iter().enumerate() {
-            //let remaining_len = file_size - (i * block_len + lci.cluster_offset());
-            match lci.typ() {
+        let mut total: usize = 0;
+        let mut buf = vec![];
+
+        let mut i = 0;
+
+        // loop terminates at a Plain LCI with 0 block_addr
+        // we use a for loop to bound the iteration count
+        for _ in 0..lcis.len() {
+            let cur = &lcis.get(i).ok_or(Error::Oob)?;
+            match cur.typ() {
                 LogicalClusterType::Head1 | LogicalClusterType::Head2 => {
-                    let block_addr: u32 = lci.block_addr_or_delta.block_addr().into();
+                    let block_addr: u32 = cur.block_addr_or_delta.block_addr().into();
                     let data_begin = self.block_offset(block_addr) as usize;
                     let data = self
                         .data
                         .get(data_begin..data_begin + block_len)
                         .ok_or(Error::Oob)?;
-                    let decompress_len = pcluster_len(&lcis, i, block_len)?;
+                    let (next_i, decompress_len) = pcluster_len(lcis, i, block_len)?;
                     println!("lci {i} decompress_len={decompress_len} pa={data_begin}");
 
-                    // TODO reuse buffer
-                    let mut buf = vec![0; decompress_len];
+                    if buf.len() < decompress_len {
+                        buf.resize(decompress_len, 0);
+                    }
                     let decompressed_len =
-                        lzzzz::lz4::decompress_partial(&data, &mut buf, decompress_len)
+                        // This highly depends on decompress_partial for slightly unknown reasons
+                        lzzzz::lz4::decompress_partial(data, &mut buf, decompress_len)
                             .inspect_err(|e| {
-                                eprintln!("error on lci {i} {e:?}\nlci: {:?}", lci);
+                                eprintln!("error on lci {i} {e:?}\nlci: {:?}", cur);
                             })
                             .map_err(|_| Error::Decompress)?;
                     debug_assert!(decompressed_len == decompress_len);
@@ -1202,40 +1215,45 @@ impl<'a> Erofs<'a> {
                         .write_all(&buf[..decompressed_len])
                         .map_err(|_| Error::Write)?;
                     total += decompressed_len;
-                    writer.flush().unwrap();
                     println!("written {total}");
-                }
-                LogicalClusterType::NonHead => {
-                    // TODO can skip better than just iterating
+
+                    i = next_i;
                 }
                 LogicalClusterType::Plain => {
-                    println!("{}: {:?}", i, lci);
-                    let block_addr: u32 = lci.block_addr_or_delta.block_addr().into();
+                    println!("{}: {:?}", i, cur);
+                    let block_addr: u32 = cur.block_addr_or_delta.block_addr().into();
                     if block_addr == 0 {
-                        break;
+                        if i + 1 == lcis.len() {
+                            return Ok(());
+                        } else {
+                            return Err(Error::LciMalformed);
+                        }
                     }
                     let next = lcis.get(i + 1).ok_or(Error::Oob)?;
                     println!("{}: {:?}", i + 1, next);
                     let data_begin = self.block_offset(block_addr) as usize;
-                    let data_len = block_len + next.cluster_offset() - lci.cluster_offset();
+                    let data_len = block_len + next.cluster_offset() - cur.cluster_offset();
                     println!("copying {data_len}");
                     let data = self
                         .data
                         .get(data_begin..data_begin + data_len)
                         .ok_or(Error::Oob)?;
-                    writer.write_all(&data).map_err(|_| Error::Write)?;
+                    writer.write_all(data).map_err(|_| Error::Write)?;
                     total += data_len;
-                    writer.flush().unwrap();
                     println!("written {total}");
+                    i += 1;
+                }
+                LogicalClusterType::NonHead => {
+                    return Err(Error::LciMalformed);
                 }
             }
         }
-        Ok(())
+        Err(Error::LciMalformed)
     }
 
     #[cfg(debug_assertions)]
     pub fn inspect(&self, inode: &Inode<'a>, after: usize) -> Result<(), Error> {
-        fn p(xs: &[u8]) -> () {
+        fn p(xs: &[u8]) {
             for (i, byte) in xs.iter().enumerate() {
                 if i > 0 && i % 4 == 0 {
                     print!(" ");
