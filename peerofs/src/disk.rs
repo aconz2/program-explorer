@@ -1,12 +1,16 @@
 use std::fmt;
+#[allow(unused)]
 use std::io::Write;
 use std::num::NonZero;
 use std::path::Path;
 
+#[allow(unused)]
 use log::trace;
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
+
+use crate::decompressor;
 
 pub const EROFS_SUPER_OFFSET: usize = 1024;
 pub const EROFS_SUPER_MAGIG_V1: u32 = 0xe0f5e1e2;
@@ -84,17 +88,15 @@ pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 // initially I used a rust union where the C code used unions, but zerocopy IntoBytes requres
 // [build]
 // rustflags = "--cfg zerocopy_derive_union_into_bytes"
-// in .cargo/config.toml and I wasn't super jazzed about that. So I switched the one union we
-// currently need which is InodeInfo to be a struct and manually implement union like
-// operations on the internal buffer. The two others are BlockAddrOrDelta and
-// FragmentOffsetOrDataSize and currently aren't used. Even InodeInfo currently only needs
-// raw_blkaddr
+// in .cargo/config.toml and I wasn't super jazzed about that. So instead I switched the unions to
+// structs with a buffer and functions to extract the fields out
+//
 //
 // TODO
 // - take a pass through field names and rename them (I guess retaining a comment to the original
 // field name)
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
     BadSuperblock,
     BadMagic,
@@ -118,6 +120,9 @@ pub enum Error {
     LciMalformed,
     Write,
     Underflow,
+    UnknownCompression,
+    Head2NotSupported,
+    CompressionNotSupported(CompressionType),
     LayoutNotHandled(Layout),
 }
 
@@ -344,11 +349,26 @@ pub enum MapHeaderConfig {
     FragmentPcluster = 0x0020,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum CompressionType {
     Lz4 = 0,
     Lzma = 1,
     Deflate = 2,
     Zstd = 3,
+}
+
+impl TryFrom<u8> for CompressionType {
+    type Error = Error;
+    fn try_from(x: u8) -> Result<Self, Error> {
+        use CompressionType::*;
+        match x {
+            0 => Ok(Lz4),
+            1 => Ok(Lzma),
+            2 => Ok(Deflate),
+            3 => Ok(Zstd),
+            _ => Err(Error::UnknownCompression),
+        }
+    }
 }
 
 // I think all of these are either preceded or post-ceded by a 2 byte length field
@@ -466,7 +486,13 @@ impl InodeInfo {
 }
 
 impl MapHeader {
-    fn cluster_size_bits(&self) -> u8 {
+    pub fn compression_type_1(&self) -> Result<CompressionType, Error> {
+        (self.algorithm & 0b1111).try_into()
+    }
+    pub fn compression_type_2(&self) -> Result<CompressionType, Error> {
+        ((self.algorithm >> 4) & 0b1111).try_into()
+    }
+    pub fn cluster_size_bits(&self) -> u8 {
         // bits 0-2
         self.cluster_bits & 0b111
     }
@@ -1135,20 +1161,32 @@ impl<'a> Erofs<'a> {
         Ok(tail)
     }
 
-    #[cfg(all(debug_assertions, feature = "lz4"))]
     pub fn get_compressed_data_vec(&self, inode: &Inode<'a>) -> Result<Vec<u8>, Error> {
         let mut buf = vec![];
         self.get_compressed_data(inode, &mut buf)?;
         Ok(buf)
     }
 
-    #[cfg(all(debug_assertions, feature = "lz4"))]
+    pub fn get_decompressor(
+        &self,
+        compression_type: CompressionType,
+    ) -> Result<Box<dyn decompressor::Decompressor>, Error> {
+        match compression_type {
+            #[cfg(feature = "lz4")]
+            CompressionType::Lz4 => Ok(Box::new(decompressor::Lz4Decompressor)),
+            t => Err(Error::CompressionNotSupported(t)),
+        }
+    }
+
     pub fn get_compressed_data<W>(&self, inode: &Inode<'a>, writer: &mut W) -> Result<(), Error>
     where
         W: Write,
     {
-        // TODO assumes lz4
         let map_header = self.get_map_header(inode)?;
+
+        // TODO handle head_2
+        let compression_type_1 = map_header.compression_type_1()?;
+        let decompressor_1 = self.get_decompressor(compression_type_1)?;
         let block_len = 1usize << (self.sb.blkszbits + map_header.cluster_size_bits());
         let file_size = inode.data_size() as usize;
 
@@ -1232,8 +1270,8 @@ impl<'a> Erofs<'a> {
                     }
                     let decompressed_len =
                         // This highly depends on decompress_partial for slightly unknown reasons
-                        lzzzz::lz4::decompress_partial(data, &mut buf, decompress_len)
-                            .map_err(|_| Error::Decompress)?;
+                        decompressor_1.decompress(data, &mut buf, decompress_len)
+                            .ok_or(Error::Decompress)?;
                     debug_assert!(decompressed_len == decompress_len);
                     writer
                         .write_all(&buf[..decompressed_len])
@@ -1269,7 +1307,7 @@ impl<'a> Erofs<'a> {
                     i_ = Some(i + 1);
                 }
                 LogicalClusterType::Head2 => {
-                    todo!("head2 not handled");
+                    return Err(Error::Head2NotSupported);
                 }
                 LogicalClusterType::NonHead => {
                     return Err(Error::LciMalformed);
@@ -1569,6 +1607,11 @@ mod tests {
         }
     }
 
+    fn inode_data(erofs: &Erofs, inode: &Inode) -> Box<[u8]> {
+        let (head, tail) = erofs.get_data(inode).unwrap();
+        [head, tail].concat().into()
+    }
+
     #[test]
     fn test_with_mkfs() {
         let dir = tempdir().unwrap();
@@ -1641,11 +1684,6 @@ mod tests {
                 .collect()
         }
 
-        fn inode_data(erofs: &Erofs, inode: &Inode) -> Box<[u8]> {
-            let (head, tail) = erofs.get_data(inode).unwrap();
-            [head, tail].concat().into()
-        }
-
         for item in dirents.iter().unwrap() {
             let item = item.unwrap();
             let inode = erofs.get_inode_from_dirent(&item).unwrap();
@@ -1704,12 +1742,53 @@ mod tests {
         }
     }
 
-    fn test_legacy_compression_with_mkfs_for_data<F>(
+    #[test]
+    fn test_lookup() {
+        let dir = tempdir().unwrap();
+        let dest = NamedTempFile::new().unwrap();
+        let files = vec!["a", "b", "c/foo/bar/baz", "d", "e/f"];
+        for file in &files {
+            let p = dir.path().join(file);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap()
+            }
+            fs::write(&p, p.file_name().unwrap().as_encoded_bytes()).unwrap();
+        }
+
+        let out = Command::new("mkfs.erofs")
+            .arg(dest.path())
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            println!("{}", out.stdout.escape_ascii());
+            println!("{}", out.stderr.escape_ascii());
+        }
+        assert!(out.status.success());
+
+        let mmap = unsafe { MmapOptions::new().map(&dest).unwrap() };
+        let erofs = Erofs::new(&mmap).unwrap();
+        for file in &files {
+            let Some(inode) = erofs.lookup(file).unwrap() else {
+                panic!("failed to find {:?}", file);
+            };
+            let data = inode_data(&erofs, &inode);
+            assert_eq!(
+                data.as_ref(),
+                Path::new(file).file_name().unwrap().as_encoded_bytes()
+            );
+        }
+        assert!(erofs.lookup("not-a-file").unwrap().is_none());
+        assert!(erofs.lookup("also/not-a-file").unwrap().is_none());
+    }
+
+    #[allow(dead_code)]
+    fn test_legacy_compression_mkfs<F>(
         data: &[u8],
         block_size: usize,
         compression: &str,
         cb: F,
-    ) -> Vec<u8>
+    ) -> Result<Vec<u8>, Error>
     where
         F: Fn(&[LogicalClusterIndex]),
     {
@@ -1735,28 +1814,25 @@ mod tests {
         assert!(out.status.success());
 
         let mmap = unsafe { MmapOptions::new().map(&dest).unwrap() };
-        let erofs = Erofs::new(&mmap).unwrap();
+        let erofs = Erofs::new(&mmap)?;
 
-        let inode = erofs.lookup(&filename).unwrap().unwrap();
-        let lcis = erofs.get_logical_cluster_indices(&inode).unwrap();
+        let inode = erofs.lookup(&filename)?.unwrap();
+        let lcis = erofs.get_logical_cluster_indices(&inode)?;
         cb(lcis);
-        erofs.get_compressed_data_vec(&inode).unwrap()
+        erofs.get_compressed_data_vec(&inode)
     }
 
     #[test]
     fn test_legacy_compression() {
+        #[allow(unused_macros)]
         macro_rules! check {
             ($data:expr, $block_size:expr, $compression:expr) => {{
                 check!($data, $block_size, $compression, |_| {});
             }};
             ($data:expr, $block_size:expr, $compression:expr, $cb:expr) => {{
                 let data = &$data;
-                let got = test_legacy_compression_with_mkfs_for_data(
-                    data,
-                    $block_size,
-                    $compression,
-                    $cb,
-                );
+                let got =
+                    test_legacy_compression_mkfs(data, $block_size, $compression, $cb).unwrap();
                 assert_eq!(&got, data);
             }};
         }
@@ -1802,6 +1878,16 @@ mod tests {
                 }
                 check!(buf, 4096, "lz4");
             }
+        }
+
+        #[cfg(not(feature = "lz4"))]
+        {
+            let data = vec![0u8; 10000];
+            let got = test_legacy_compression_mkfs(&data, 4096, "lz4", |_| {});
+            assert_eq!(
+                got.unwrap_err(),
+                Error::CompressionNotSupported(CompressionType::Lz4)
+            );
         }
     }
 }
