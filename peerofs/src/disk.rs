@@ -1,7 +1,9 @@
 use std::fmt;
 use std::io::Write;
 use std::num::NonZero;
+use std::path::Path;
 
+use log::trace;
 use rustix::fs::FileType;
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
@@ -115,6 +117,7 @@ pub enum Error {
     Decompress,
     LciMalformed,
     Write,
+    Underflow,
     LayoutNotHandled(Layout),
 }
 
@@ -1133,6 +1136,13 @@ impl<'a> Erofs<'a> {
     }
 
     #[cfg(all(debug_assertions, feature = "lz4"))]
+    pub fn get_compressed_data_vec(&self, inode: &Inode<'a>) -> Result<Vec<u8>, Error> {
+        let mut buf = vec![];
+        self.get_compressed_data(inode, &mut buf)?;
+        Ok(buf)
+    }
+
+    #[cfg(all(debug_assertions, feature = "lz4"))]
     pub fn get_compressed_data<W>(&self, inode: &Inode<'a>, writer: &mut W) -> Result<(), Error>
     where
         W: Write,
@@ -1140,6 +1150,7 @@ impl<'a> Erofs<'a> {
         // TODO assumes lz4
         let map_header = self.get_map_header(inode)?;
         let block_len = 1usize << (self.sb.blkszbits + map_header.cluster_size_bits());
+        let file_size = inode.data_size() as usize;
 
         // lookup next head
         // length of pcluster is difference in logical address of the two heads
@@ -1149,28 +1160,43 @@ impl<'a> Erofs<'a> {
             lcis: &[LogicalClusterIndex],
             i: usize,
             block_len: usize,
-        ) -> Result<(usize, usize), Error> {
+            file_size: usize,
+        ) -> Result<(Option<usize>, usize), Error> {
             debug_assert!(lcis[i].is_head());
-            // should always be ok b/c there is always a Plain LCI at the end
+            // should always be ok b/c there is always a Plain LCI at the end (TODO not sure about
+            // that)
             let cur = lcis.get(i).ok_or(Error::Oob)?;
             let next = lcis.get(i + 1).ok_or(Error::Oob)?;
-            println!("{}: {:?}", i, cur);
-            println!("{}: {:?}", i + 1, next);
+            trace!("{}: {:?}", i, cur);
+            trace!("{}: {:?}", i + 1, next);
             let (j, next_head) = match next.typ() {
                 LogicalClusterType::Head1
                 | LogicalClusterType::Head2
                 | LogicalClusterType::Plain => (i + 1, next),
                 LogicalClusterType::NonHead => {
                     let n = u16::from(next.block_addr_or_delta.delta()[1]) as usize;
-                    let next_head = lcis.get(i + 1 + n).ok_or(Error::Oob)?;
-                    println!("{}: {:?}", i + 1 + n, next_head);
+                    trace!("trying to get {}/{}", i + 1 + n, lcis.len());
+                    let Some(next_head) = lcis.get(i + 1 + n) else {
+                        // it can be that there is no next head
+                        if i + 1 + n == lcis.len() {
+                            // TODO check sub
+                            let len = file_size
+                                .checked_sub(i * block_len + cur.cluster_offset())
+                                .ok_or(Error::Underflow)?;
+                            return Ok((None, len));
+                        } else {
+                            // true oob
+                            return Err(Error::Oob);
+                        }
+                    };
+                    trace!("{}: {:?}", i + 1 + n, next_head);
                     debug_assert!(next_head.typ() != LogicalClusterType::NonHead);
                     (i + 1 + n, next_head)
                 }
             };
             // j > i
             let len = (j - i) * block_len + next_head.cluster_offset() - cur.cluster_offset();
-            Ok((j, len))
+            Ok((Some(j), len))
         }
 
         let lcis = self.get_logical_cluster_indices(inode)?;
@@ -1183,22 +1209,23 @@ impl<'a> Erofs<'a> {
         let mut total: usize = 0;
         let mut buf = vec![];
 
-        let mut i = 0;
+        let mut i_ = Some(0);
 
-        // loop terminates at a Plain LCI with 0 block_addr
-        // we use a for loop to bound the iteration count
-        for _ in 0..lcis.len() {
+        // loop terminates either when we reach the last LCI that is Plain with 0 blkaddr
+        // or pcluster_len can return None
+        while let Some(i) = i_ {
             let cur = &lcis.get(i).ok_or(Error::Oob)?;
             match cur.typ() {
-                LogicalClusterType::Head1 | LogicalClusterType::Head2 => {
+                // TODO different
+                LogicalClusterType::Head1 => {
                     let block_addr: u32 = cur.block_addr_or_delta.block_addr().into();
                     let data_begin = self.block_offset(block_addr) as usize;
                     let data = self
                         .data
                         .get(data_begin..data_begin + block_len)
                         .ok_or(Error::Oob)?;
-                    let (next_i, decompress_len) = pcluster_len(lcis, i, block_len)?;
-                    println!("lci {i} decompress_len={decompress_len} pa={data_begin}");
+                    let (next_i, decompress_len) = pcluster_len(lcis, i, block_len, file_size)?;
+                    trace!("lci {i} decompress_len={decompress_len} pa={data_begin}");
 
                     if buf.len() < decompress_len {
                         buf.resize(decompress_len, 0);
@@ -1206,49 +1233,67 @@ impl<'a> Erofs<'a> {
                     let decompressed_len =
                         // This highly depends on decompress_partial for slightly unknown reasons
                         lzzzz::lz4::decompress_partial(data, &mut buf, decompress_len)
-                            .inspect_err(|e| {
-                                eprintln!("error on lci {i} {e:?}\nlci: {:?}", cur);
-                            })
                             .map_err(|_| Error::Decompress)?;
                     debug_assert!(decompressed_len == decompress_len);
                     writer
                         .write_all(&buf[..decompressed_len])
                         .map_err(|_| Error::Write)?;
                     total += decompressed_len;
-                    println!("written {total}");
+                    trace!("written {total}");
 
-                    i = next_i;
+                    i_ = next_i;
                 }
                 LogicalClusterType::Plain => {
-                    println!("{}: {:?}", i, cur);
+                    trace!("{}: {:?}", i, cur);
                     let block_addr: u32 = cur.block_addr_or_delta.block_addr().into();
                     if block_addr == 0 {
                         if i + 1 == lcis.len() {
-                            return Ok(());
+                            // this LCI is the last entry and is expected
+                            break;
                         } else {
                             return Err(Error::LciMalformed);
                         }
                     }
                     let next = lcis.get(i + 1).ok_or(Error::Oob)?;
-                    println!("{}: {:?}", i + 1, next);
+                    trace!("{}: {:?}", i + 1, next);
                     let data_begin = self.block_offset(block_addr) as usize;
                     let data_len = block_len + next.cluster_offset() - cur.cluster_offset();
-                    println!("copying {data_len}");
+                    trace!("copying {data_len}");
                     let data = self
                         .data
                         .get(data_begin..data_begin + data_len)
                         .ok_or(Error::Oob)?;
                     writer.write_all(data).map_err(|_| Error::Write)?;
                     total += data_len;
-                    println!("written {total}");
-                    i += 1;
+                    trace!("written {total}");
+                    i_ = Some(i + 1);
+                }
+                LogicalClusterType::Head2 => {
+                    todo!("head2 not handled");
                 }
                 LogicalClusterType::NonHead => {
                     return Err(Error::LciMalformed);
                 }
             }
         }
-        Err(Error::LciMalformed)
+        Ok(())
+    }
+
+    // TODO uses linear search
+    pub fn lookup(&self, p: impl AsRef<Path>) -> Result<Option<Inode>, Error> {
+        let mut cur = self.get_root_inode()?;
+        'outer: for component in p.as_ref() {
+            let dirents = self.get_dirents(&cur)?;
+            for item in dirents.iter()? {
+                let item = item?;
+                if item.name == component.as_encoded_bytes() {
+                    cur = self.get_inode_from_dirent(&item)?;
+                    continue 'outer;
+                }
+            }
+            return Ok(None);
+        }
+        Ok(Some(cur))
     }
 
     #[cfg(debug_assertions)]
@@ -1462,6 +1507,22 @@ fn crc32c<'a>(data: impl IntoIterator<Item = &'a u8>) -> u32 {
     crc
 }
 
+const _: () = {
+    use std::mem::size_of;
+    assert!(128 == size_of::<Superblock>());
+    assert!(64 == size_of::<InodeExtended>());
+    assert!(32 == size_of::<InodeCompact>());
+    assert!(12 == size_of::<Dirent>());
+    assert!(12 == size_of::<XattrHeader>());
+    assert!(4 == size_of::<XattrEntry>());
+    assert!(8 == size_of::<MapHeader>());
+    assert!(8 == size_of::<LogicalClusterIndex>());
+    assert!(14 == size_of::<Lz4CompressionConfig>());
+    assert!(14 == size_of::<LzmaCompressionConfig>());
+    assert!(6 == size_of::<DeflateCompressionConfig>());
+    assert!(6 == size_of::<ZstdCompressionConfig>());
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1474,42 +1535,6 @@ mod tests {
     use memmap2::MmapOptions;
     use rustix::fs::XattrFlags;
     use tempfile::{tempdir, NamedTempFile};
-
-    #[test]
-    fn test_sizeof() {
-        assert_eq!(128, std::mem::size_of::<Superblock>(), "Superblock");
-        assert_eq!(64, std::mem::size_of::<InodeExtended>(), "InodeExtended");
-        assert_eq!(32, std::mem::size_of::<InodeCompact>(), "InodeCompact");
-        assert_eq!(12, std::mem::size_of::<Dirent>(), "Dirent");
-        assert_eq!(12, std::mem::size_of::<XattrHeader>(), "XattrHeader");
-        assert_eq!(4, std::mem::size_of::<XattrEntry>(), "XattrEntry");
-        assert_eq!(8, std::mem::size_of::<MapHeader>(), "MapHeader");
-        assert_eq!(
-            8,
-            std::mem::size_of::<LogicalClusterIndex>(),
-            "LogicalClusterIndex"
-        );
-        assert_eq!(
-            14,
-            std::mem::size_of::<Lz4CompressionConfig>(),
-            "Lz4CompressionConfig"
-        );
-        assert_eq!(
-            14,
-            std::mem::size_of::<LzmaCompressionConfig>(),
-            "LzmaCompressionConfig"
-        );
-        assert_eq!(
-            6,
-            std::mem::size_of::<DeflateCompressionConfig>(),
-            "DeflateCompressionConfig"
-        );
-        assert_eq!(
-            6,
-            std::mem::size_of::<ZstdCompressionConfig>(),
-            "ZstdCompressionConfig"
-        );
-    }
 
     #[test]
     fn test_compute_block_tail_len() {
@@ -1570,16 +1595,20 @@ mod tests {
         set_xattr(&pb, "user.attr", "unique-b");
         set_xattr(&pc, "user.attr", "unique-c");
 
-        let success = Command::new("mkfs.erofs")
+        let out = Command::new("mkfs.erofs")
             .arg(dest.path())
             .arg(dir.path())
             .arg("-b4096") // block size
-            .arg("-x2") // this means that if more than 2 files have the same xattr, it goes into the
+            // this means that if more than 2 files have the same xattr, it goes into the
             // shared xattr table
-            .status()
-            .unwrap()
-            .success();
-        assert!(success);
+            .arg("-x2")
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            println!("{}", out.stdout.escape_ascii());
+            println!("{}", out.stderr.escape_ascii());
+        }
+        assert!(out.status.success());
 
         // on test systems with selinux, all these tempfiles will have gotten labeled with
         // security.selinux and thus they all go into the shared xattr table
@@ -1671,6 +1700,107 @@ mod tests {
                 name => {
                     assert!(false, "got unexpected file name {}", name);
                 }
+            }
+        }
+    }
+
+    fn test_legacy_compression_with_mkfs_for_data<F>(
+        data: &[u8],
+        block_size: usize,
+        compression: &str,
+        cb: F,
+    ) -> Vec<u8>
+    where
+        F: Fn(&[LogicalClusterIndex]),
+    {
+        let dir = tempdir().unwrap();
+        let dest = NamedTempFile::new().unwrap();
+
+        let filename = "file";
+        let file = dir.path().join(&filename);
+        fs::write(&file, data).unwrap();
+
+        let out = Command::new("mkfs.erofs")
+            .arg(dest.path())
+            .arg(dir.path())
+            .arg(format!("-z{compression}"))
+            .arg(format!("-b{block_size}"))
+            .arg("-Elegacy-compress")
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            println!("{}", out.stdout.escape_ascii());
+            println!("{}", out.stderr.escape_ascii());
+        }
+        assert!(out.status.success());
+
+        let mmap = unsafe { MmapOptions::new().map(&dest).unwrap() };
+        let erofs = Erofs::new(&mmap).unwrap();
+
+        let inode = erofs.lookup(&filename).unwrap().unwrap();
+        let lcis = erofs.get_logical_cluster_indices(&inode).unwrap();
+        cb(lcis);
+        erofs.get_compressed_data_vec(&inode).unwrap()
+    }
+
+    #[test]
+    fn test_legacy_compression() {
+        macro_rules! check {
+            ($data:expr, $block_size:expr, $compression:expr) => {{
+                check!($data, $block_size, $compression, |_| {});
+            }};
+            ($data:expr, $block_size:expr, $compression:expr, $cb:expr) => {{
+                let data = &$data;
+                let got = test_legacy_compression_with_mkfs_for_data(
+                    data,
+                    $block_size,
+                    $compression,
+                    $cb,
+                );
+                assert_eq!(&got, data);
+            }};
+        }
+
+        #[cfg(feature = "lz4")]
+        {
+            // 33 is the minimum needed to store as compressed data
+            check!(vec![0u8; 4096 + 33], 4096, "lz4");
+            // this excercises a case where there is no trailing Plain block
+            check!(vec![0u8; 8192], 4096, "lz4", |lcis| {
+                assert_eq!(lcis.len(), 2);
+                assert!(lcis[1].typ() != LogicalClusterType::Plain);
+            });
+            check!(vec![0u8; 8193], 4096, "lz4", |lcis| {
+                assert_eq!(lcis.len(), 3);
+                assert!(lcis[2].typ() == LogicalClusterType::Plain);
+            });
+            {
+                let mut buf = vec![];
+                for i in 0..10000 {
+                    buf.push(i as u8);
+                }
+                check!(buf, 4096, "lz4");
+            }
+            {
+                // go above the PCLUSTER_MAX_SIZE of 1Mb
+                let mut buf = vec![];
+                for i in 0..(1024 * 1024 * 3) {
+                    buf.push(i as u8);
+                }
+                check!(buf, 4096, "lz4");
+            }
+            {
+                let mut buf = vec![];
+                for i in 0..10000 {
+                    buf.push(i as u8);
+                }
+                for _ in 0..10000 {
+                    buf.push(0);
+                }
+                for i in 0..10000 {
+                    buf.push(i as u8);
+                }
+                check!(buf, 4096, "lz4");
             }
         }
     }

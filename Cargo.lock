@@ -2720,6 +2720,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "bytes",
+ "log",
  "lzzzz",
  "memmap2",
  "rustix 1.0.7",

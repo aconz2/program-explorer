@@ -9,6 +9,7 @@ lz4 = ["dep:lzzzz"]
 [dependencies]
 byteorder = { workspace = true }
 bytes = { workspace = true }
+log.workspace = true
 lzzzz = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
