@@ -10,12 +10,21 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
-peerofs = { workspace = true }
+peerofs = { workspace = true, features = ["lz4"] }
+memmap2 = { workspace = true }
+tempfile = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
 
 [[bin]]
-name = "fuzz_target_1"
-path = "fuzz_targets/fuzz_target_1.rs"
+name = "fuzz_builder"
+path = "fuzz_targets/fuzz_builder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decompress_lz4"
+path = "fuzz_targets/fuzz_decompress_lz4.rs"
 test = false
 doc = false
 bench = false

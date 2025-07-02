@@ -2735,8 +2735,10 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
+ "memmap2",
  "peerofs",
  "rustix 1.0.7",
+ "tempfile",
 ]
 
 [[package]]
