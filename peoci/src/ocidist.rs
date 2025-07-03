@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use log::{error, info, trace, warn};
 use moka::{Expiry, future::Cache};
 use oci_spec::{
@@ -115,8 +116,10 @@ pub enum Auth {
     UserPass(String, String),
 }
 
+type UtcInstant = DateTime<Utc>;
+
 pub type AuthMap = BTreeMap<String, Auth>;
-pub type RatelimitMap = BTreeMap<String, Instant>;
+pub type RatelimitMap = BTreeMap<String, UtcInstant>;
 
 #[derive(Clone)]
 pub struct Client {
@@ -589,7 +592,7 @@ impl Client {
         let mut remove = false;
         let registry = reference.resolve_registry();
         if let Some(ratelimit_end) = self.ratelimit.read().await.get(registry) {
-            if Instant::now() < *ratelimit_end {
+            if Utc::now() < *ratelimit_end {
                 warn!("still in ratelimit reset period");
                 return Err(Error::RatelimitExceeded);
             } else {
@@ -604,39 +607,59 @@ impl Client {
 
     async fn handle_ratelimit(&self, reference: &Reference, res: &Response) -> Result<(), Error> {
         // ghcr apparently returns either 403 or 429
-        if res.status() == StatusCode::FORBIDDEN || res.status() == StatusCode::TOO_MANY_REQUESTS {
-            if let Some(ratelimit_remaining) = get_ratelimit_remaining_header(res.headers()) {
-                info!("parsed ratelimit header {:?}", ratelimit_remaining);
-            }
-            for (header, value) in res.headers().iter() {
-                if header.as_str().contains("ratelimit") {
-                    info!("ratelimit header {}: {:?}", header, value);
-                }
-            }
-
-            let registry = reference.resolve_registry();
-            let ratelimit_reset = get_ratelimit_reset_header(res.headers()).unwrap_or_else(|| {
-                warn!(
-                    "got res status {} from {} but no ratelimit-reset",
-                    res.status(),
-                    registry
-                );
-                DEFAULT_RATELIMIT_RESET
-            });
-            warn!(
-                "hit ratelimit when registry={} res.url={} reset={}",
-                registry,
-                res.url(),
-                ratelimit_reset
-            );
-            let rate_end = Instant::now() + Duration::from_secs(ratelimit_reset as u64);
-            self.ratelimit
-                .write()
-                .await
-                .insert(registry.to_string(), rate_end);
-            return Err(Error::RatelimitExceeded);
+        if !matches!(
+            res.status(),
+            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+        ) {
+            return Ok(());
         }
-        Ok(())
+
+        if let Some(ratelimit_remaining) = get_ratelimit_remaining_header(res.headers()) {
+            info!("parsed ratelimit header {:?}", ratelimit_remaining);
+        }
+        for (header, value) in res.headers().iter() {
+            if header.as_str().contains("ratelimit") {
+                info!("ratelimit header {}: {:?}", header, value);
+            }
+        }
+
+        let registry = reference.resolve_registry();
+        let end: UtcInstant = if let Some(reset) = get_ratelimit_reset_header(res.headers()) {
+            let now = chrono::Utc::now();
+            let time = reset
+                .try_into() // u64 -> i64
+                .ok()
+                .and_then(|x| chrono::DateTime::<chrono::Utc>::from_timestamp(x, 0))
+                .unwrap_or_else(|| {
+                    error!("bad reset timestamp");
+                    now + Duration::from_secs(DEFAULT_RATELIMIT_RESET)
+                });
+            if now > time {
+                warn!("got ratelimit reset in past, assuming it is duration");
+                now + Duration::from_secs(reset)
+            } else {
+                time
+            }
+        } else {
+            warn!(
+                "got res status {} from {} but no ratelimit-reset",
+                res.status(),
+                registry
+            );
+            chrono::Utc::now() + Duration::from_secs(DEFAULT_RATELIMIT_RESET)
+        };
+
+        warn!(
+            "hit ratelimit when registry={} res.url={}",
+            registry,
+            res.url(),
+        );
+        self.ratelimit
+            .write()
+            .await
+            .insert(registry.to_string(), end);
+
+        Err(Error::RatelimitExceeded)
     }
 }
 
@@ -848,7 +871,7 @@ fn parse_www_authenticate_bearer_str(input: &str) -> Option<WWWAuthenticateBeare
 #[allow(dead_code)]
 const DEFAULT_RATELIMIT_WINDOW: u32 = 60 * 60; // 1 hour in seconds
 // if they don't send ratelimit-reset, default to 1 minute (guessing)
-const DEFAULT_RATELIMIT_RESET: u32 = 60;
+const DEFAULT_RATELIMIT_RESET: u64 = 60;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RatelimitRemaining {
@@ -908,21 +931,27 @@ fn parse_ratelimit_remaining_str(input: &str) -> Option<RatelimitRemaining> {
     }
 }
 
-fn get_ratelimit_reset_header(map: &reqwest::header::HeaderMap) -> Option<u32> {
-    if let Some(value) = map.get("ratelimit-remaining") {
+// https://www.ietf.org/archive/id/draft-polli-ratelimit-headers-02.html#section-3.3
+// returns whatever number is in the header. RFC ways it is the number of seconds until reset, but
+// github and docker both specify that it is the timestamp when it resets! Dockers says "unix time"
+// and github says "UTC epoch seconds"
+// https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28#checking-the-status-of-your-rate-limit
+// https://docs.docker.com/reference/api/hub/latest/#tag/rate-limiting
+fn get_ratelimit_reset_header(map: &reqwest::header::HeaderMap) -> Option<u64> {
+    if let Some(value) = map.get("ratelimit-reset") {
         parse_ratelimit_reset_header(value)
-    } else if let Some(value) = map.get("x-ratelimit-remaining") {
+    } else if let Some(value) = map.get("x-ratelimit-reset") {
         parse_ratelimit_reset_header(value)
     } else {
         None
     }
 }
 
-fn parse_ratelimit_reset_header(input: &HeaderValue) -> Option<u32> {
+fn parse_ratelimit_reset_header(input: &HeaderValue) -> Option<u64> {
     parse_ratelimit_reset_str(input.to_str().ok()?)
 }
 
-fn parse_ratelimit_reset_str(input: &str) -> Option<u32> {
+fn parse_ratelimit_reset_str(input: &str) -> Option<u64> {
     input.parse().ok()
 }
 
