@@ -1,0 +1,24 @@
+[package]
+name = "pegh"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reqwest = { workspace = true, features = ["http2", "rustls-tls", "json"] }
+thiserror = {workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt"] }
+clap = { workspace = true, features = ["derive"] }
+env_logger = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "gh"
+path = "src/main.rs"
+
+[lints]
+workspace = true
