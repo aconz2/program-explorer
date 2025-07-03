@@ -5,6 +5,7 @@ use memmap2::MmapOptions;
 use rustix::fs::FileType;
 
 use peerofs::disk::{DirentFileType, Erofs, Error, Inode, Layout};
+use env_logger;
 
 #[allow(dead_code)]
 fn all_inodes<'a>(erofs: &Erofs<'a>) -> Result<Vec<Inode<'a>>, Error> {
@@ -31,6 +32,7 @@ fn all_inodes<'a>(erofs: &Erofs<'a>) -> Result<Vec<Inode<'a>>, Error> {
 }
 
 fn main() {
+    env_logger::init();
     let args: Vec<_> = std::env::args().collect();
     let image = args.get(1).expect("give me an image name");
     let file = File::open(image).expect("file open failed");
@@ -140,17 +142,8 @@ fn main() {
                         erofs.inspect(&inode, 64).unwrap();
                         let header = erofs.get_map_header(&inode).unwrap();
                         println!("{:?}", header);
-                        //for size in 1..20000 {
-                        //    if let Ok(data) = erofs.try_decompress_block(39, size) {
-                        //        println!("success! len={size}");
-                        //    }
-                        //}
-                        //println!("done");
-                        //return;
                         //for (i, lci) in erofs.get_logical_cluster_indices(&inode).unwrap().iter().enumerate() {
-                        //    if lci.is_head() {
-                        //        println!("{i} {:?}", lci);
-                        //    }
+                        //    println!("{i} {:?}", lci);
                         //}
                         let mut f = File::create("/tmp/out").unwrap();
                         erofs.get_compressed_data(&inode, &mut f).unwrap();

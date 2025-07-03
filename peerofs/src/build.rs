@@ -80,6 +80,7 @@ const MAX_DEPTH: usize = 32; // TODO could be configurable
 // TODO
 // - link count, do they actually matter?
 // - tail pack dirents
+// - compression: lz4, zstd, deflate
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

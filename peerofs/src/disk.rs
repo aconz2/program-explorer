@@ -19,11 +19,21 @@ pub const INODE_ALIGNMENT: u64 = 32;
 pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 
 // NOTES:
-// - inode ino is a sequential number, but will not match the nid you look it up with; ie the
-// root_nid from the superblock is something like 26, and you use that to compute the address of
-// the root inode, but that inode will have field ino=1. So I'm not sure what a good name for the
-// on-disk ino id should be. Currently calling it disk_id; it is not really an id because it is
-// used in direct addressing calculation
+// Blocks
+// - superblock (SB): starts at byte 1024. Immediately after can be compression config structs and
+// information about secondary devices used for storage
+// - blocks: much of the layout is determined by a block (B), defaulting to 4096 but configurable in
+// the SB blkszbits. Importantly, the SB field meta_blkaddr specifies the starting block number
+// where the Inodes will be stored. A block address is found by multiplying the block number by
+// the block size.
+//
+// Inodes
+// - Inodes come in two sizes: 32 and 64 bytes InodeCompact and InodeExtended
+// - An Inode address is computed as 32*X + meta_block*B. This holds for both InodeCompact and
+// InodeExtended, even though the latter is 64 bytes. X here is a disk_id as found in the SB
+// root_disk_id or a Dirent disk_id.
+// - An Inode also has a field ino which is a sequential number, but you cannot find the Inode on disk
+// given an ino!
 //
 // Data Storage
 // - FlatInline storage stores whole blocks worth of data starting at raw_block_addr (number) and
@@ -33,32 +43,38 @@ pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 // have to skip to the start of the next block.
 // - FlatPlain storage is like FlatInline but with no tail data. I was wondering why this exists
 // and why not just have FlatInline, but if you are storing 8191 bytes for example, then if you
-// always used FlatInline, you would store 1 block and 4095 bytes inline; whereas with FlatPlain
-// you just store in 2 blocks
-// - TODO compressed storage
+// always used FlatInline, you would store 1 block and 4095 bytes inline (which is impossible since
+// tail cannot cross block boundary); whereas with FlatPlain you just store in 2 blocks
 // - CompressedFull
 //   - https://lwn.net/Articles/851132/
+//   - TODO in the following I use the term pcluster but not sure this is actually correct
 //   - immediately following the inode and xattr goes a MapHeader followed by a number of
-//   LogicalClusterIndex. The logical clusters are then grouped into a physical cluster, with the
-//   first lcluster having a HEAD type. The NONHEAD lclusters store an offset in both directions
-//   delta[2] to get to the HEAD of its pcluster and the next HEAD (of the next pcluster). A
-//   pcluster can have only 1 lcluster and it will be HEAD type. The number of clusters in a
-//   pcluster is stored in the first NONHEAD lcluster (second cluster of the pcluster), except for
-//   pclusters with only 1 lcluster, which can be differentiated by looking at the next lcluster
-//   and checking if it is also HEAD. TBD how to tell the number of lclusters in an inode?
+//   LogicalClusterIndex (LCI/lcluster). For a file of size S there are ceil(S/B) LCI's where B is the
+//   compression block size, which can be larger than the superblock block size as specified in the
+//   MapHeader clusterbits.
+//   - Each LCI represents a span of bytes at a logical address (LA) which starts at
+//   i*B + cluster_offset for the i'th LCI and goes to the next LCI LA or EOF
+//   - Multiple LCIs are grouped into a physical cluster (pcluster)  with the
+//   first lcluster having a Head type, followed by 0 or more Nonhead lclusters.
+//   - The Head LCI stores the block address of where the compressed bytes live for that pcluster
+//   - The Nonhead LCI store an offset to their Head LCI in delta[0] and the next pcluster (Head or
+//   Plain) in delta[1]. These are used during random reads to find the block needed to decompress
+//   - Plain type LCI are uncompressed data of length up to B
+//   - Head1 and Head2 are the two variants of Head LCI which allow multiple compression methods to
+//   be used for the same file which is stored in the MapHeader algorithmtype
 //
 // Directories
-// - dirents are stored in blocks up to the block size. A single directory may span multiple blocks
-// - dirents can be stored as either FlatInline or FlatPlain. If FlatInline and there is data
-// stored in blocks, the dirent block will end before the tail data starts (since dirent blocks are
-// max sized the block size).
-// - Names are stored without null terminator, except possibly the last one in a block. (see next)
-// - The final name in a dirent block must have a null terminator if it ends before the block
-// because there is no other way to know when it ends. Otherwise the name's last byte is the last
-// byte in the block.
-// - dirent name_offset is relative to the start of the block/tail
-// - dirents are sorted in ascending name order
-// - all dirs must store the . and ..
+// - Dirent's are stored as above, either as FlatPlain or FlatInline, and in descending sorted order
+// - Dirent's are grouped together so that each group can fit in one block. The group layout is
+// like {Dirent[], u8[][]}. The u8 data there are the names for those dirents. The names are
+// referenced by the Dirent name_offset field which is relative to the start of the block.
+// - The length of the name is found by looking at the next Dirent name_offset, except for the last
+// Dirent in a group, whose name will either go to the end of the block, or be null terminated if
+// it ends early.
+// - The number of Dirent's in a group can be determined by looking at the first Dirent
+// name_offset, which should be a multiple of size_of::<Dirent>=12, and dividing by 12
+// - Dirent's are stored unaligned since they have size 12
+// - all dirs must store the . and .., pointing to themselves and parent directory respectively
 // - in the root's dirents, the .. entry points to itself
 //
 // Xattrs
@@ -95,6 +111,8 @@ pub const EROFS_NULL_ADDR: u32 = u32::MAX;
 // TODO
 // - take a pass through field names and rename them (I guess retaining a comment to the original
 // field name)
+// - Head2 algorithm support
+// - zstd, deflate compression
 
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
@@ -299,8 +317,6 @@ pub struct LogicalClusterIndex {
     block_addr_or_delta: BlockAddrOrDelta,
 }
 
-// TODO if/when these are needed, probably switch to a struct with union-like methods (as
-// InodeInfo)
 #[derive(Immutable, KnownLayout, FromBytes)]
 #[repr(C)]
 pub struct BlockAddrOrDelta {
@@ -1292,6 +1308,8 @@ impl<'a> Erofs<'a> {
                             return Err(Error::LciMalformed);
                         }
                     }
+                    // TODO can't there be a Plain at the end with partial data and we have to
+                    // instead use the file size instead of the next LCI?
                     let next = lcis.get(i + 1).ok_or(Error::Oob)?;
                     trace!("{}: {:?}", i + 1, next);
                     let data_begin = self.block_offset(block_addr) as usize;
