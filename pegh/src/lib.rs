@@ -69,17 +69,17 @@ impl Client {
         })
     }
 
-    pub async fn get_gist(&self, id: &str) -> Result<Option<Gist>, Error> {
-        self.get_gist_impl(id, None).await
+    pub async fn get_gist_latest(&self, id: &str) -> Result<Option<Gist>, Error> {
+        self.get_gist(id, None).await
     }
 
     pub async fn get_gist_version(&self, id: &str, revision: &str) -> Result<Option<Gist>, Error> {
-        self.get_gist_impl(id, Some(revision)).await
+        self.get_gist(id, Some(revision)).await
     }
 
     // https://docs.github.com/en/rest/gists/gists?apiVersion=2022-11-28#get-a-gist
     // https://docs.github.com/en/rest/gists/gists?apiVersion=2022-11-28#get-a-gist-revision
-    async fn get_gist_impl(&self, id: &str, revision: Option<&str>) -> Result<Option<Gist>, Error> {
+    pub async fn get_gist(&self, id: &str, revision: Option<&str>) -> Result<Option<Gist>, Error> {
         let _guard = self.sem.acquire().await;
         let url = format!(
             "https://api.github.com/gists/{}{}{}",

@@ -15,6 +15,10 @@ path = "src/lb.rs"
 name = "worker"
 path = "src/worker.rs"
 
+[[bin]]
+name = "gh"
+path = "src/gh.rs"
+
 [lib]
 name = "peserver"
 path = "src/lib.rs"
@@ -23,6 +27,7 @@ doctest = false
 [dependencies]
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true }
 base64 = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
@@ -31,9 +36,11 @@ env_logger = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
 log = { workspace = true }
+moka = { workspace = true, features = ["future"] }
 oci-spec = { workspace = true }
 once_cell = { workspace = true }
 pearchive = { workspace = true }
+pegh = { workspace = true }
 peimage = { workspace = true }
 peimage-service = { workspace = true }
 peinit = { workspace = true }
@@ -47,6 +54,7 @@ serde = { workspace = true, features = ["serde_derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 
 [lints]

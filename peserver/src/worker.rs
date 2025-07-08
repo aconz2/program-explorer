@@ -97,9 +97,8 @@ impl From<Error> for StatusCode {
         use Error::*;
         match val {
             ReadTimeout => StatusCode::REQUEST_TIMEOUT,
-            Read | BadContentType | BadPath | OciSpec | BadReference | BadRequest | ArchMismatch | OsMismatch => {
-                StatusCode::BAD_REQUEST
-            }
+            Read | BadContentType | BadPath | OciSpec | BadReference | BadRequest
+            | ArchMismatch | OsMismatch => StatusCode::BAD_REQUEST,
             QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             WorkerRecv | IoFileCreate | ResponseRead | Worker | ImageService | Internal => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -121,8 +120,7 @@ impl HttpRunnerApp {
         REQ_RUN_COUNT.inc();
         let req_parts: &http::request::Parts = session.req_header();
 
-        let parsed_path =
-            apiv2::runi::parse_path(req_parts.uri.path()).ok_or(Error::BadPath)?;
+        let parsed_path = apiv2::runi::parse_path(req_parts.uri.path()).ok_or(Error::BadPath)?;
         trace!("parsed_path {:?}", parsed_path);
 
         if parsed_path.arch != self.arch {

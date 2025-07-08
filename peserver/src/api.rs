@@ -43,9 +43,9 @@ impl From<ContentType> for &str {
 pub mod v2 {
     pub mod runi {
         use super::super::ContentType;
+        use oci_spec::image::{Arch, Os};
         use peinit;
         use serde::{Deserialize, Serialize};
-        use oci_spec::image::{Arch, Os};
 
         pub const PREFIX: &str = "/api/v2/runi/";
 

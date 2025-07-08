@@ -47,7 +47,7 @@ function checkStringArray(x): string[] | null {
     if (!x.every((y) => typeof y === 'string')) return null;
     return x;
 }
-function checkFiles(x): ({p: string, s: string} | {p: string, b: string})[] | null {
+function checkFiles(x): ({path: string, data: string | ArrayBuffer})[] | null {
     if (!Array.isArray(x)) return null;
     let ret = [];
     for (let y of x) {
