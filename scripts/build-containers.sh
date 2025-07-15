@@ -2,7 +2,7 @@
 
 set -e
 
-./scripts/build.sh release
+# ./scripts/build.sh release
 
 tag=latest
 
@@ -17,3 +17,4 @@ podman build -t pe-image-service:$tag -f containers/pe-image-service .
 podman build -t pe-caddy:$tag -f containers/pe-caddy .
 podman build -t pe-caddy-dev:$tag -f containers/pe-caddy-dev .
 
+podman build -t pe-server-gh:$tag -f containers/pe-server-gh .

@@ -1,0 +1,23 @@
+[Unit]
+Description=PE gh gist service
+
+[Service]
+Restart=always
+StandardError=journal
+RuntimeDirectory=program-explorer
+RuntimeDirectoryPreserve=yes
+
+[Container]
+Image=localhost/pe-server-gh:latest
+Network=host
+
+# okay so using journald doesn't actually pass through JOURNAL_STREAM, so do it manually
+Environment=JOURNAL_STREAM=${JOURNAL_STREAM}
+LogDriver=passthrough
+
+Volume=${RUNTIME_DIRECTORY}:${RUNTIME_DIRECTORY}:z
+
+Exec=--uds=${RUNTIME_DIRECTORY}/gh.sock
+
+[Install]
+WantedBy=default.target
