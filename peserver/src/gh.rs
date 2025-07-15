@@ -144,12 +144,22 @@ async fn main() {
     match (args.tcp, args.uds) {
         (Some(addr), None) => {
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    tokio::signal::ctrl_c().await.unwrap();
+                })
+                .await
+                .unwrap();
         }
         (None, Some(addr)) => {
             let _ = std::fs::remove_file(&addr);
             let listener = tokio::net::UnixListener::bind(addr).unwrap();
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    tokio::signal::ctrl_c().await.unwrap();
+                })
+                .await
+                .unwrap();
         }
         (Some(_), Some(_)) => panic!("cannot use --tcp and --uds"),
         (None, None) => panic!("muse use --tcp or --uds"),

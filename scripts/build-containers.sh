@@ -2,6 +2,8 @@
 
 set -e
 
+# disabling for now b/c I have to run this build step in a container,
+# but then don't have access to podman inside the container
 # ./scripts/build.sh release
 
 tag=latest
