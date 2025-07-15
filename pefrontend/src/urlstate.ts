@@ -11,6 +11,7 @@ export type UrlHashState = {
     env: string | null,
     image: string | null,
     files: {path: string, data: string}[] | null,
+    gist: string,
 }
 
 type UrlHashStateSettings = {
@@ -92,6 +93,7 @@ function parseUrlHashState(s): UrlHashState {
         env: null,
         image: null,
         files: null,
+        gist: null,
     };
     let parts = s.substring(1).split('&');
     for (let part of parts) {
@@ -105,6 +107,9 @@ function parseUrlHashState(s): UrlHashState {
             ret.image = checkString(settings.image);
             ret.env = checkString(settings.env);
             ret.files = checkFiles(settings.files);
+        }
+        else if (a === 'gist') {
+            ret.gist = b;
         }
     }
     return ret;

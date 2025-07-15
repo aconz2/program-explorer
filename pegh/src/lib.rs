@@ -65,7 +65,8 @@ impl Client {
         let client = reqwest::Client::builder().https_only(true).build()?;
         Ok(Self {
             client,
-            sem: Arc::new(Semaphore::new(8)),
+            // https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api?apiVersion=2022-11-28#avoid-concurrent-requests
+            sem: Arc::new(Semaphore::new(1)),
         })
     }
 

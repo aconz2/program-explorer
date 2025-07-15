@@ -12,7 +12,8 @@
 		"codemirror": "^6.0.1",
 		"monaco-editor": "^0.52.0",
 		"preact": "^10.22.1",
-		"shlex": "^2.1.2"
+		"shlex": "^2.1.2",
+		"toml": "^3.0.0"
 	},
 	"devDependencies": {
 		"@preact/preset-vite": "^2.9.0",

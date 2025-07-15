@@ -72,4 +72,9 @@ export namespace Api {
         return `${window.location.origin}/api/v2/runi/${arch}/${os}/${reference}`;
     }
 
+    export function gh_gist(id: string, version: string | null) : string {
+        let suffix = version === null ? '' : `/${version}`;
+        return `${window.location.origin}/api/gh/gist/${id}${suffix}`;
+    }
+
 }

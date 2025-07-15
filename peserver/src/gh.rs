@@ -78,7 +78,16 @@ async fn get_gist_impl(
         info!("get_gist hit {key}");
     }
     let value: Box<[u8]> = entry.into_value();
-    Ok(([(header::CONTENT_TYPE, "application/json")], value))
+    let cache_header = if version.is_some() {
+        "immutable"
+    } else {
+        "max-age=3600"
+    };
+    let headers = [
+        (header::CONTENT_TYPE, "application/json"),
+        (header::CACHE_CONTROL, cache_header),
+    ];
+    Ok((headers, value))
 }
 
 async fn retreive_gist(
@@ -128,11 +137,10 @@ async fn main() {
         cache: cache,
     });
     let app = Router::new()
-        .route("/{gist}", get(get_gist))
-        .route("/{gist}/{version}", get(get_gist_version))
+        .route("/gist/{gist}", get(get_gist))
+        .route("/gist/{gist}/{version}", get(get_gist_version))
         .with_state(ctx);
 
-    // run our app with hyper, listening globally on port 3000
     match (args.tcp, args.uds) {
         (Some(addr), None) => {
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

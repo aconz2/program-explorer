@@ -16,7 +16,7 @@ name = "worker"
 path = "src/worker.rs"
 
 [[bin]]
-name = "gh"
+name = "ghserver"
 path = "src/gh.rs"
 
 [lib]

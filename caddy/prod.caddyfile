@@ -17,6 +17,11 @@ https://{$CADDY_HOST:localhost} {
     }
 
     encode zstd gzip
+
+    handle_path /api/gh/* {
+        # uri is passed on with /api/gh stripped. Maybe the other should be like that too?
+        reverse_proxy unix/{$RUNTIME_DIRECTORY}/gh.sock
+    }
     reverse_proxy /api/* unix/{$RUNTIME_DIRECTORY}/lb.sock
     root * {$CADDY_FILE_ROOT:/www}
     file_server

@@ -24,7 +24,10 @@ async fn main() {
     //    client.get_gist_latest(&args.gist).await.unwrap()
     //};
 
-    let gist = client.get_gist(&args.gist, args.version.as_deref()).await.unwrap();
+    let gist = client
+        .get_gist(&args.gist, args.version.as_deref())
+        .await
+        .unwrap();
 
     if let Some(gist) = gist {
         println!("gist.version = {}", gist.version);

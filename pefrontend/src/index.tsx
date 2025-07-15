@@ -9,6 +9,7 @@ import * as pearchive from './pearchive';
 import {Api} from './api';
 import {bufToHex, debounce, parseEnvText, bufToBase64} from './util';
 import {UrlHashState, loadUrlHashState, encodeUrlHashState} from './urlstate';
+import {parsePeToml} from './petoml';
 
 import './style.css';
 
@@ -16,6 +17,8 @@ import './style.css';
 const DEFAULT_IMAGE = "index.docker.io/library/busybox@sha256:086417a48026173aaadca4ce43a1e4b385e8e62cc738ba79fc6637049674cac0";
 const DEFAULT_ARCH = "amd64";
 const DEFAULT_OS = "linux";
+
+const PETOML_NAME = "pe.toml";
 
 const DEFAULT_INPUT_FILES = [
     {path:'test.sh', data:`
@@ -483,6 +486,11 @@ class App extends Component {
     get outputEditor(): Editor { return this.r_outputEditor.current; }
 
     componentDidMount() {
+        if (this.urlHashState.gist != null) {
+            // TODO only supports id, not version
+            this.loadFromGhGist(this.urlHashState.gist, null);
+            return;
+        }
         if (this.urlHashState.files != null) {
             console.log('loading files from url');
             this.inputEditor.setFiles(this.urlHashState.files);
@@ -493,12 +501,6 @@ class App extends Component {
         this.s.cmd.value = this.urlHashState.cmd ?? 'sh /run/pe/input/test.sh';
         this.s.selectedImage.value = this.urlHashState.image ?? DEFAULT_IMAGE;
 
-        if (this.urlHashState.expand.help === true) {
-            this.r_helpDetails.current.open = true;
-        }
-        if (this.urlHashState.expand.more === true) {
-            this.r_moreDetails.current.open = true;
-        }
         if (this.urlHashState.env != null) {
             this.r_envEditor.current.replace(this.urlHashState.env);
             this.onEnvChange(this.urlHashState.env);
@@ -506,6 +508,48 @@ class App extends Component {
         if (this.urlHashState.stdin != null) {
             this.s.selectedStdin.value = this.urlHashState.stdin;
         }
+
+        // for dev
+        if (this.urlHashState.expand.help === true) {
+            this.r_helpDetails.current.open = true;
+        }
+        if (this.urlHashState.expand.more === true) {
+            this.r_moreDetails.current.open = true;
+        }
+    }
+
+    async loadFromGhGist(id, version) {
+        let req = new Request(Api.gh_gist(id, version), {
+            method: 'GET',
+        });
+        const response = await fetch(req);
+        if (!response.ok) {
+            console.error(response);
+            return;
+        }
+        let gist = await response.json();
+        let files = [];
+        for (let [path, data] of Object.entries(gist.files)) {
+            if (path === PETOML_NAME) {
+                let parsed = parsePeToml(data);
+                if (parsed.env !== null) {
+                    this.r_envEditor.current.replace(parsed.env);
+                    this.onEnvChange(parsed.env);
+                }
+                if (parsed.stdin !== null) {
+                    this.s.selectedStdin.value = parsed.stdin;
+                }
+                if (parsed.cmd !== null) {
+                    this.s.cmd.value = parsed.cmd;
+                }
+                if (parsed.image !== null) {
+                    this.s.selectedImage.value = parsed.image
+                }
+            } else {
+                files.push({path, data});
+            }
+        }
+        this.inputEditor.setFiles(files);
     }
 
     async run() {
@@ -598,6 +642,14 @@ class App extends Component {
 
     onStdinSelect(event) {
         this.s.selectedStdin.value = event.target.value;
+    }
+
+    onOsSelect(event) {
+        this.s.selectedOs.value = event.target.value;
+    }
+
+    onArchSelect(event) {
+        this.s.selectedArch.value = event.target.value;
     }
 
     onCmdChange(event) {
