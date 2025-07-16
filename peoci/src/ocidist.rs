@@ -625,7 +625,7 @@ impl Client {
 
         let registry = reference.resolve_registry();
         let end: UtcInstant = if let Some(reset) = get_ratelimit_reset_header(res.headers()) {
-            let now = chrono::Utc::now();
+            let now = Utc::now();
             let time = reset
                 .try_into() // u64 -> i64
                 .ok()
@@ -646,7 +646,7 @@ impl Client {
                 res.status(),
                 registry
             );
-            chrono::Utc::now() + Duration::from_secs(DEFAULT_RATELIMIT_RESET)
+            Utc::now() + Duration::from_secs(DEFAULT_RATELIMIT_RESET)
         };
 
         warn!(
@@ -932,7 +932,7 @@ fn parse_ratelimit_remaining_str(input: &str) -> Option<RatelimitRemaining> {
 }
 
 // https://www.ietf.org/archive/id/draft-polli-ratelimit-headers-02.html#section-3.3
-// returns whatever number is in the header. RFC ways it is the number of seconds until reset, but
+// returns whatever number is in the header. RFC says it is the number of seconds until reset, but
 // github and docker both specify that it is the timestamp when it resets! Dockers says "unix time"
 // and github says "UTC epoch seconds"
 // https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28#checking-the-status-of-your-rate-limit

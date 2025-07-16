@@ -2851,8 +2851,10 @@ dependencies = [
 name = "pegh"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap 4.5.40",
  "env_logger",
+ "futures",
  "log",
  "reqwest",
  "serde",
@@ -2934,6 +2936,7 @@ dependencies = [
  "chrono",
  "clap 4.5.40",
  "env_logger",
+ "futures",
  "hex",
  "log",
  "moka",

@@ -76,6 +76,7 @@ lzzzz = "2.0.0"
 chrono = "0.4.41"
 axum = "0.8.4"
 pegh = { version = "0.1.0", path = "pegh" }
+futures = "0.3.31"
 
 # reminder on how to do this
 # [patch.crates-io]

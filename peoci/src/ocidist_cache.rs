@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Instant;
 
+use futures::{StreamExt, stream::FuturesOrdered};
 use log::{error, info};
 use moka::future::Cache;
 use oci_spec::{
@@ -139,6 +140,7 @@ pub struct Client {
     client: ocidist::Client,
     dirs: Arc<Dirs>,
     counters: Arc<Counters>,
+    // TODO this should maybe be per registry + a global one?
     connection_semaphore: Arc<Semaphore>,
 
     // stores ref quay.io/fedora/fedora:42 -> manifest sha256:digest
@@ -442,44 +444,25 @@ impl Client {
         reference: &Reference,
         manifest: &spec::ImageManifest,
     ) -> Result<Vec<OwnedFd>, Arc<Error>> {
-        use tokio::task::JoinSet;
-        let mut set = JoinSet::new();
-        let n = manifest.layers.len();
-        for (i, layer) in manifest.layers.iter().enumerate() {
-            let reference = reference.clone();
-            // TODO we are converting LayerDescriptor to oci_spec::image::Descriptor
-            // can we push this down or make get_blob more generic
+        let mut futs = FuturesOrdered::new();
+        for layer in &manifest.layers {
             let descriptor = (*layer).into();
-            let client = self.clone();
-            set.spawn(async move { (i, client.get_blob(&reference, &descriptor).await) });
+            futs.push_back(async move { self.get_blob(&reference, &descriptor).await });
         }
-        // todo is there a nicer JoinSet collect into order?
-        let mut ret = (0..n).map(|_| None).collect::<Vec<_>>();
-        while let Some(next) = set.join_next().await {
-            match next {
-                Ok((i, Ok(fd))) => {
-                    let _ = ret.get_mut(i).ok_or(Error::Oob)?.replace(fd);
-                }
-                Ok((_, Err(e))) => {
-                    return Err(e);
-                }
-                Err(e) if e.is_cancelled() => {
-                    return Err(Error::Canceled.into());
-                }
-                Err(e) if e.is_panic() => {
-                    return Err(Error::UnexpectedPanic.into());
+        // something like this should work maybe?
+        // futs.collect::<Result<Vec<_>, _>>()
+        let mut ret = Vec::with_capacity(futs.len());
+        while let Some(result) = futs.next().await {
+            match result {
+                Ok(x) => {
+                    ret.push(x);
                 }
                 Err(e) => {
-                    error!("unknown error {:?}", e);
-                    return Err(Error::Unknown.into());
+                    return Err(e);
                 }
             }
         }
-
-        Ok(ret
-            .into_iter()
-            .map(|x| x.ok_or(Error::MissingResult))
-            .collect::<Result<Vec<_>, _>>()?)
+        Ok(ret)
     }
 
     async fn load_ref_cache(&mut self) -> Result<(), Error> {
